@@ -1,0 +1,244 @@
+#!/usr/bin/env python
+"""Change the account from a terminal, with a human driving.
+
+    ./.venv/bin/python scripts/manage.py find campaign "retargeting"
+    ./.venv/bin/python scripts/manage.py campaign pause --name "..." --dry-run
+    ./.venv/bin/python scripts/manage.py adset set-budget --id 123 --amount 50.00
+    ./.venv/bin/python scripts/manage.py ad pause --id 456
+
+NOTHING IS SENT WITHOUT A CONFIRMATION. Without ``--yes`` every mutating
+command prints the plan, sends it to Meta with ``execution_options=
+["validate_only"]`` so the server-side check runs and nothing changes, and then
+asks for a typed ``yes``.
+
+``--dry-run`` stops after that validation. It is not a local guess: Meta really
+does check the request and really does change nothing.
+
+**This is the human half of the bargain the MCP server makes.** The server
+deliberately exposes no create and no delete, because those carry declarations
+and irreversibility that belong to a person. This is where a person does them --
+in their own scrollback, under their own hands.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from metaads_reporting import logdb  # noqa: E402
+from metaads_reporting.config import ConfigError  # noqa: E402
+from metaads_reporting.currency import format_money, from_minor_units  # noqa: E402
+from metaads_reporting.write import MutatingMetaAdsClient, MutationError, execute  # noqa: E402
+from metaads_reporting.write import ads, adsets, campaigns  # noqa: E402
+
+ENTITIES = {"campaign": campaigns, "adset": adsets, "ad": ads}
+
+
+def confirm(plan, client, *, assume_yes: bool, dry_run: bool) -> bool:
+    """Validate against Meta, show the plan, and ask.
+
+    The validation happens BEFORE the question on purpose: there is no point
+    asking a human to approve something Meta is going to reject, and the
+    rejection usually says something they need to read.
+    """
+    print()
+    print(plan.render())
+    print()
+
+    try:
+        result = execute(client, plan, apply=False)
+    except MutationError as exc:
+        print(f"Meta refused this before it was applied:\n{exc}", file=sys.stderr)
+        return False
+    print(f"Meta validated it: {result}. Nothing has been changed.")
+
+    if dry_run:
+        print("--dry-run: stopping here.")
+        return False
+    if assume_yes:
+        return True
+
+    print()
+    answer = input('Apply this to the LIVE account? Type "yes" to confirm: ').strip()
+    if answer != "yes":
+        print("Not applied.")
+        return False
+    return True
+
+
+def apply_plan(plan, client, *, assume_yes: bool, dry_run: bool) -> int:
+    if not confirm(plan, client, assume_yes=assume_yes, dry_run=dry_run):
+        return 0
+    result = execute(client, plan, apply=True)
+    if not result.success:
+        print(
+            f"Meta accepted the request but did not confirm the change: "
+            f"{result.response!r}. Check Ads Manager before retrying.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"APPLIED: {plan.entity} {plan.node_id}")
+    return 0
+
+
+def parse_amount(raw: str) -> Decimal:
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, AttributeError) as exc:
+        raise SystemExit(
+            f'error: amount must be a decimal in the account currency, e.g. "50.00" '
+            f"-- got {raw!r}. Never pass minor units."
+        ) from exc
+    if value < 0:
+        raise SystemExit(f"error: amount cannot be negative, got {value}.")
+    return value
+
+
+def cmd_find(client, args) -> int:
+    module = ENTITIES[args.entity]
+    rows = module.search(client, args.needle)
+    if not rows:
+        print(f"No {args.entity} matching {args.needle!r}.")
+        return 1
+    currency = client.currency()
+    for row in rows:
+        candidate = module.as_candidate(row)
+        line = candidate.render()
+        budget = from_minor_units(row.get("daily_budget"), currency)
+        if budget is not None:
+            line += f"  budget {format_money(budget, currency)}/day"
+        print(line)
+    print(f"\n{len(rows)} {args.entity}(s).")
+    return 0
+
+
+def cmd_status(client, args, module, id_kwarg) -> int:
+    plan = module.plan_set_status(
+        client,
+        status=args.status,
+        name=args.name,
+        **{id_kwarg: args.id},
+    )
+    return apply_plan(plan, client, assume_yes=args.yes, dry_run=args.dry_run)
+
+
+def cmd_budget(client, args, module, id_kwarg) -> int:
+    plan = module.plan_set_daily_budget(
+        client,
+        amount=parse_amount(args.amount),
+        name=args.name,
+        override_guardrail=args.override_budget_guardrail,
+        **{id_kwarg: args.id},
+    )
+    return apply_plan(plan, client, assume_yes=args.yes, dry_run=args.dry_run)
+
+
+def cmd_bid(client, args) -> int:
+    plan = adsets.plan_set_bid_amount(
+        client, amount=parse_amount(args.amount), ad_set_id=args.id, name=args.name
+    )
+    return apply_plan(plan, client, assume_yes=args.yes, dry_run=args.dry_run)
+
+
+def add_target(parser) -> None:
+    """Every mutating subcommand is addressed by id or by name, never both."""
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--id", help="the object id")
+    group.add_argument("--name", help="exact name first, then substring")
+    parser.add_argument("--dry-run", action="store_true", help="validate and stop")
+    parser.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    find = sub.add_parser("find", help="search for an object by name")
+    find.add_argument("entity", choices=sorted(ENTITIES))
+    find.add_argument("needle", nargs="?", default=None)
+
+    campaign = sub.add_parser("campaign", help="change a campaign").add_subparsers(
+        dest="action", required=True
+    )
+    for action in ("pause", "activate"):
+        p = campaign.add_parser(action)
+        add_target(p)
+    budget = campaign.add_parser("set-budget", help="campaign-budget campaigns only")
+    budget.add_argument("--amount", required=True, help='e.g. "250.00"')
+    budget.add_argument("--override-budget-guardrail", action="store_true")
+    add_target(budget)
+
+    adset = sub.add_parser("adset", help="change an ad set").add_subparsers(
+        dest="action", required=True
+    )
+    for action in ("pause", "activate"):
+        p = adset.add_parser(action)
+        add_target(p)
+    adset_budget = adset.add_parser("set-budget")
+    adset_budget.add_argument("--amount", required=True, help='e.g. "50.00"')
+    adset_budget.add_argument("--override-budget-guardrail", action="store_true")
+    add_target(adset_budget)
+    adset_bid = adset.add_parser("set-bid", help="bid cap / cost target")
+    adset_bid.add_argument("--amount", required=True, help='e.g. "3.50"')
+    add_target(adset_bid)
+
+    ad = sub.add_parser("ad", help="change one ad").add_subparsers(
+        dest="action", required=True
+    )
+    for action in ("pause", "activate"):
+        p = ad.add_parser(action)
+        add_target(p)
+
+    return parser
+
+
+STATUS_FOR = {"pause": "PAUSED", "activate": "ACTIVE"}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    with logdb.record_tool_call(f"manage.{args.command}", vars(args)):
+        try:
+            client = MutatingMetaAdsClient.from_env()
+        except ConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+        try:
+            return _dispatch(client, args)
+        except MutationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+
+def _dispatch(client, args) -> int:
+    if args.command == "find":
+        return cmd_find(client, args)
+
+    module, id_kwarg = {
+        "campaign": (campaigns, "campaign_id"),
+        "adset": (adsets, "ad_set_id"),
+        "ad": (ads, "ad_id"),
+    }[args.command]
+
+    if args.action in STATUS_FOR:
+        args.status = STATUS_FOR[args.action]
+        return cmd_status(client, args, module, id_kwarg)
+    if args.action == "set-budget":
+        return cmd_budget(client, args, module, id_kwarg)
+    if args.action == "set-bid":
+        return cmd_bid(client, args)
+    raise SystemExit(f"error: unknown action {args.action!r}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
