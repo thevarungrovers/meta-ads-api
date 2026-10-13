@@ -1,0 +1,40 @@
+# ---- Secrets: never commit ----
+.env
+# Three patterns, because none covers the others: `.env` is the exact name,
+# `.env.*` catches .env.local / .env.production, and `*.env` catches
+# staging.env. The negation must come last to survive them all.
+.env.*
+*.env
+!.env.example
+# A Meta System User token is a bearer credential with no second factor and a
+# very long life. Broad on purpose: it must never slip in under any name.
+*access_token*
+*system_user*
+!scripts/token_info.py
+*.pem
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Generated reports / exports ----
+data/
+output/
+
+# ---- The kill switch lives here, and nothing else should be committed ----
+audit/
+
+# ---- The log database: tool calls, API calls, changes and mutations ----
+# Real ad account ids and campaign names. -wal and -shm are WAL sidecars.
+logs/
+
+# ---- OS / editor ----
+.DS_Store
+.idea/
+.vscode/

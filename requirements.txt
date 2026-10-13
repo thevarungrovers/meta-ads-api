@@ -1,0 +1,20 @@
+# Meta Marketing API — pinned deliberately.
+#
+# NO facebook-business SDK, on purpose. The Graph API is plain HTTP, and its
+# read/write split IS the HTTP method: GET reads, POST writes, DELETE deletes.
+# That maps exactly onto the ReadOnly/Mutating client split this repo is built
+# around, and it is enforceable in one place -- see metaads_reporting/graph.py.
+# The SDK hangs an `.api_update()` and a `.remote_delete()` off every object it
+# hands you, which would put a write one attribute access away from every read.
+
+requests==2.34.2
+python-dotenv==1.2.4
+pandas==3.0.6
+
+# --- MCP server (metaads_mcp/) ---
+# Lets an AI agent drive this library over stdio. Pinned with the rest: the
+# server's tool decorators and ToolAnnotations are API surface, not plumbing.
+mcp==2.3.0
+
+# --- dev / test ---
+pytest==9.1.1
