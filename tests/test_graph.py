@@ -5,9 +5,14 @@ from __future__ import annotations
 import json
 
 import pytest
+import requests
 
 from metaads_reporting.graph import (
+    MAX_WRITE_RETRIES,
+    RATE_LIMIT_BACKOFF_SECONDS,
     READ_METHODS,
+    WRITE_RATE_LIMIT_WINDOW_SECONDS,
+    backoff_delay,
     WRITE_METHODS,
     GraphAPIError,
     GraphError,
@@ -205,17 +210,128 @@ def test_a_permanent_error_is_not_retried(monkeypatch):
     assert len(session.calls) == 1
 
 
-def test_a_write_is_never_retried(monkeypatch):
-    """A POST that timed out may already have landed. Repeating it is a second change.
+# --- which writes may be repeated, and which may never be ------------------
+#
+# Found live on 2026-10-13: an apply succeeded and the revert issued straight
+# after it was refused with code 613 -- "1 call per 30 seconds" on a campaign
+# node. The blanket "writes never retry" rule turned that into a fatal error and
+# left the account in the changed state. The safety net failed at exactly the
+# moment it was needed.
+#
+# The rule was too coarse. A rate limit is an UNAMBIGUOUS refusal -- Meta did
+# nothing -- so repeating it is safe. A timeout or a 5xx is ambiguous in the
+# dangerous direction and must still never be repeated.
 
-    This is the asymmetry the whole no-retry-on-write rule exists for, and it is
-    the reason an intent with no outcome in the ledger means "go and look".
-    """
+
+def test_a_write_IS_retried_after_a_rate_limit(monkeypatch):
+    """The live failure. Meta refused it outright, so nothing was applied."""
     monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
-    session = FakeSession([error_response(4, status=400)])
+    session = FakeSession(
+        [error_response(613, subcode=4841018, status=400), FakeResponse({"success": True})]
+    )
+    assert transport(session).request("POST", "123", data={"status": "PAUSED"}) == {
+        "success": True
+    }
+    assert len(session.calls) == 2
+
+
+def test_a_write_is_NOT_retried_after_a_transport_failure(monkeypatch):
+    """The request may have reached Meta with the answer lost on the way back.
+    Repeating it makes a second change nobody asked for."""
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+
+    class Dead:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, *args, **kwargs):
+            self.calls.append(args)
+            raise requests.ConnectionError("boom")
+
+    session = Dead()
     with pytest.raises(GraphAPIError):
         transport(session).request("POST", "123", data={"status": "PAUSED"})
-    assert len(session.calls) == 1, "a write was retried"
+    assert len(session.calls) == 1, "a write was retried after a transport error"
+
+
+def test_a_write_is_NOT_retried_after_a_5xx(monkeypatch):
+    """A 500 can mean the write landed and the response was lost."""
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+    session = FakeSession(
+        [FakeResponse({"error": {"message": "x"}}, status=500), FakeResponse({"success": True})]
+    )
+    with pytest.raises(GraphAPIError):
+        transport(session).request("POST", "123", data={"status": "PAUSED"})
+    assert len(session.calls) == 1
+
+
+def test_a_write_is_NOT_retried_after_an_ambiguous_transient_code(monkeypatch):
+    """Codes 1 and 2 can be returned after the request was already processed."""
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+    for code in (1, 2):
+        session = FakeSession([error_response(code, status=400), FakeResponse({"success": True})])
+        with pytest.raises(GraphAPIError):
+            transport(session).request("POST", "123", data={"status": "PAUSED"})
+        assert len(session.calls) == 1, f"code {code} was retried on a write"
+
+
+def test_a_read_still_retries_everything_transient(monkeypatch):
+    """A duplicate read costs only time, so the read budget stays wide."""
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+    for failure in (
+        error_response(2, status=400),
+        FakeResponse({"error": {"message": "x"}}, status=500),
+    ):
+        session = FakeSession([failure, FakeResponse({"id": "1"})])
+        assert transport(session).get("me") == {"id": "1"}
+        assert len(session.calls) == 2
+
+
+def test_write_rate_limit_retries_are_bounded(monkeypatch):
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+    session = FakeSession([error_response(613, status=400) for _ in range(10)])
+    with pytest.raises(GraphAPIError):
+        transport(session).request("POST", "123", data={"status": "PAUSED"})
+    assert len(session.calls) == MAX_WRITE_RETRIES + 1
+
+
+def test_a_permanent_write_error_is_not_retried(monkeypatch):
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+    session = FakeSession([error_response(100, status=400)])
+    with pytest.raises(GraphAPIError):
+        transport(session).request("POST", "123", data={"status": "PAUSED"})
+    assert len(session.calls) == 1
+
+
+def test_a_rate_limit_waits_longer_than_the_window_it_broke():
+    """Meta's write limit on a campaign node is 1 call / 30s. An exponential
+    backoff starting at 1s spends every retry inside the same window."""
+    rate = GraphAPIError("x", status=400, code=613)
+    first = backoff_delay(0, rate)
+    second = backoff_delay(1, rate)
+    ordinary = backoff_delay(0, GraphAPIError("x", status=400, code=100))
+
+    assert first > WRITE_RATE_LIMIT_WINDOW_SECONDS, first
+    assert second > first, "backoff did not grow"
+    assert ordinary < WRITE_RATE_LIMIT_WINDOW_SECONDS, "non-rate-limit waited too long"
+
+
+def test_jitter_can_only_lengthen_a_rate_limit_wait():
+    """So a jittered wait can never dip back under the window."""
+    rate = GraphAPIError("x", status=400, code=613)
+    delays = [backoff_delay(0, rate) for _ in range(500)]
+    assert min(delays) >= RATE_LIMIT_BACKOFF_SECONDS
+    assert min(delays) > WRITE_RATE_LIMIT_WINDOW_SECONDS
+    assert len(set(delays)) > 1, "no jitter at all -- callers would retry in lockstep"
+
+
+def test_is_rate_limit_distinguishes_refusal_from_ambiguity():
+    assert GraphAPIError("x", status=400, code=613).is_rate_limit
+    assert GraphAPIError("x", status=429).is_rate_limit
+    assert GraphAPIError("x", status=400, code=80004).is_rate_limit
+    assert not GraphAPIError("x", status=500).is_rate_limit
+    assert not GraphAPIError("x", status=400, code=2).is_rate_limit
+    assert not GraphAPIError("x", status=400, code=100).is_rate_limit
 
 
 def test_retries_are_bounded(monkeypatch):

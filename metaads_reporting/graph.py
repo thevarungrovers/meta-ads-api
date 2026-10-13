@@ -56,23 +56,47 @@ WRITE_METHODS = frozenset({"POST", "DELETE"})
 #: keep passing after somebody added a fifth.
 NON_READ_METHODS = WRITE_METHODS | frozenset({"PUT", "PATCH"})
 
-#: Error codes worth trying again. Meta returns these for transient conditions:
-#:   1, 2     unknown / temporary service failure
+#: RATE LIMITS. These are UNAMBIGUOUS REFUSALS: Meta rejected the request
+#: before doing anything with it, so nothing was applied. That distinction is
+#: what makes them safe to repeat even for a write.
 #:   4, 17    application- and user-level rate limits
 #:   32       page-level rate limit
 #:   341      application limit reached
-#:   613      calls-per-second limit
+#:   613      calls-per-second / concurrent-request limit
 #:   80000+   the per-product Marketing API rate limits
-RETRYABLE_CODES = frozenset({1, 2, 4, 17, 32, 341, 613})
-RETRYABLE_CODE_RANGE = range(80000, 80100)
+RATE_LIMIT_CODES = frozenset({4, 17, 32, 341, 613})
+RATE_LIMIT_CODE_RANGE = range(80000, 80100)
 
-RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+#: Transient but AMBIGUOUS: "unknown error" and "temporary service failure" can
+#: both be returned after the request was already processed. Retried on a read,
+#: never on a write.
+AMBIGUOUS_TRANSIENT_CODES = frozenset({1, 2})
 
-#: A read is cheap to repeat; a write is not. The transport retries anyway --
-#: but ONLY for GET, because a POST that timed out may well have landed, and
-#: repeating it would make a second change nobody asked for. See `_retries_for`.
+RETRYABLE_CODES = RATE_LIMIT_CODES | AMBIGUOUS_TRANSIENT_CODES
+RETRYABLE_CODE_RANGE = RATE_LIMIT_CODE_RANGE
+
+#: 429 is a rate limit and unambiguous. The 5xx family is NOT -- the write may
+#: have been applied and the response lost -- so it is retried on reads only.
+RATE_LIMIT_STATUS = frozenset({429})
+RETRYABLE_STATUS = RATE_LIMIT_STATUS | frozenset({500, 502, 503, 504})
+
+#: A read is cheap to repeat. A write is only repeatable when Meta has told us,
+#: explicitly, that it did nothing -- see `may_retry`.
 MAX_READ_RETRIES = 4
-MAX_WRITE_RETRIES = 0
+MAX_WRITE_RETRIES = 3
+
+#: *** META'S WRITE LIMIT ON A CAMPAIGN NODE IS 1 CALL PER 30 SECONDS. ***
+#: (code 613, subcode 4841018: "exceeded the concurrent request rate limit of
+#: 1 calls per 30 seconds"). Observed live, not from the docs.
+#:
+#: This matters more than a normal rate limit, because the call most likely to
+#: hit it is a REVERT issued straight after the apply it is undoing -- which is
+#: the safety net failing at exactly the moment it is needed, leaving the
+#: account in the changed state. An exponential backoff starting at one second
+#: would burn every retry inside the same 30-second window and change nothing,
+#: so a rate-limit wait starts ABOVE the window instead.
+WRITE_RATE_LIMIT_WINDOW_SECONDS = 30.0
+RATE_LIMIT_BACKOFF_SECONDS = 32.0
 
 DEFAULT_TIMEOUT = 60.0
 
@@ -118,11 +142,26 @@ class GraphAPIError(GraphError):
 
     @property
     def retryable(self) -> bool:
+        """Worth sending again -- on a READ. See :meth:`is_rate_limit` for writes."""
         if self.status in RETRYABLE_STATUS:
             return True
         if self.code is None:
             return False
         return self.code in RETRYABLE_CODES or self.code in RETRYABLE_CODE_RANGE
+
+    @property
+    def is_rate_limit(self) -> bool:
+        """Meta refused this because of a rate limit, so NOTHING was applied.
+
+        The one class of failure a write may be repeated after. Every other
+        failure is either permanent (repeating it just fails again) or
+        ambiguous (the write may have landed and the answer been lost).
+        """
+        if self.status in RATE_LIMIT_STATUS:
+            return True
+        if self.code is None:
+            return False
+        return self.code in RATE_LIMIT_CODES or self.code in RATE_LIMIT_CODE_RANGE
 
     @property
     def is_token_problem(self) -> bool:
@@ -323,17 +362,33 @@ class GraphTransport:
 
     @staticmethod
     def _retries_for(method: str) -> int:
-        """Reads retry; writes do not.
-
-        A GET that times out can be repeated for free. A POST that times out
-        may already have changed the account -- the request reached Meta and
-        the response did not reach us -- so repeating it risks a second change
-        nobody asked for. On a budget field a double apply is invisible; on
-        anything incremental it is not. The write path handles failure by
-        leaving an intent in the ledger with no outcome, which is the honest
-        record of "this may have landed".
-        """
+        """How many extra attempts this method is allowed at most."""
         return MAX_READ_RETRIES if method in READ_METHODS else MAX_WRITE_RETRIES
+
+    @staticmethod
+    def may_retry(method: str, error: GraphAPIError) -> bool:
+        """Whether this failure can be sent again. The whole safety argument.
+
+        A READ may be repeated after anything transient: it changes nothing, so
+        a duplicate costs only time.
+
+        A WRITE may be repeated after exactly one thing -- a RATE LIMIT --
+        because that is the only failure where Meta has told us it did nothing.
+        Everything else is either permanent, or ambiguous in the dangerous
+        direction: a 500, or a timeout, can mean the write was applied and the
+        response was lost, and repeating that makes a second change nobody
+        asked for.
+
+        The distinction is not academic. Meta's write limit on a campaign node
+        is one call per 30 seconds, so the call most likely to be refused is a
+        revert issued straight after the apply it undoes. Treating that refusal
+        as fatal leaves the account in the changed state -- the safety net
+        failing exactly when it is needed. Treating it as retryable is both
+        safe and necessary.
+        """
+        if method in READ_METHODS:
+            return error.retryable
+        return error.is_rate_limit
 
     # -- the one request path ----------------------------------------------
 
@@ -386,7 +441,13 @@ class GraphTransport:
                         f"{type(exc).__name__}: {exc}",
                         path=_log_path(url),
                     )
-                    if attempt + 1 >= attempts:
+                    # A TRANSPORT failure on a write is never retried, whatever
+                    # the attempt budget says. The request may have reached Meta
+                    # and been applied with the response lost on the way back;
+                    # there is no way to tell from here, and a retry would make
+                    # a second change. The ledger's intent-with-no-outcome row
+                    # is the honest record of that.
+                    if method in WRITE_METHODS or attempt + 1 >= attempts:
                         raise last_error from exc
                     _sleep_backoff(attempt)
                     continue
@@ -401,7 +462,7 @@ class GraphTransport:
 
                 last_error = _as_error(payload, response.status_code, url)
                 slot["status"] = response.status_code
-                if attempt + 1 >= attempts or not last_error.retryable:
+                if attempt + 1 >= attempts or not self.may_retry(method, last_error):
                     raise last_error
                 _sleep_backoff(attempt, last_error)
 
@@ -534,11 +595,29 @@ def _log_path(url: str) -> str:
         return "(unparseable url)"
 
 
-def _sleep_backoff(attempt: int, error: GraphAPIError | None = None) -> None:
-    """Exponential backoff with jitter.
+def backoff_delay(attempt: int, error: GraphAPIError | None = None) -> float:
+    """How long to wait before retry number ``attempt``. Pure; does not sleep.
 
-    Jitter is not decoration: without it, several tools that hit the same rate
-    limit retry in lockstep and hit it again together.
+    A RATE LIMIT waits longer than the window it broke. Meta's write limit on a
+    campaign node is one call per 30 seconds, so an exponential backoff starting
+    at one second spends every retry inside the same window and fails three more
+    times for nothing. The wait starts above the window instead.
+
+    Jitter is not decoration: without it, several callers that hit the same
+    limit retry in lockstep and hit it again together. It only ever ADDS here,
+    so a rate-limit wait can never dip back under the window.
+
+    Separated from the sleep so it can be tested as the arithmetic it is -- the
+    test suite neutralises the sleep globally, which would otherwise make this
+    untestable.
     """
-    delay = min(2.0 ** attempt, 16.0)
-    time.sleep(delay * (0.5 + random.random() / 2))
+    if error is not None and error.is_rate_limit:
+        delay = RATE_LIMIT_BACKOFF_SECONDS * (attempt + 1)
+    else:
+        delay = min(2.0 ** attempt, 16.0)
+    return delay * (1.0 + random.random() / 2)
+
+
+def _sleep_backoff(attempt: int, error: GraphAPIError | None = None) -> None:
+    """Wait before a retry. See :func:`backoff_delay` for the arithmetic."""
+    time.sleep(backoff_delay(attempt, error))

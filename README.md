@@ -388,6 +388,31 @@ A **file**, not an env var, because a long-lived stdio server never sees a new
 env var. It is re-read at apply time and never cached, so a preview taken ten
 minutes ago still stops.
 
+## Writes are rate limited to one per 30 seconds
+
+Meta caps writes on a campaign node at **1 call per 30 seconds** (error code
+613, subcode 4841018). Found the hard way: an apply succeeded, the revert issued
+a second later was refused, and the account sat in the changed state.
+
+The transport now distinguishes two kinds of write failure, because they are not
+the same risk:
+
+| Failure | Retried? | Why |
+|---|---|---|
+| Rate limit (613, 4, 17, 32, 429, 80xxx) | **Yes**, up to 3 times | Meta refused it outright. Nothing was applied, so repeating it is safe |
+| Timeout / connection error | **Never** | The request may have reached Meta with the response lost. A retry makes a second change |
+| HTTP 5xx | **Never, on a write** | Same ambiguity |
+| Anything permanent (100, 200, …) | No | Repeating it just fails again |
+
+The rate-limit wait starts **above** the 30-second window — an exponential
+backoff starting at one second would spend every retry inside the same window
+and fail three more times for nothing. Reads are unaffected and still retry
+everything transient.
+
+**So an `apply_*` can take ~30 seconds to return.** That is the retry working.
+It also means batching writes is slow by construction: five changes is five
+windows.
+
 ## Everything is written down
 
 `logs/meta-ads.db` — SQLite, gitignored, four tables.

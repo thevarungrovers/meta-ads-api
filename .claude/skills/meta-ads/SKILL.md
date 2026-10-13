@@ -193,6 +193,27 @@ before proposing a bid change.
 Even where it is honoured, a cap is not a price: raising one changes nothing
 unless the auction was already pressing against it.
 
+## Writes are limited to one call per 30 seconds
+
+Meta caps writes on a campaign node at **1 call per 30 seconds** (error code
+613). This is not a per-day quota you will never reach — it is a window you hit
+by doing two writes in a row, which is the normal shape of a correction.
+
+The transport handles it: a rate-limit refusal is retried automatically, after
+a wait longer than the window, because Meta refusing a write means nothing was
+applied. So an `apply_*` may simply **take half a minute to return**. That is
+working, not hanging — do not cancel it and do not re-issue the call.
+
+What this means in practice:
+
+- **Do not batch.** Changing five ad sets is five writes and takes several
+  minutes. Propose the one change that matters most and say the rest can follow.
+- **A revert right after an apply is the most likely call to be delayed**, since
+  it is the second write in the window. Wait for it.
+- If you ever see a `code 613` reach you as an error, the automatic retries were
+  exhausted. Stop, tell the human, and check `list_my_changes` before anything
+  else — do not retry by hand.
+
 ## Undo
 
 ```
