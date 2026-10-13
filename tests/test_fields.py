@@ -9,12 +9,14 @@ import pytest
 from metaads_reporting.fields import (
     MAJOR_UNIT_FIELDS,
     MINOR_UNIT_FIELDS,
+    NESTED_INSIGHTS_FIELDS,
     FieldPathError,
     action_value,
     as_decimal,
     get_path,
     is_major_unit_field,
     is_minor_unit_field,
+    is_nested_field,
     money_value,
     object_to_row,
     unknown_money_fields,
@@ -144,3 +146,57 @@ def test_an_absent_action_type_is_none_not_zero():
     assert action_value([{"action_type": "link_click", "value": "40"}], "purchase") is None
     assert action_value([], "purchase") is None
     assert action_value(None, "purchase") is None
+
+
+# --- nested, list-valued insights fields ------------------------------------
+#
+# Found on a live account 2026-10-13: purchase_roas and action_values came back
+# with real numbers and every report column printed None. They were filed as
+# scalar major-unit fields, so object_to_row sent them through
+# Decimal(str([...])), which raises, which as_decimal swallows into None. The
+# fakes carried neither field, so 521 tests passed over it.
+
+
+def test_the_three_rulings_are_mutually_exclusive():
+    """A field in two sets has its handling decided by check order."""
+    assert not MINOR_UNIT_FIELDS & NESTED_INSIGHTS_FIELDS
+    assert not MAJOR_UNIT_FIELDS & NESTED_INSIGHTS_FIELDS
+    assert not MINOR_UNIT_FIELDS & MAJOR_UNIT_FIELDS
+
+
+def test_list_valued_fields_are_classified_as_nested_not_scalar_money():
+    for name in ("purchase_roas", "action_values", "actions", "cost_per_action_type"):
+        assert is_nested_field(name), name
+        assert not is_major_unit_field(name), name
+        assert not is_minor_unit_field(name), name
+
+
+def test_a_nested_field_survives_object_to_row_whole():
+    """The regression. It must come out as the list it went in as."""
+    roas = [
+        {"action_type": "omni_purchase", "value": "22252.538168",
+         "1d_view": "51160.496183", "7d_click": "22252.538168"}
+    ]
+    row = object_to_row({"purchase_roas": roas, "spend": "100.00"},
+                        ("purchase_roas", "spend"), "CAD")
+    assert row["purchase_roas"] == roas, "the list was flattened or lost"
+    assert row["spend"] == "100.00"
+
+
+def test_the_per_window_breakdown_is_not_discarded():
+    """1d_view and 7d_click alongside `value` are the only way to separate
+    view-through from click-through after the fact."""
+    values = [{"action_type": "purchase", "value": "1450.75",
+               "1d_view": "400.00", "7d_click": "1050.75"}]
+    row = object_to_row({"action_values": values}, ("action_values",), "CAD")
+    assert row["action_values"][0]["7d_click"] == "1050.75"
+    assert row["action_values"][0]["1d_view"] == "400.00"
+
+
+def test_a_nested_field_is_not_flagged_as_an_unruled_money_field():
+    assert unknown_money_fields(["purchase_roas", "action_values"]) == ()
+
+
+def test_a_nested_field_absent_from_the_row_is_none_not_an_error():
+    row = object_to_row({"spend": "1.00"}, ("spend", "purchase_roas"), "CAD")
+    assert row["purchase_roas"] is None

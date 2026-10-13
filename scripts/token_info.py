@@ -41,12 +41,25 @@ NEEDED_SCOPES = {
 
 
 def describe_expiry(timestamp: int | None) -> tuple[str, int | None]:
-    """A human line and the days remaining, or None for a token with no expiry."""
+    """A human line and the days remaining, or None for a token with no expiry.
+
+    The sign is spelled out rather than printed raw. A timestamp in the PAST --
+    `issued_at` is always one -- gives a negative day count, and "(-5 days)"
+    next to an issue date reads as a broken clock rather than as "five days
+    ago". Only `expires_at` is ever in the future, and this function formats
+    both.
+    """
     if not timestamp:
         return ("never (no expiry set)", None)
     when = dt.datetime.fromtimestamp(int(timestamp), dt.timezone.utc)
     days = (when - dt.datetime.now(dt.timezone.utc)).days
-    return (f"{when.isoformat()} ({days} days)", days)
+    if days < 0:
+        human = f"{abs(days)} days ago"
+    elif days == 0:
+        human = "today"
+    else:
+        human = f"in {days} days"
+    return (f"{when.isoformat()} ({human})", days)
 
 
 def main(argv: list[str] | None = None) -> int:

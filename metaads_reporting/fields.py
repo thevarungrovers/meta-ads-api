@@ -54,8 +54,12 @@ MINOR_UNIT_FIELDS = frozenset(
     }
 )
 
-#: Insights fields already in MAJOR units, as decimal strings. Listed
+#: SCALAR insights fields already in MAJOR units, as decimal strings. Listed
 #: explicitly so nobody "fixes" one into the set above.
+#:
+#: Scalar is the operative word -- see :data:`NESTED_INSIGHTS_FIELDS`. A
+#: list-valued field in here gets parsed as a number, fails, and becomes None
+#: without raising.
 MAJOR_UNIT_FIELDS = frozenset(
     {
         "spend",
@@ -71,14 +75,37 @@ MAJOR_UNIT_FIELDS = frozenset(
         "cost_per_15_sec_video_view",
         "cost_per_2_sec_continuous_video_view",
         "cost_per_estimated_ad_recallers",
-        # These two are LISTS of {action_type, value} with value as a decimal
-        # string in major units. Not divided, and not summed blindly either.
+    }
+)
+
+#: Insights fields that are LISTS of ``{action_type, value, <window>...}``, not
+#: numbers. They carry money (``action_values``, ``cost_per_action_type``) or a
+#: ratio (``purchase_roas``), already in major units, one entry per action type.
+#:
+#: THEY MUST NOT GO THROUGH THE SCALAR MONEY PATH. ``Decimal(str([...]))``
+#: raises, :func:`as_decimal` swallows it, and the column silently becomes None
+#: -- which is how a live account returned
+#: ``[{"action_type": "omni_purchase", "value": "22252.538168", ...}]`` and the
+#: report printed nothing. Pass them through whole and let the caller pick an
+#: action type out with :func:`action_value`.
+#:
+#: Each entry also carries a per-window breakdown -- ``1d_view`` and
+#: ``7d_click`` alongside the combined ``value`` -- which is lost the moment
+#: this is flattened to one number, and is the only way to separate
+#: view-through from click-through after the fact.
+NESTED_INSIGHTS_FIELDS = frozenset(
+    {
+        "actions",
+        "action_values",
         "cost_per_action_type",
         "cost_per_conversion",
         "cost_per_unique_action_type",
-        "action_values",
         "purchase_roas",
         "website_purchase_roas",
+        "video_play_actions",
+        "video_thruplay_watched_actions",
+        "outbound_clicks",
+        "unique_actions",
     }
 )
 
@@ -157,14 +184,29 @@ def is_minor_unit_field(path: str) -> bool:
 
 
 def is_major_unit_field(path: str) -> bool:
-    """Whether the field at ``path`` is already in account currency.
+    """Whether the field at ``path`` is a SCALAR already in account currency.
 
     >>> is_major_unit_field("spend")
     True
     >>> is_major_unit_field("daily_budget")
     False
+    >>> is_major_unit_field("purchase_roas")
+    False
     """
     return leaf_name(path) in MAJOR_UNIT_FIELDS
+
+
+def is_nested_field(path: str) -> bool:
+    """Whether the field at ``path`` is a list of per-action-type entries.
+
+    >>> is_nested_field("purchase_roas")
+    True
+    >>> is_nested_field("actions")
+    True
+    >>> is_nested_field("spend")
+    False
+    """
+    return leaf_name(path) in NESTED_INSIGHTS_FIELDS
 
 
 def unknown_money_fields(paths: Iterable[str]) -> tuple[str, ...]:
@@ -186,6 +228,8 @@ def unknown_money_fields(paths: Iterable[str]) -> tuple[str, ...]:
         if not any(hint in name for hint in _MONEY_HINTS):
             continue
         if name in MINOR_UNIT_FIELDS or name in MAJOR_UNIT_FIELDS:
+            continue
+        if name in NESTED_INSIGHTS_FIELDS:
             continue
         unknown.append(path)
     return tuple(unknown)
@@ -265,7 +309,11 @@ def object_to_row(
     """
     row: dict[str, Any] = {}
     for path in paths:
-        if is_minor_unit_field(path) or is_major_unit_field(path):
+        # Nested FIRST. These carry money but are lists, and routing one
+        # through the scalar money path turns it into None without raising.
+        if is_nested_field(path):
+            row[path] = get_path(obj, path, default=None)
+        elif is_minor_unit_field(path) or is_major_unit_field(path):
             amount = money_value(obj, path, currency)
             row[path] = None if amount is None else str(amount)
         else:

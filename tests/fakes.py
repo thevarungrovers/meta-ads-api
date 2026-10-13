@@ -205,6 +205,30 @@ def insights_row(**extra) -> dict[str, Any]:
         "frequency": "1.25",
         "ctr": "2.5",
         "cpc": "0.4938",
+        # LISTS, with the per-window breakdown Meta actually sends. Carried
+        # here because their absence is what let a live account return real
+        # purchase_roas while every report printed None -- the scalar money
+        # path swallowed the list and the fakes never noticed.
+        "actions": [
+            {"action_type": "purchase", "value": "12", "1d_view": "4", "7d_click": "8"},
+            {"action_type": "link_click", "value": "180"},
+        ],
+        "action_values": [
+            {
+                "action_type": "purchase",
+                "value": "1450.75",
+                "1d_view": "400.00",
+                "7d_click": "1050.75",
+            }
+        ],
+        "purchase_roas": [
+            {
+                "action_type": "omni_purchase",
+                "value": "11.75",
+                "1d_view": "3.24",
+                "7d_click": "8.51",
+            }
+        ],
         "date_start": "2026-10-01",
         "date_stop": "2026-10-07",
     }
