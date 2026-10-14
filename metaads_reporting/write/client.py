@@ -49,7 +49,11 @@ WRITABLE_FIELDS: dict[str, frozenset[str]] = {
     "adset": frozenset(
         {"status", "name", "daily_budget", "lifetime_budget", "bid_amount"}
     ),
-    "ad": frozenset({"status", "name"}),
+    # `creative` points an EXISTING ad at a different creative. It is the only
+    # way to change what a live ad says, because a creative is immutable once
+    # attached. The value is {"creative_id": "..."} -- a dict, which `update`
+    # JSON-encodes on the way out.
+    "ad": frozenset({"status", "name", "creative"}),
 }
 
 #: Statuses this package will set. DELETED and ARCHIVED are absent on purpose:
@@ -238,7 +242,14 @@ class MutatingMetaAdsClient:
             payload = dict(payload, status=check_status(payload["status"]))
 
         target = self.resolve_account_id(account_id)
-        body = dict(payload)
+        # A structured value goes over the wire as JSON. `creative` is a dict
+        # and `adlabels` a list; handing either to requests as a Python object
+        # stringifies it with single quotes, which Meta rejects as malformed
+        # with an error naming neither the field nor the reason.
+        body = {
+            k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
+            for k, v in payload.items()
+        }
         if not apply:
             # Meta's own server-side check. A list, JSON-encoded: passing the
             # bare string reads as a one-character option and is ignored.
@@ -299,7 +310,14 @@ class MutatingMetaAdsClient:
         if not payload:
             raise MutationError("Nothing to create: the payload is empty.")
         target = self.resolve_account_id(account_id)
-        body = dict(payload)
+        # Same JSON encoding as `update`. A creative's object_story_spec and an
+        # audience's lookalike_spec are both dicts, and handing one to requests
+        # as a Python object stringifies it with single quotes -- which Meta
+        # rejects as malformed, naming neither the field nor the reason.
+        body = {
+            k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
+            for k, v in payload.items()
+        }
         if not apply:
             body["execution_options"] = json.dumps(["validate_only"])
 

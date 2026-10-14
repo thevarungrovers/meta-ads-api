@@ -355,19 +355,19 @@ def test_a_failed_write_is_recorded_as_not_applied(tools):
     preview = tool["preview_campaign_status"](campaign_id=CAMPAIGN_ID, new_status="PAUSED")
 
     # The node read inside apply succeeds; the POST fails.
-    def fail_on_post(method, url, params=None, data=None, timeout=None):
+    def fail_on_post(method, url, params=None, data=None, files=None, timeout=None):
         if method == "POST":
             return error_response(100, message="Invalid parameter")
-        return GraphSim.request(sim, method, url, params, data, timeout)
+        return GraphSim.request(sim, method, url, params, data, files, timeout)
 
     sim_request = sim.request
     calls = {"n": 0}
 
-    def router(method, url, params=None, data=None, timeout=None):
+    def router(method, url, params=None, data=None, files=None, timeout=None):
         if method == "POST":
             calls["n"] += 1
             return error_response(100, message="Invalid parameter")
-        return sim_request(method, url, params, data, timeout)
+        return sim_request(method, url, params, data, files, timeout)
 
     sim.request = router
     with pytest.raises(Exception):
@@ -389,10 +389,10 @@ def test_a_response_without_success_is_not_recorded_as_applied(tools, monkeypatc
 
     original = sim.request
 
-    def router(method, url, params=None, data=None, timeout=None):
+    def router(method, url, params=None, data=None, files=None, timeout=None):
         if method == "POST":
             return FakeResponse({"not_success": True})
-        return original(method, url, params, data, timeout)
+        return original(method, url, params, data, files, timeout)
 
     sim.request = router
     with pytest.raises(Exception) as caught:
@@ -541,10 +541,10 @@ def test_a_failed_metrics_lookup_does_not_sink_the_preview(tools):
     tool, state, sim = tools
     original = sim.request
 
-    def router(method, url, params=None, data=None, timeout=None):
+    def router(method, url, params=None, data=None, files=None, timeout=None):
         if "insights" in url:
             return error_response(1, status=500, message="boom")
-        return original(method, url, params, data, timeout)
+        return original(method, url, params, data, files, timeout)
 
     sim.request = router
     preview = tool["preview_campaign_status"](campaign_id=CAMPAIGN_ID, new_status="PAUSED")

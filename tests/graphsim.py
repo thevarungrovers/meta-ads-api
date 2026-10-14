@@ -46,14 +46,20 @@ class GraphSim:
         #: preview really did reach Meta and really did change nothing.
         self.validated: list[dict[str, Any]] = []
         self.applied: list[dict[str, Any]] = []
+        #: Creates that really happened, and the multipart fields of the last call.
+        self.created: list[dict[str, Any]] = []
+        self.last_files: dict[str, Any] = {}
         #: Set to a FakeResponse to make the NEXT request fail.
         self.next_failure: FakeResponse | None = None
 
     # -- the requests.Session interface ------------------------------------
 
-    def request(self, method, url, params=None, data=None, timeout=None):
+    def request(self, method, url, params=None, data=None, files=None, timeout=None):
         payload = dict(params or {}) or dict(data or {})
-        self.calls.append({"method": method, "url": url, "payload": payload})
+        self.last_files = dict(files or {})
+        self.calls.append(
+            {"method": method, "url": url, "payload": payload, "files": self.last_files}
+        )
 
         if self.next_failure is not None:
             failure, self.next_failure = self.next_failure, None
@@ -119,17 +125,38 @@ class GraphSim:
 
     @staticmethod
     def _project(obj: dict[str, Any], fields: list[str]) -> dict[str, Any]:
-        """Only what was asked for, plus id -- exactly like the real API."""
+        """Only what was asked for, plus id -- exactly like the real API.
+
+        Field expansion is handled: `likes.summary(true)` comes back under the
+        key `likes`, not under the whole expression. A projection that matched
+        the raw string would silently return nothing for every expanded field,
+        which is how a social-proof count reads as zero.
+        """
         if not fields:
             return {"id": obj.get("id")}
-        out = {k: v for k, v in obj.items() if k in fields}
+        wanted = {f.split(".", 1)[0].split("(", 1)[0] for f in fields}
+        out = {k: v for k, v in obj.items() if k in wanted}
         out.setdefault("id", obj.get("id"))
         return out
 
     # -- writes -------------------------------------------------------------
 
+    #: Account edges a create may post to, and the id prefix each hands back.
+    CREATE_EDGES = {
+        "adcreatives": "CREATIVE",
+        "ads": "AD",
+        "adimages": "IMAGE",
+        "customaudiences": "AUD",
+        "saved_audiences": "SAVED",
+    }
+
     def _post(self, segments: list[str], body: dict[str, Any]) -> FakeResponse:
         node = segments[0]
+        edge = segments[1] if len(segments) > 1 else None
+
+        if edge in self.CREATE_EDGES:
+            return self._create(edge, body)
+
         payload = {
             k: v
             for k, v in body.items()
@@ -157,6 +184,36 @@ class GraphSim:
         if "status" in payload:
             self.objects[node]["effective_status"] = payload["status"]
         return FakeResponse({"success": True})
+
+    def _create(self, edge: str, body: dict[str, Any]) -> FakeResponse:
+        """A create on an account edge. Mirrors the real responses."""
+        payload = {
+            k: v
+            for k, v in body.items()
+            if k not in ("access_token", "appsecret_proof", "execution_options")
+        }
+        validate_only = "validate_only" in json.loads(
+            body.get("execution_options") or "[]"
+        )
+        record = {"edge": edge, "payload": payload}
+        if validate_only:
+            self.validated.append(record)
+            # Meta returns success with NO id for a validate-only create --
+            # nothing was made, so there is nothing to name.
+            return FakeResponse({"success": True})
+
+        self.created.append(record)
+        new_id = f"{self.CREATE_EDGES[edge]}{len(self.created)}"
+
+        if edge == "adimages":
+            # Keyed by the FILE NAME the upload was sent under, not a fixed key.
+            name = next(iter(self.last_files), "upload.png")
+            return FakeResponse(
+                {"images": {name: {"hash": f"hash{len(self.created)}", "url": "http://x"}}}
+            )
+
+        self.objects[new_id] = {"id": new_id, **payload}
+        return FakeResponse({"id": new_id})
 
     # -- assertions helpers -------------------------------------------------
 

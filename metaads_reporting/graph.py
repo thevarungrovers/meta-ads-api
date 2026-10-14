@@ -399,12 +399,18 @@ class GraphTransport:
         *,
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Send one request and return the decoded JSON body.
 
         ``params`` goes in the query string, ``data`` in the form body. Meta
         accepts either for most calls; writes use ``data`` so a budget does not
         end up in a URL, where it would be logged by every proxy in between.
+
+        ``files`` is multipart, and exists for exactly one thing: uploading an
+        image or a video to the ``adimages`` / ``advideos`` edges, which take
+        the file itself rather than a reference to one. It is never logged --
+        the request record stores the field names and sizes, not the bytes.
         """
         method = (method or "GET").strip().upper()
         if method not in READ_METHODS | WRITE_METHODS:
@@ -420,11 +426,23 @@ class GraphTransport:
         attempts = self._retries_for(method) + 1
         last_error: GraphAPIError | None = None
 
+        # The bytes never reach the log: a 2MB image base64'd into a request
+        # record would bloat the database and tell nobody anything.
+        upload_note = (
+            {name: f"<{getattr(handle, 'name', 'file')}>" for name, handle in files.items()}
+            if files
+            else None
+        )
+
         with logdb.record_api_call(
             method,
             service="graph",
             path=_log_path(url),
-            request={"params": _redact(query), "data": _redact(body)},
+            request={
+                "params": _redact(query),
+                "data": _redact(body),
+                **({"files": upload_note} if upload_note else {}),
+            },
         ) as slot:
             for attempt in range(attempts):
                 try:
@@ -433,6 +451,7 @@ class GraphTransport:
                         url,
                         params=query if method in READ_METHODS else None,
                         data=body if method in WRITE_METHODS else None,
+                        files=files or None,
                         timeout=self.timeout,
                     )
                 except requests.RequestException as exc:

@@ -32,8 +32,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from metaads_reporting import logdb  # noqa: E402
 from metaads_reporting.config import ConfigError  # noqa: E402
 from metaads_reporting.currency import format_money, from_minor_units  # noqa: E402
-from metaads_reporting.write import MutatingMetaAdsClient, MutationError, execute  # noqa: E402
-from metaads_reporting.write import ads, adsets, campaigns  # noqa: E402
+from metaads_reporting.write import (  # noqa: E402
+    MutatingMetaAdsClient,
+    MutationError,
+    execute,
+    execute_chain,
+)
+from metaads_reporting.write import ads, adsets, audiences, campaigns, creatives, media  # noqa: E402
 
 ENTITIES = {"campaign": campaigns, "adset": adsets, "ad": ads}
 
@@ -50,11 +55,22 @@ def confirm(plan, client, *, assume_yes: bool, dry_run: bool) -> bool:
     print()
 
     try:
-        result = execute(client, plan, apply=False)
+        if plan.requires is not None:
+            # A dependent create: only the first step can be validated, because
+            # the second references an id that does not exist yet. Say so
+            # rather than reporting a clean validation of half the work.
+            result, _ = execute_chain(client, plan, apply=False)
+            print(
+                f"Meta validated the {plan.requires.entity}: {result}. The "
+                f"{plan.entity} itself cannot be validated until that exists, "
+                f"so it is checked at apply time."
+            )
+        else:
+            result = execute(client, plan, apply=False)
+            print(f"Meta validated it: {result}. Nothing has been changed.")
     except MutationError as exc:
         print(f"Meta refused this before it was applied:\n{exc}", file=sys.stderr)
         return False
-    print(f"Meta validated it: {result}. Nothing has been changed.")
 
     if dry_run:
         print("--dry-run: stopping here.")
@@ -73,7 +89,12 @@ def confirm(plan, client, *, assume_yes: bool, dry_run: bool) -> bool:
 def apply_plan(plan, client, *, assume_yes: bool, dry_run: bool) -> int:
     if not confirm(plan, client, assume_yes=assume_yes, dry_run=dry_run):
         return 0
-    result = execute(client, plan, apply=True)
+    if plan.requires is not None:
+        result, created = execute_chain(client, plan, apply=True)
+        for node in created:
+            print(f"  created {node}")
+    else:
+        result = execute(client, plan, apply=True)
     if not result.success:
         print(
             f"Meta accepted the request but did not confirm the change: "
@@ -81,7 +102,7 @@ def apply_plan(plan, client, *, assume_yes: bool, dry_run: bool) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"APPLIED: {plan.entity} {plan.node_id}")
+    print(f"APPLIED: {plan.entity} {result.node_id or plan.node_id}")
     return 0
 
 
@@ -196,6 +217,49 @@ def build_parser() -> argparse.ArgumentParser:
         p = ad.add_parser(action)
         add_target(p)
 
+    def add_copy_args(p):
+        p.add_argument("--primary-text", help="new body text")
+        p.add_argument("--headline", help="new headline")
+        p.add_argument("--description", help="new description")
+        p.add_argument("--link", help="new destination URL")
+        p.add_argument("--image", help="local image file to upload and use")
+        p.add_argument("--video-id", help="an EXISTING Meta video id to use")
+
+    dup = ad.add_parser(
+        "duplicate", help="new PAUSED ad beside this one, with changed copy"
+    )
+    dup.add_argument("--new-name", help="name for the new ad")
+    add_copy_args(dup)
+    add_target(dup)
+
+    setcopy = ad.add_parser(
+        "set-copy", help="repoint THIS ad at a new creative (discards social proof)"
+    )
+    add_copy_args(setcopy)
+    add_target(setcopy)
+
+    aud = sub.add_parser("audience", help="audiences").add_subparsers(
+        dest="action", required=True
+    )
+    aud_list = aud.add_parser("list", help="audiences that already exist")
+    aud_list.add_argument(
+        "--kind", choices=("custom", "saved", "all"), default="all"
+    )
+    lal = aud.add_parser("lookalike", help="create a lookalike from an existing source")
+    lal.add_argument("--name", required=True)
+    lal.add_argument("--from-id", required=True, help="origin audience id")
+    lal.add_argument("--country", required=True, help="two-letter code, e.g. CA")
+    lal.add_argument("--ratio", type=float, default=0.01, help="0.01 to 0.20")
+    lal.add_argument("--dry-run", action="store_true")
+    lal.add_argument("--yes", action="store_true")
+    saved = aud.add_parser("saved", help="create a saved targeting spec")
+    saved.add_argument("--name", required=True)
+    saved.add_argument(
+        "--targeting", required=True, help="Meta targeting spec as JSON"
+    )
+    saved.add_argument("--dry-run", action="store_true")
+    saved.add_argument("--yes", action="store_true")
+
     return parser
 
 
@@ -220,9 +284,97 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
 
+def copy_edits(args) -> dict:
+    """The --primary-text/--headline/... flags, as the editor's vocabulary."""
+    edits = {
+        "primary_text": getattr(args, "primary_text", None),
+        "headline": getattr(args, "headline", None),
+        "description": getattr(args, "description", None),
+        "link": getattr(args, "link", None),
+    }
+    return {k: v for k, v in edits.items() if v is not None}
+
+
+def cmd_creative(client, args, *, duplicate: bool) -> int:
+    """ad duplicate / ad set-copy.
+
+    The image upload happens AFTER the confirmation, not before: uploading on a
+    --dry-run would put a file in the account's media library for a change the
+    operator then declined.
+    """
+    builder = ads.plan_duplicate_ad if duplicate else ads.plan_update_copy
+    kwargs = dict(
+        ad_id=args.id,
+        edits=copy_edits(args),
+        image_path=args.image,
+        video_id=args.video_id,
+    )
+    if duplicate:
+        kwargs["new_name"] = args.new_name
+    if args.name and not args.id:
+        found = ads.find(client, name=args.name)
+        kwargs["ad_id"] = found["id"]
+
+    plan = builder(client, **kwargs)
+    if not confirm(plan, client, assume_yes=args.yes, dry_run=args.dry_run):
+        return 0
+
+    if args.image:
+        image = media.inspect_image(args.image)
+        print(f"  uploading {image.path.name} ({image.describe()['size_kb']}KB) ...")
+        image_hash = media.upload_image(client, image, apply=True)
+        print(f"  image_hash {image_hash}")
+        plan.requires.payload = ads._fill_uploaded_image(plan.requires.payload, image_hash)
+
+    result, created = execute_chain(client, plan, apply=True)
+    for node in created:
+        print(f"  created {node}")
+    if not result.success:
+        print(f"Meta did not confirm: {result.response!r}", file=sys.stderr)
+        return 1
+    print(f"APPLIED: {plan.entity} {result.node_id or plan.node_id}")
+    return 0
+
+
+def cmd_audience(client, args) -> int:
+    import json as _json
+
+    if args.action == "list":
+        if args.kind in ("custom", "all"):
+            for row in audiences.list_custom(client):
+                print(
+                    f"  {row['audience_id']:<20} {(row['name'] or '')[:40]:40s} "
+                    f"[{row['subtype']}, ~{row['approx_size']}]"
+                )
+        if args.kind in ("saved", "all"):
+            for row in audiences.list_saved(client):
+                print(f"  {row['saved_audience_id']:<20} {(row['name'] or '')[:40]:40s} [saved]")
+        return 0
+
+    if args.action == "lookalike":
+        plan = audiences.plan_create_lookalike(
+            client,
+            name=args.name,
+            origin_audience_id=args.from_id,
+            country=args.country,
+            ratio=args.ratio,
+        )
+    else:
+        try:
+            targeting = _json.loads(args.targeting)
+        except ValueError as exc:
+            print(f"error: --targeting is not valid JSON: {exc}", file=sys.stderr)
+            return 1
+        plan = audiences.plan_create_saved(client, name=args.name, targeting=targeting)
+
+    return apply_plan(plan, client, assume_yes=args.yes, dry_run=args.dry_run)
+
+
 def _dispatch(client, args) -> int:
     if args.command == "find":
         return cmd_find(client, args)
+    if args.command == "audience":
+        return cmd_audience(client, args)
 
     module, id_kwarg = {
         "campaign": (campaigns, "campaign_id"),
@@ -237,6 +389,10 @@ def _dispatch(client, args) -> int:
         return cmd_budget(client, args, module, id_kwarg)
     if args.action == "set-bid":
         return cmd_bid(client, args)
+    if args.action == "duplicate":
+        return cmd_creative(client, args, duplicate=True)
+    if args.action == "set-copy":
+        return cmd_creative(client, args, duplicate=False)
     raise SystemExit(f"error: unknown action {args.action!r}")
 
 

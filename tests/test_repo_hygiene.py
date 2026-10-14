@@ -309,6 +309,9 @@ def test_the_write_surface_the_docs_claim_matches_the_allowlist():
         "daily_budget",
         "lifetime_budget",
         "bid_amount",
+        # Points an EXISTING ad at a different creative. The only way to change
+        # what a live ad says, because a creative is immutable once attached.
+        "creative",
     }, (
         f"the write surface changed to {sorted(every)} -- README and SKILL.md "
         f"both state it explicitly and now need updating"

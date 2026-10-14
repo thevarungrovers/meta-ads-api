@@ -86,6 +86,38 @@ TEXT_FIELDS: dict[str, dict[str, str]] = {
 #: quietly ignored -- a silently dropped edit reads as "Meta rejected my copy".
 EDITABLE = frozenset({"primary_text", "headline", "description", "link"})
 
+#: Fields Meta RETURNS on a read but REFUSES on a create, because they are
+#: derived from another field that is also present.
+#:
+#: Caught by Meta's own validate_only on the first live dry run:
+#:   ObjectStorySpecRedundant: Only one of image_url and image_hash should be
+#:   specified in the field video_data of object_story_spec.
+#:
+#: A creative read back from the API is therefore NOT a valid payload for
+#: creating one, which is not obvious and is the kind of thing that only shows
+#: up against the real API. The hash is the canonical form -- it identifies the
+#: image in the account's library, where the URL is just a rendering of it --
+#: so the derived one goes.
+DERIVED_ON_READ = {
+    "image_url": "image_hash",
+    "picture": "image_hash",
+    "thumbnail_url": "image_hash",
+}
+
+#: Keys inside ``degrees_of_freedom_spec.creative_features_spec`` that Meta
+#: returns on a read and REFUSES on a create, because they are deprecated.
+#:
+#: Also caught by validate_only on a live dry run:
+#:   Creative should not include standard enhancements: Including standard
+#:   enhancements field in creative has been deprecated. Please choose to set
+#:   individual features instead.
+#:
+#: The spec as a whole is still worth carrying -- it holds the per-feature
+#: OPT_OUTs, and dropping it opts a new creative into every automatic
+#: enhancement the old one had turned off. So the deprecated umbrella key is
+#: removed and the individual features are kept.
+DEPRECATED_CREATIVE_FEATURES = frozenset({"standard_enhancements"})
+
 
 @dataclass(frozen=True)
 class Creative:
@@ -186,9 +218,17 @@ def read(client: MutatingMetaAdsClient, creative_id: str) -> Creative:
     )
 
 
-def check_edits(creative: Creative, edits: dict[str, Any]) -> dict[str, Any]:
-    """Refuse an edit this creative cannot take, rather than dropping it."""
-    if not edits:
+def check_edits(
+    creative: Creative, edits: dict[str, Any], *, allow_empty: bool = False
+) -> dict[str, Any]:
+    """Refuse an edit this creative cannot take, rather than dropping it.
+
+    ``allow_empty`` is for a MEDIA-ONLY change -- swapping the image and
+    leaving every word alone is a perfectly ordinary edit, and refusing it as
+    "no edits given" would be wrong. The caller is responsible for checking
+    that *something* changes; ads.plan_duplicate_ad does.
+    """
+    if not edits and not allow_empty:
         raise MutationError("No edits given.")
     unknown = sorted(set(edits) - EDITABLE)
     if unknown:
@@ -206,7 +246,24 @@ def check_edits(creative: Creative, edits: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in edits.items() if v is not None}
 
 
-def build_spec(creative: Creative, edits: dict[str, Any]) -> dict[str, Any]:
+def strip_derived(block: dict[str, Any]) -> dict[str, Any]:
+    """Drop fields Meta returns on a read but refuses on a create.
+
+    >>> strip_derived({"image_hash": "abc", "image_url": "http://x", "title": "t"})
+    {'image_hash': 'abc', 'title': 't'}
+    >>> strip_derived({"image_url": "http://x"})
+    {'image_url': 'http://x'}
+    """
+    return {
+        key: value
+        for key, value in block.items()
+        if not (key in DERIVED_ON_READ and DERIVED_ON_READ[key] in block)
+    }
+
+
+def build_spec(
+    creative: Creative, edits: dict[str, Any], *, allow_empty: bool = False
+) -> dict[str, Any]:
     """The payload for a NEW creative: this one's shape, with ``edits`` applied.
 
     Everything not being edited is carried across verbatim. That is the whole
@@ -214,7 +271,7 @@ def build_spec(creative: Creative, edits: dict[str, Any]) -> dict[str, Any]:
     adlabels and its customization rules, and only the text named in ``edits``
     moves.
     """
-    edits = check_edits(creative, edits)
+    edits = check_edits(creative, edits, allow_empty=allow_empty)
     mapping = TEXT_FIELDS[creative.shape]
 
     if creative.shape == ASSET_FEED:
@@ -225,7 +282,7 @@ def build_spec(creative: Creative, edits: dict[str, Any]) -> dict[str, Any]:
     for label, value in edits.items():
         block[mapping[label]] = value
     rebuilt = {k: v for k, v in spec.items() if k != creative.shape}
-    rebuilt[creative.shape] = block
+    rebuilt[creative.shape] = strip_derived(block)
     return {"object_story_spec": rebuilt}
 
 
@@ -268,22 +325,73 @@ def _build_asset_feed(
             for entry in entries:
                 entry[text_key] = value
         feed[key] = entries
-    return {"asset_feed_spec": feed}
+    for media_key in ("images", "videos"):
+        if feed.get(media_key):
+            feed[media_key] = [strip_derived(dict(e)) for e in feed[media_key]]
+
+    # An asset-feed creative carries BOTH specs: asset_feed_spec holds the
+    # copy, object_story_spec holds the page and Instagram account the post is
+    # published as. Returning only the feed loses the page, and Meta refuses
+    # with "You must select an existing post or create a post for your ad
+    # creative" -- which names neither field and reads like an Ads Manager
+    # instruction rather than a missing parameter.
+    out: dict[str, Any] = {"asset_feed_spec": feed}
+    story = creative.story_spec
+    if story:
+        out["object_story_spec"] = story
+    return out
 
 
 def plan_payload(
-    creative: Creative, edits: dict[str, Any], *, name: str | None = None
+    creative: Creative,
+    edits: dict[str, Any],
+    *,
+    name: str | None = None,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
     """The full create-a-creative payload, ready for :func:`create`."""
-    payload = build_spec(creative, edits)
+    payload = build_spec(creative, edits, allow_empty=allow_empty)
     payload["name"] = name or f"{creative.name} (edited)"
     # Carried across so a rebuilt creative keeps the account's tracking and its
     # Advantage+ opt-outs. Dropping degrees_of_freedom_spec silently OPTS THE
     # NEW CREATIVE INTO every automatic enhancement the old one had turned off.
-    for carried in ("url_tags", "degrees_of_freedom_spec"):
-        if creative.raw.get(carried):
-            payload[carried] = creative.raw[carried]
+    if creative.raw.get("url_tags"):
+        payload["url_tags"] = creative.raw["url_tags"]
+    freedom = clean_degrees_of_freedom(creative.raw.get("degrees_of_freedom_spec"))
+    if freedom:
+        payload["degrees_of_freedom_spec"] = freedom
     return payload
+
+
+def clean_degrees_of_freedom(spec: Any) -> dict[str, Any] | None:
+    """Carry the per-feature opt-outs, drop the deprecated umbrella key.
+
+    >>> clean_degrees_of_freedom({"creative_features_spec": {
+    ...     "standard_enhancements": {"enroll_status": "OPT_OUT"},
+    ...     "image_touchups": {"enroll_status": "OPT_OUT"}}})
+    {'creative_features_spec': {'image_touchups': {'enroll_status': 'OPT_OUT'}}}
+    >>> clean_degrees_of_freedom({"creative_features_spec":
+    ...     {"standard_enhancements": {"enroll_status": "OPT_OUT"}}}) is None
+    True
+    >>> clean_degrees_of_freedom(None) is None
+    True
+    """
+    if not isinstance(spec, dict):
+        return None
+    features = spec.get("creative_features_spec")
+    if not isinstance(features, dict):
+        return spec or None
+    kept = {
+        key: value
+        for key, value in features.items()
+        if key not in DEPRECATED_CREATIVE_FEATURES
+    }
+    if not kept:
+        # Nothing but the deprecated key: sending an empty spec says nothing,
+        # so send none at all.
+        return None
+    return {**{k: v for k, v in spec.items() if k != "creative_features_spec"},
+            "creative_features_spec": kept}
 
 
 def create(
@@ -294,16 +402,12 @@ def create(
     account_id: str | None = None,
 ):
     """Send a new creative. Validates server-side unless ``apply`` is True."""
-    import json
-
-    body = {
-        k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
-        for k, v in payload.items()
-    }
+    # No JSON encoding here: MutatingMetaAdsClient.create does it for every
+    # caller. Doing it twice would send a quoted string of a string.
     return client.create(
         entity_type="adcreative",
         edge=EDGE,
-        payload=body,
+        payload=payload,
         apply=apply,
         account_id=account_id,
     )

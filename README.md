@@ -239,6 +239,21 @@ Dates are evaluated in the **ad account's** time zone, not yours.
 
 # Pause one ad
 ./.venv/bin/python scripts/manage.py ad pause --id 789012
+
+# A new PAUSED ad beside an existing one, with new copy
+./.venv/bin/python scripts/manage.py ad duplicate --id 789012 \
+    --headline "New headline" --primary-text "New body" --dry-run
+
+# Repoint a live ad at a new creative, with a new image
+./.venv/bin/python scripts/manage.py ad set-copy --id 789012 \
+    --headline "New headline" --image ./creative.jpg
+
+# Audiences
+./.venv/bin/python scripts/manage.py audience list
+./.venv/bin/python scripts/manage.py audience lookalike \
+    --name "LAL 1% purchasers" --from-id 1234 --country CA --ratio 0.01
+./.venv/bin/python scripts/manage.py audience saved \
+    --name "QC 25-54" --targeting '{"geo_locations":{"regions":[{"key":"3843"}]},"age_min":25}'
 ```
 
 `--dry-run` is not a local guess. It sends the request to Meta with
@@ -251,7 +266,7 @@ resolved for you.
 
 ## What the agent can do
 
-21 tools: 8 read, 6 `preview_*`/`apply_*` pairs, and `revert_change`.
+29 tools: 10 read, 9 `preview_*`/`apply_*` pairs, and `revert_change`.
 
 ### Can read (safe)
 
@@ -263,6 +278,8 @@ resolved for you.
 | `find_ad_sets` | Ad sets, budgets, `bid_strategy`, `bid_amount` |
 | `find_ads` | Ads and their `effective_status` |
 | `run_report` | Performance, five reports |
+| `get_ad_creative` | What an ad **says**, its creative shape, and the social proof at stake |
+| `list_audiences` | Custom, lookalike and saved audiences |
 | `get_guardrails` | The bounds and the session budget left |
 | `list_my_changes` | What it has changed, with `entry_id`s |
 
@@ -276,31 +293,65 @@ resolved for you.
 | `preview/apply_ad_set_daily_budget` | An ad set's daily budget |
 | `preview/apply_ad_set_bid_amount` | An ad set's bid cap or cost target |
 | `preview/apply_ad_status` | Pause or activate one ad |
+| `preview/apply_duplicate_ad` | A **new PAUSED ad** beside an existing one, with changed copy or media |
+| `preview/apply_update_ad_copy` | Repoint a **live ad** at a new creative (discards social proof) |
+| `preview/apply_create_audience` | A saved targeting spec, or a lookalike |
 | `revert_change` | Undo one ledger entry |
 
 ### Cannot do at all — including from the CLI
 
-**This toolchain changes the status, budget, bid and name of things that already
-exist. That is its entire write surface.** Nothing in it — not the MCP server,
-not `scripts/manage.py` — can:
-
-| Not available | Why it is not a small addition |
+| Not available | Why |
 |---|---|
-| Create a campaign, ad set or ad | A campaign carries a `special_ad_categories` declaration, which is a legal statement about housing/employment/credit/social-issue advertising |
-| Write or edit ad copy (primary text, headline, description) | A Meta creative is **immutable once attached**, so this is a create, not an edit — and repointing a live ad at a new creative resets its social proof |
-| Upload or swap an image or video | Media goes to the `adimages`/`advideos` edges first, then into a creative |
-| Create or edit an audience (custom, lookalike, saved) | A custom audience means uploading hashed customer PII under Meta's data terms |
+| Create a **campaign** or **ad set** | A campaign carries a `special_ad_categories` declaration — a legal statement about housing/employment/credit/social-issue advertising. That belongs to a person. (Creating an **ad** inside an existing ad set *is* supported; it inherits the declaration.) |
+| Upload a **video** | The `advideos` edge is asynchronous and chunked; an ad built on a still-encoding video is rejected. An existing `video_id` can be reused, which covers duplicating a video ad. |
+| Create a **customer-list audience** | It uploads hashed customer emails and phone numbers to Meta. Saved audiences and lookalikes are supported; this one is refused **structurally** — see below |
 | Change targeting, optimization goal, billing event, schedule | Not on the write client's field allowlist |
 | Set a status to `DELETED` or `ARCHIVED` | Irreversible through the API — pause instead |
+| Delete anything | The mutating client has no delete method at all |
 | Anything touching billing or account access | Out of scope by design |
 
 None of that is "refused at call time" — there is **no generic
 update/passthrough tool**, and the write client's field allowlist contains only
-`status`, `name`, `daily_budget`, `lifetime_budget` and `bid_amount`. An
-unregistered operation is unreachable, not merely undocumented.
-`tests/test_mcp_surface.py` pins the tool names so adding one is a reviewed diff.
+`status`, `name`, `creative`, `daily_budget`, `lifetime_budget` and
+`bid_amount`. An unregistered operation is unreachable, not merely
+undocumented. `tests/test_mcp_surface.py` pins the tool names so adding one is a
+reviewed diff.
 
-For any of the above, use Ads Manager.
+### Customer-list audiences are refused on purpose
+
+A lookalike is created on the **same** `customaudiences` edge as a
+customer-list audience. The only things separating "derive from a population
+Meta already has" from "upload our customer list" are the `subtype` field and
+whether a `data` payload is attached — far too thin a line to leave to
+convention. So both halves are checked:
+
+- `check_subtype` admits `LOOKALIKE` and nothing else;
+- `check_no_customer_data` refuses any payload carrying `data`, `schema`,
+  `payload`, `users`, `customer_file_source`, `pixel_id` … and runs on **every**
+  call, not just the suspicious-looking ones.
+
+Reading an existing customer-list audience is fine and necessary — you need to
+see one to pick a lookalike source. Creating one is what is blocked.
+
+### Changing what an ad says
+
+A Meta creative is **immutable once attached**, so there is no "edit the
+headline" call. Both paths build a new creative and differ in what they point
+at it:
+
+| | `duplicate_ad` | `update_ad_copy` |
+|---|---|---|
+| Result | A **new PAUSED ad** beside the original | The **same ad**, repointed |
+| The original | Untouched, keeps delivering | Replaced |
+| Social proof | Kept | **Usually lost** — a new creative means a new post |
+| Reporting | Two ad ids over the changeover | One continuous line |
+| Review | New ad reviewed before it can run | Live ad re-enters review; delivery can pause |
+
+`get_ad_creative` reports the exact likes/comments/shares at stake, so the
+choice is made against a number.
+
+Multi-locale creatives are handled rather than flattened: pass one value to
+apply it to every locale, or a list to set them individually.
 
 ## What a preview tells you
 

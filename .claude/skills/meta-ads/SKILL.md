@@ -100,14 +100,17 @@ treating the gap as a bug.
 - **DON'T try to set anything to DELETED or ARCHIVED.** Both are irreversible
   through the API and neither is exposed. Pause instead — same effect on
   delivery, and it can be undone.
-- **DON'T try to create a campaign, an ad set or an ad.** Not available here,
-  and **not available from the CLI either** — there is no script for it. Say so
-  and point the human at Ads Manager.
-- **DON'T try to change an ad's creative, copy or media.** Primary text,
-  headline, description, image, video: none of it is reachable. A Meta creative
-  is immutable once attached, so changing what an ad says is a *new ad*.
-- **DON'T try to create or edit an audience** — custom, lookalike or saved.
-  Entirely out of scope.
+- **DON'T try to create a campaign or an ad set.** Creating an **ad** inside an
+  existing ad set is supported; a campaign is not, because it carries a legal
+  special-ad-category declaration.
+- **DON'T reach for `update_ad_copy` by default.** It discards social proof.
+  Call `get_ad_creative` first, read `social_proof`, and if it is non-zero say
+  so and offer `duplicate_ad` instead.
+- **DON'T try to create a customer-list audience.** Saved and lookalike only.
+  Anything that would upload customer emails or phone numbers is refused
+  structurally, and correctly — point the human at Ads Manager.
+- **DON'T try to upload a video.** Reuse an existing `video_id` instead;
+  duplicating a video ad with new copy needs no upload at all.
 - **DON'T sum `reach` or `frequency` across rows.** The same person reached on
   two days is one person. Use the `creative_fatigue` report, which collapses the
   window into one row per ad for exactly this reason.
@@ -116,7 +119,7 @@ treating the gap as a bug.
 
 ## The tools
 
-21 in total: 8 read, 6 `preview_*`/`apply_*` pairs, plus `revert_change`.
+29 in total: 10 read, 9 `preview_*`/`apply_*` pairs, plus `revert_change`.
 
 ### Read — safe, call freely
 
@@ -128,6 +131,8 @@ treating the gap as a bug.
 | `find_ad_sets(campaign_id, name_contains_text, limit)` | Ad sets, budgets, `bid_strategy`, `bid_amount` |
 | `find_ads(ad_set_id, campaign_id, name_contains_text, limit)` | Ads and their `effective_status` |
 | `run_report(report, days, since, until, campaign_name, node_id, limit)` | Performance. `report` is one of `account`, `campaigns`, `adsets`, `ads`, `creative_fatigue` |
+| `get_ad_creative(ad_id)` | What an ad **says**, its creative shape, and the social proof at stake |
+| `list_audiences(kind, limit)` | Custom, lookalike and saved audiences |
 | `get_guardrails` | The bounds, and this session's remaining budget |
 | `list_my_changes(limit)` | What this server has changed, with `entry_id`s for undo |
 
@@ -141,6 +146,9 @@ treating the gap as a bug.
 | `preview_ad_set_daily_budget` / `apply_ad_set_daily_budget` | An **ad-set-budget** ad set's daily budget |
 | `preview_ad_set_bid_amount` / `apply_ad_set_bid_amount` | An ad set's bid cap or cost target |
 | `preview_ad_status` / `apply_ad_status` | Pause or activate **one ad** |
+| `preview_duplicate_ad` / `apply_duplicate_ad` | A **new PAUSED ad** with changed copy or media |
+| `preview_update_ad_copy` / `apply_update_ad_copy` | Repoint a **live ad** at a new creative |
+| `preview_create_audience` / `apply_create_audience` | A saved spec, or a lookalike |
 | `revert_change(entry_id)` | Undo one ledger entry |
 
 Each `apply_*` takes **only** a `preview_token` — never the values. That is
@@ -161,6 +169,46 @@ tables above it cannot be done from here.
 this server does — status, budget, bid, name — and nothing more. If the human
 needs one of the above, tell them plainly that it is not built, and point them at
 Ads Manager. Do not send them to a script.
+
+## Changing what an ad says
+
+A Meta creative is **immutable once attached**, so there is no "edit the
+headline" call. Two paths, and the choice is real:
+
+| | `duplicate_ad` | `update_ad_copy` |
+|---|---|---|
+| Result | New **PAUSED** ad beside the original | Same ad, repointed |
+| The original | Untouched, keeps delivering | Replaced |
+| Social proof | **Kept** | **Usually lost** |
+| Review | New ad reviewed before running | Live ad re-enters review |
+
+**Default to `duplicate_ad`.** It changes nothing live, and the human can pause
+the old ad once happy. Reach for `update_ad_copy` only when they want to keep
+the ad id and its reporting line, and tell them what the engagement cost is
+first — `get_ad_creative` gives you the exact counts.
+
+Call `get_ad_creative` before proposing either. The `shape` it reports decides
+what you can do:
+
+- `link_data` / `video_data` — one value per field.
+- `asset_feed_spec` — **a list per field, one per locale.** A single value is
+  applied to every locale; pass a list to set them individually, matching the
+  existing length exactly.
+- `page_only` — a catalog ad. Its copy comes from the product feed; there is
+  nothing on the creative to change, and the tool will say so.
+
+## Audiences
+
+`list_audiences` reads everything, including customer-list audiences — you need
+to see one to pick a lookalike source.
+
+`preview_create_audience` makes **saved** specs and **lookalikes** only. A
+customer-list audience would upload hashed customer emails and phone numbers to
+Meta, and is refused structurally. That is not a limitation to work around:
+tell the human it belongs in Ads Manager, where a person accepts the data terms.
+
+A lookalike takes a few hours to populate and cannot be used until it does. Say
+that when you create one.
 
 ## Reading the preview
 

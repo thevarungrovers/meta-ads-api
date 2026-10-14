@@ -70,13 +70,14 @@ class FakeSession:
         self.responses = list(responses or [])
         self.calls: list[dict[str, Any]] = []
 
-    def request(self, method, url, params=None, data=None, timeout=None):
+    def request(self, method, url, params=None, data=None, files=None, timeout=None):
         self.calls.append(
             {
                 "method": method,
                 "url": url,
                 "params": dict(params or {}),
                 "data": dict(data or {}),
+                "files": dict(files or {}),
                 "timeout": timeout,
             }
         )

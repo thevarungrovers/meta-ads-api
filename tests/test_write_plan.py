@@ -74,10 +74,18 @@ def test_an_unknown_entity_type_is_refused():
         check_writable("adaccount", {"spend_cap": 1})
 
 
-def test_an_ad_can_only_have_its_status_and_name_changed():
-    """Changing what an ad SAYS means swapping its creative, which on Meta is a
-    create, not an edit -- a creative is immutable once attached."""
-    assert WRITABLE_FIELDS["ad"] == frozenset({"status", "name"})
+def test_an_ad_exposes_status_name_and_creative_and_nothing_else():
+    """`creative` repoints an existing ad at a different creative -- the only
+    way to change what a live ad says, because a creative is immutable once
+    attached. The copy itself is still not editable in place: you build a new
+    creative (see write/creatives.py) and point at it."""
+    assert WRITABLE_FIELDS["ad"] == frozenset({"status", "name", "creative"})
+
+
+def test_an_ad_still_cannot_have_its_targeting_or_parent_changed():
+    for forbidden in ("targeting", "adset_id", "campaign_id", "bid_amount"):
+        with pytest.raises(MutationError):
+            check_writable("ad", {forbidden: "x"})
 
 
 # --- the status guard -------------------------------------------------------

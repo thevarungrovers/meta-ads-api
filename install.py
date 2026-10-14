@@ -64,12 +64,17 @@ SAFE_TOOLS = (
     "run_report",
     "get_guardrails",
     "list_my_changes",
+    "get_ad_creative",
+    "list_audiences",
     "preview_campaign_status",
     "preview_campaign_daily_budget",
     "preview_ad_set_status",
     "preview_ad_set_daily_budget",
     "preview_ad_set_bid_amount",
     "preview_ad_status",
+    "preview_duplicate_ad",
+    "preview_update_ad_copy",
+    "preview_create_audience",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -80,6 +85,9 @@ WRITE_TOOLS = (
     "apply_ad_set_daily_budget",
     "apply_ad_set_bid_amount",
     "apply_ad_status",
+    "apply_duplicate_ad",
+    "apply_update_ad_copy",
+    "apply_create_audience",
     "revert_change",
 )
 

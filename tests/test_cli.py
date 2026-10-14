@@ -282,7 +282,7 @@ def test_token_info_warns_when_the_token_is_not_a_system_user(sim, capsys):
 
     original = sim.request
 
-    def router(method, url, params=None, data=None, timeout=None):
+    def router(method, url, params=None, data=None, files=None, timeout=None):
         if "debug_token" in url:
             return FakeResponse(
                 {
@@ -294,7 +294,7 @@ def test_token_info_warns_when_the_token_is_not_a_system_user(sim, capsys):
                     }
                 }
             )
-        return original(method, url, params, data, timeout)
+        return original(method, url, params, data, files, timeout)
 
     sim.request = router
     assert token_info.main([]) == 0
@@ -309,7 +309,7 @@ def test_token_info_is_happy_with_a_system_user(sim, capsys):
 
     original = sim.request
 
-    def router(method, url, params=None, data=None, timeout=None):
+    def router(method, url, params=None, data=None, files=None, timeout=None):
         if "debug_token" in url:
             return FakeResponse(
                 {
@@ -321,7 +321,7 @@ def test_token_info_is_happy_with_a_system_user(sim, capsys):
                     }
                 }
             )
-        return original(method, url, params, data, timeout)
+        return original(method, url, params, data, files, timeout)
 
     sim.request = router
     assert token_info.main([]) == 0
@@ -336,12 +336,12 @@ def test_token_info_lists_the_scopes_that_are_missing(sim, capsys):
 
     original = sim.request
 
-    def router(method, url, params=None, data=None, timeout=None):
+    def router(method, url, params=None, data=None, files=None, timeout=None):
         if "debug_token" in url:
             return FakeResponse(
                 {"data": {"type": "SYSTEM_USER", "is_valid": True, "scopes": ["ads_read"]}}
             )
-        return original(method, url, params, data, timeout)
+        return original(method, url, params, data, files, timeout)
 
     sim.request = router
     token_info.main([])
@@ -359,7 +359,7 @@ def test_token_info_check_fails_when_expiry_is_near(sim, capsys):
     soon = int((dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3)).timestamp())
     original = sim.request
 
-    def router(method, url, params=None, data=None, timeout=None):
+    def router(method, url, params=None, data=None, files=None, timeout=None):
         if "debug_token" in url:
             return FakeResponse(
                 {
@@ -371,7 +371,7 @@ def test_token_info_check_fails_when_expiry_is_near(sim, capsys):
                     }
                 }
             )
-        return original(method, url, params, data, timeout)
+        return original(method, url, params, data, files, timeout)
 
     sim.request = router
     assert token_info.main(["--check", "--days", "14"]) == 1
@@ -384,10 +384,10 @@ def test_token_info_never_prints_the_token(sim, capsys):
 
     original = sim.request
 
-    def router(method, url, params=None, data=None, timeout=None):
+    def router(method, url, params=None, data=None, files=None, timeout=None):
         if "debug_token" in url:
             return FakeResponse({"data": {"type": "SYSTEM_USER", "is_valid": True}})
-        return original(method, url, params, data, timeout)
+        return original(method, url, params, data, files, timeout)
 
     sim.request = router
     token_info.main([])

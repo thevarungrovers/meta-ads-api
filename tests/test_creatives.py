@@ -236,10 +236,111 @@ def test_no_edits_at_all_is_refused():
 
 def test_the_payload_carries_tracking_and_the_advantage_opt_outs():
     """Dropping degrees_of_freedom_spec silently OPTS THE NEW CREATIVE INTO
-    every automatic enhancement the old one had turned off."""
-    dof = {"creative_features_spec": {"standard_enhancements": {"enroll_status": "OPT_OUT"}}}
+    every automatic enhancement the old one had turned off.
+
+    Uses a feature that still exists: `standard_enhancements` is deprecated and
+    is dropped on purpose, which the test below covers.
+    """
+    dof = {"creative_features_spec": {"image_touchups": {"enroll_status": "OPT_OUT"}}}
     creative = link_creative(url_tags="utm_source=facebook", degrees_of_freedom_spec=dof)
     payload = creatives.plan_payload(creative, {"headline": "new"})
     assert payload["url_tags"] == "utm_source=facebook"
     assert payload["degrees_of_freedom_spec"] == dof
     assert payload["name"]
+
+
+# --- what a read returns is NOT a valid create payload ----------------------
+#
+# All three of these were caught by Meta's own validate_only on the first live
+# dry run, not by any amount of reading. A creative fetched from the API comes
+# back with derived and deprecated fields that the create endpoint refuses.
+
+
+def test_image_url_is_dropped_when_the_hash_is_present():
+    """ObjectStorySpecRedundant: Only one of image_url and image_hash should be
+    specified in the field video_data of object_story_spec."""
+    creative = video_creative()
+    creative.raw["object_story_spec"]["video_data"]["image_url"] = "https://x/y.jpg"
+    spec = creatives.build_spec(creative, {"headline": "new"})
+    block = spec["object_story_spec"]["video_data"]
+    assert "image_url" not in block
+    assert block["image_hash"] == "thumb123", "the canonical form was dropped instead"
+
+
+def test_a_lone_image_url_survives_because_nothing_supersedes_it():
+    creative = video_creative()
+    block = creative.raw["object_story_spec"]["video_data"]
+    del block["image_hash"]
+    block["image_url"] = "https://x/y.jpg"
+    spec = creatives.build_spec(creative, {"headline": "new"})
+    assert spec["object_story_spec"]["video_data"]["image_url"] == "https://x/y.jpg"
+
+
+def test_the_deprecated_enhancement_key_is_dropped_but_the_opt_outs_kept():
+    """Creative should not include standard enhancements: ... deprecated.
+
+    The spec as a whole still has to travel, or the new creative opts into
+    every automatic enhancement the old one had turned off.
+    """
+    creative = link_creative(
+        degrees_of_freedom_spec={
+            "creative_features_spec": {
+                "standard_enhancements": {"enroll_status": "OPT_OUT"},
+                "image_touchups": {"enroll_status": "OPT_OUT"},
+                "text_generation": {"enroll_status": "OPT_OUT"},
+            }
+        }
+    )
+    payload = creatives.plan_payload(creative, {"headline": "new"})
+    features = payload["degrees_of_freedom_spec"]["creative_features_spec"]
+    assert "standard_enhancements" not in features
+    assert features["image_touchups"] == {"enroll_status": "OPT_OUT"}
+    assert features["text_generation"] == {"enroll_status": "OPT_OUT"}
+
+
+def test_a_spec_containing_only_the_deprecated_key_is_sent_as_nothing():
+    """An empty spec says nothing, so send none at all rather than an empty one."""
+    creative = link_creative(
+        degrees_of_freedom_spec={
+            "creative_features_spec": {
+                "standard_enhancements": {"enroll_status": "OPT_OUT"}
+            }
+        }
+    )
+    payload = creatives.plan_payload(creative, {"headline": "new"})
+    assert "degrees_of_freedom_spec" not in payload
+
+
+def test_an_asset_feed_keeps_its_page_alongside_the_feed():
+    """A real asset-feed creative carries BOTH specs: the feed holds the copy,
+    object_story_spec holds the page the post is published as. Returning only
+    the feed loses the page, and Meta refuses with "You must select an existing
+    post or create a post for your ad creative" -- which names neither field.
+    """
+    creative = feed_creative(
+        object_story_spec={"page_id": "PAGE", "instagram_user_id": "IG"}
+    )
+    spec = creatives.build_spec(creative, {"headline": "new"})
+    assert spec["asset_feed_spec"]["titles"][0]["text"] == "new"
+    assert spec["object_story_spec"]["page_id"] == "PAGE"
+    assert spec["object_story_spec"]["instagram_user_id"] == "IG"
+
+
+def test_an_asset_feeds_images_also_lose_their_derived_url():
+    creative = feed_creative()
+    creative.raw["asset_feed_spec"]["images"] = [
+        {"hash": "img1", "url": "https://x/y.jpg", "adlabels": [{"name": "img"}]}
+    ]
+    spec = creatives.build_spec(creative, {"headline": "new"})
+    image = spec["asset_feed_spec"]["images"][0]
+    assert image["hash"] == "img1"
+    assert image["adlabels"], "adlabels were lost"
+
+
+def test_media_only_edits_are_allowed_when_the_caller_opts_in():
+    """Swapping the image and leaving every word alone is an ordinary change,
+    and refusing it as 'no edits given' would be wrong."""
+    spec = creatives.build_spec(link_creative(), {}, allow_empty=True)
+    assert spec["object_story_spec"]["link_data"]["message"] == "primary text here"
+    with pytest.raises(MutationError):
+        creatives.build_spec(link_creative(), {})

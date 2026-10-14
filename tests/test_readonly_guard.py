@@ -45,6 +45,9 @@ ALLOWED = {
     "metaads_reporting/write/client.py",
     "metaads_reporting/write/plan.py",
     "metaads_reporting/write/audit.py",
+    # Uploads a file to the adimages edge, so it names POST like the rest of
+    # the write package.
+    "metaads_reporting/write/media.py",
     # The human-driven CLI.
     "scripts/manage.py",
 }

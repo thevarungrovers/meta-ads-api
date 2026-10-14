@@ -24,6 +24,8 @@ READ_TOOLS = frozenset(
         "run_report",
         "get_guardrails",
         "list_my_changes",
+        "get_ad_creative",
+        "list_audiences",
     }
 )
 
@@ -35,6 +37,9 @@ PREVIEW_TOOLS = frozenset(
         "preview_ad_set_daily_budget",
         "preview_ad_set_bid_amount",
         "preview_ad_status",
+        "preview_duplicate_ad",
+        "preview_update_ad_copy",
+        "preview_create_audience",
     }
 )
 
@@ -46,6 +51,9 @@ APPLY_TOOLS = frozenset(
         "apply_ad_set_daily_budget",
         "apply_ad_set_bid_amount",
         "apply_ad_status",
+        "apply_duplicate_ad",
+        "apply_update_ad_copy",
+        "apply_create_audience",
         "revert_change",
     }
 )
@@ -159,6 +167,9 @@ def test_the_money_moving_applies_are_marked_destructive(tools):
         "apply_ad_set_status",
         "apply_ad_set_daily_budget",
         "apply_ad_set_bid_amount",
+        # Replaces a live ad's creative: it re-enters review, delivery can
+        # pause, and the social proof on the old post is discarded.
+        "apply_update_ad_copy",
     }
     for name in APPLY_TOOLS:
         assert tools[name].annotations.destructive_hint is (name in spends), name

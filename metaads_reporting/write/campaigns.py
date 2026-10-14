@@ -142,6 +142,10 @@ def search(
         EDGE,
         FIELDS,
         limit=limit,
+        # `limit` here is what the CALLER wants back, so it is the
+        # intentional cap too. Passing it only as the page size walks the
+        # whole account and trips the runaway guard on a large one.
+        max_items=limit,
         max_pages=max_pages,
         effective_status='["ACTIVE","PAUSED","IN_PROCESS","WITH_ISSUES"]',
     )

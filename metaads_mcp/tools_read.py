@@ -321,6 +321,81 @@ def register(mcp, state) -> None:
             ),
         }
 
+    @mcp.tool(title="Read an ad's creative and its current copy", annotations=READ_ONLY)
+    @refusals_reach_the_caller
+    def get_ad_creative(
+        ad_id: Annotated[str, Field(description="From find_ads")],
+    ) -> dict[str, Any]:
+        """What an ad currently says, and what shape its creative is.
+
+        **Read this before proposing any copy change.** The shape decides what
+        can be edited and how:
+
+        - `link_data` / `video_data` — one value per field.
+        - `asset_feed_spec` — a LIST per field, one entry per locale. A single
+          new value is applied to every locale; pass a list to set them
+          individually, matching the existing length.
+        - `page_only` — a catalog ad. Its copy comes from the product feed, so
+          there is nothing on the creative to change.
+
+        `social_proof` is the likes, comments and shares that
+        `apply_update_ad_copy` would discard. If it is non-zero, say so before
+        proposing that over `apply_duplicate_ad`.
+        """
+        from metaads_reporting.write import creatives
+
+        ad = _as_write_shim(client).node(
+            str(ad_id), ("id", "name", "status", "effective_status", "adset_id",
+                         "campaign_id", "creative")
+        )
+        creative_id = (ad.get("creative") or {}).get("id")
+        if not creative_id:
+            return {
+                "ad_id": str(ad_id),
+                "name": ad.get("name"),
+                "creative": None,
+                "note": "This ad exposes no creative; it may be dynamic or catalog.",
+            }
+        creative = creatives.read(_as_write_shim(client), creative_id)
+        out = creative.describe()
+        out.update(
+            ad_id=str(ad_id),
+            ad_name=ad.get("name"),
+            effective_status=ad.get("effective_status"),
+            social_proof=creatives.social_proof(_as_write_shim(client), creative),
+        )
+        return out
+
+    @mcp.tool(title="List audiences on the account", annotations=READ_ONLY)
+    @refusals_reach_the_caller
+    def list_audiences(
+        kind: Annotated[
+            str, Field(description="'custom', 'saved' or 'all'")
+        ] = "all",
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    ) -> dict[str, Any]:
+        """Audiences that already exist, for picking a lookalike source.
+
+        Reading a customer-list audience is fine and often necessary — you need
+        to see one to build a lookalike from it. CREATING one is what is
+        refused, because that would upload personal data.
+        """
+        from metaads_reporting.write import audiences
+
+        shim = _as_write_shim(client)
+        wanted = (kind or "all").strip().lower()
+        out: dict[str, Any] = {}
+        if wanted in ("custom", "all"):
+            out["custom"] = audiences.list_custom(shim, limit=limit)
+        if wanted in ("saved", "all"):
+            out["saved"] = audiences.list_saved(shim, limit=limit)
+        out["note"] = (
+            "Only 'saved' and 'lookalike' audiences can be CREATED here. A "
+            "customer-list audience must be made in Ads Manager, where a "
+            "person accepts the data terms."
+        )
+        return out
+
     @mcp.tool(
         title="Show the write guardrails and session budget", annotations=LOCAL_ONLY
     )

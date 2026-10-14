@@ -77,9 +77,18 @@ from metaads_mcp.previews import (
 from metaads_reporting.currency import CurrencyError, format_money, from_minor_units
 from metaads_reporting.graph import GraphError
 from metaads_reporting.insights import InsightsQuery, last_n_days
-from metaads_reporting.write import MutatingMetaAdsClient, adsets, ads, campaigns
+from metaads_reporting.write import (
+    MutatingMetaAdsClient,
+    adsets,
+    ads,
+    audiences,
+    campaigns,
+    creatives,
+    media,
+)
+from metaads_reporting.write.audiences import CustomerDataRefused
 from metaads_reporting.write.client import MutationError
-from metaads_reporting.write.plan import execute
+from metaads_reporting.write.plan import execute, execute_chain
 
 #: Exceptions that mean "the tool refused on purpose", as opposed to "the tool
 #: crashed". The distinction is load-bearing: the MCP runtime carries a
@@ -95,6 +104,7 @@ DELIBERATE_REFUSALS = (
     PreviewExpired,
     PreviewStale,
     MutationError,
+    CustomerDataRefused,
     WritesDisabled,
     GraphError,
     CurrencyError,
@@ -1127,6 +1137,437 @@ def register(mcp, state) -> None:  # noqa: C901 - a flat list of tool definition
                 ),
                 apply=True,
             ),
+        )
+
+    # -- ad copy and creative ----------------------------------------------
+    #
+    # A Meta creative is IMMUTABLE once attached, so neither of these edits one.
+    # Both build a NEW creative and differ in what they point at it, which is
+    # why they are separate tool names rather than one tool with a mode flag:
+    # the risk differs, so the permission prompt should too.
+
+    def _copy_args(primary_text, headline, description, link):
+        edits = {
+            "primary_text": primary_text,
+            "headline": headline,
+            "description": description,
+            "link": link,
+        }
+        return {k: v for k, v in edits.items() if v is not None}
+
+    def _copy_preview(
+        *,
+        tool: str,
+        plan,
+        row: dict[str, Any],
+        projected: Decimal,
+        note: str,
+        payload_extra: dict[str, Any],
+    ) -> ChangePreview:
+        currency = currency_of()
+        checks = status_checks(str(row.get("campaign_id")), projected)
+        before = " | ".join(
+            f"{c.field}: {c.before!r}" for c in plan.changes if c.before is not None
+        ) or "(see metrics)"
+        after = " | ".join(f"{c.field}: {c.after!r}" for c in plan.changes)
+        return build_preview(
+            tool=tool,
+            entity_type="ad",
+            entity_id=str(row.get("id")),
+            entity_name=row.get("name") or "",
+            path=f"ad set {row.get('adset_id')} > {row.get('name')}",
+            field_name="creative",
+            before=before,
+            after=after,
+            checks=checks,
+            projected=projected,
+            currency=currency,
+            metrics=metrics_7d(str(row["id"]), "ad"),
+            status=row.get("status"),
+            effective_status=row.get("effective_status"),
+            warnings=plan.warnings,
+            payload={
+                "ad_id": str(row["id"]),
+                "before": before,
+                "after": after,
+                "name": row.get("name") or "",
+                **payload_extra,
+            },
+            note=note,
+        )
+
+    @mcp.tool(
+        title="Preview duplicating an ad with new copy or media",
+        annotations=PREVIEW_SAFE,
+    )
+    @refusals_reach_the_caller
+    def preview_duplicate_ad(
+        ad_id: Annotated[str, Field(description="The ad to copy, from find_ads")],
+        primary_text: Annotated[
+            str | None, Field(description="New body text (Ads Manager: primary text)")
+        ] = None,
+        headline: Annotated[str | None, Field(description="New headline")] = None,
+        description: Annotated[str | None, Field(description="New description")] = None,
+        link: Annotated[str | None, Field(description="New destination URL")] = None,
+        image_path: Annotated[
+            str | None, Field(description="Local image file to upload and use")
+        ] = None,
+        video_id: Annotated[
+            str | None, Field(description="An EXISTING Meta video id to use")
+        ] = None,
+        new_name: Annotated[str | None, Field(description="Name for the new ad")] = None,
+    ) -> ChangePreview:
+        """Show a NEW ad built beside an existing one, with changed copy.
+
+        The safe half of the pair. The original is untouched -- it keeps
+        delivering, keeps its history and keeps its likes and comments. The new
+        ad is created PAUSED, so going live is a separate deliberate step.
+
+        On a multi-locale creative a single value is applied to every locale.
+        Pass nothing for a field to leave it as it is.
+        """
+        plan = ads.plan_duplicate_ad(
+            write_client,
+            ad_id=ad_id,
+            new_name=new_name,
+            edits=_copy_args(primary_text, headline, description, link),
+            image_path=image_path,
+            video_id=video_id,
+        )
+        row = ads.find(write_client, ad_id=ad_id)
+        return _copy_preview(
+            tool="apply_duplicate_ad",
+            plan=plan,
+            row=row,
+            # A new PAUSED ad cannot spend: it is not delivering, and its ad
+            # set's budget is unchanged either way.
+            projected=Decimal("0"),
+            note=(
+                "The new ad is PAUSED, so the projected delta is 0 and nothing "
+                "changes until somebody activates it. The original ad is not "
+                "modified."
+            ),
+            payload_extra={
+                "edits": _copy_args(primary_text, headline, description, link),
+                "image_path": image_path,
+                "video_id": video_id,
+                "new_name": new_name,
+            },
+        )
+
+    @apply_tool(
+        title="Create the duplicate ad the preview described",
+        annotations=APPLY_REVERSIBLE,
+    )
+    @refusals_reach_the_caller
+    def apply_duplicate_ad(
+        preview_token: Annotated[str, Field(description="From preview_duplicate_ad")],
+    ) -> ApplyResult:
+        """Build the new creative and the new PAUSED ad."""
+        pending = state.previews.take(preview_token, "apply_duplicate_ad")
+        payload = pending.payload
+        row = ads.find(write_client, ad_id=payload["ad_id"])
+        return _commit_creative(
+            pending,
+            tool="apply_duplicate_ad",
+            row=row,
+            builder=lambda: ads.plan_duplicate_ad(
+                write_client,
+                ad_id=payload["ad_id"],
+                new_name=payload.get("new_name"),
+                edits=payload.get("edits") or {},
+                image_path=payload.get("image_path"),
+                video_id=payload.get("video_id"),
+            ),
+        )
+
+    @mcp.tool(
+        title="Preview changing a live ad's copy or media", annotations=PREVIEW_SAFE
+    )
+    @refusals_reach_the_caller
+    def preview_update_ad_copy(
+        ad_id: Annotated[str, Field(description="The ad to change, from find_ads")],
+        primary_text: Annotated[str | None, Field(description="New body text")] = None,
+        headline: Annotated[str | None, Field(description="New headline")] = None,
+        description: Annotated[str | None, Field(description="New description")] = None,
+        link: Annotated[str | None, Field(description="New destination URL")] = None,
+        image_path: Annotated[
+            str | None, Field(description="Local image file to upload and use")
+        ] = None,
+        video_id: Annotated[
+            str | None, Field(description="An EXISTING Meta video id to use")
+        ] = None,
+    ) -> ChangePreview:
+        """Show repointing an EXISTING ad at a new creative. Keeps the ad id.
+
+        **This usually discards social proof.** A new creative means a new
+        post, so the likes, comments and shares on the current one do not carry
+        over -- the preview reports the exact counts at stake. Prefer
+        preview_duplicate_ad when that engagement matters.
+
+        A live ad also re-enters review, and delivery can pause until the new
+        copy is approved.
+        """
+        plan = ads.plan_update_copy(
+            write_client,
+            ad_id=ad_id,
+            edits=_copy_args(primary_text, headline, description, link),
+            image_path=image_path,
+            video_id=video_id,
+        )
+        row = ads.find(write_client, ad_id=ad_id)
+        return _copy_preview(
+            tool="apply_update_ad_copy",
+            plan=plan,
+            row=row,
+            projected=Decimal("0"),
+            note=(
+                "The ad set's budget does not move, so the projected delta is "
+                "0. What changes is what the ad says -- and, usually, the "
+                "social proof it had accumulated."
+            ),
+            payload_extra={
+                "edits": _copy_args(primary_text, headline, description, link),
+                "image_path": image_path,
+                "video_id": video_id,
+            },
+        )
+
+    @apply_tool(
+        title="Apply the ad copy change (REPLACES THE CREATIVE)",
+        annotations=APPLY_SPENDS,
+    )
+    @refusals_reach_the_caller
+    def apply_update_ad_copy(
+        preview_token: Annotated[str, Field(description="From preview_update_ad_copy")],
+    ) -> ApplyResult:
+        """Build the new creative and point the existing ad at it."""
+        pending = state.previews.take(preview_token, "apply_update_ad_copy")
+        payload = pending.payload
+        row = ads.find(write_client, ad_id=payload["ad_id"])
+        return _commit_creative(
+            pending,
+            tool="apply_update_ad_copy",
+            row=row,
+            builder=lambda: ads.plan_update_copy(
+                write_client,
+                ad_id=payload["ad_id"],
+                edits=payload.get("edits") or {},
+                image_path=payload.get("image_path"),
+                video_id=payload.get("video_id"),
+            ),
+        )
+
+    def _commit_creative(pending, *, tool: str, row: dict[str, Any], builder):
+        """Shared apply path for both creative tools.
+
+        Rebuilds the plan at apply time rather than carrying protos in the
+        token: the source ad may have moved, and a plan built now is checked
+        against what is there now.
+        """
+        require_writes_enabled()
+        blocked = state.counters.would_exceed(pending.projected_delta)
+        if blocked:
+            raise PreviewExpired(blocked)
+
+        plan = builder()
+        entry_id = ledger.new_entry_id()
+        ledger.write_intent(
+            entry_id=entry_id,
+            tool=tool,
+            account_id=default_account,
+            entity_type="ad",
+            entity_id=str(row.get("id")),
+            entity_name=row.get("name") or "",
+            field_name="creative",
+            before=pending.payload["before"],
+            after=pending.payload["after"],
+            projected_delta=str(pending.projected_delta),
+        )
+        try:
+            # The image upload happens here, at apply time, because it is a
+            # write. The preview described the FILE rather than inventing a
+            # hash for it.
+            image_path = pending.payload.get("image_path")
+            if image_path:
+                image = media.inspect_image(image_path)
+                image_hash = media.upload_image(write_client, image, apply=True)
+                plan.requires.payload = ads._fill_uploaded_image(
+                    plan.requires.payload, image_hash
+                )
+            result, created = execute_chain(write_client, plan, apply=True)
+        except Exception as exc:
+            ledger.write_outcome(entry_id=entry_id, ok=False, error=str(exc))
+            raise
+        if not result.success:
+            message = (
+                f"Meta accepted the request but did not confirm it: "
+                f"{result.response!r}. Check Ads Manager before retrying."
+            )
+            ledger.write_outcome(entry_id=entry_id, ok=False, error=message)
+            raise MutationError(message)
+
+        new_id = result.node_id or str(row.get("id"))
+        ledger.write_outcome(entry_id=entry_id, ok=True, resource_name=new_id)
+        state.counters.record(pending.projected_delta)
+        return ApplyResult(
+            applied=True,
+            entry_id=entry_id,
+            entity_type="ad",
+            entity_id=new_id,
+            entity_name=row.get("name") or "",
+            field_name="creative",
+            before=pending.payload["before"],
+            after=pending.payload["after"],
+            session=state.counters.snapshot(),
+        )
+
+    # -- audiences ----------------------------------------------------------
+
+    @mcp.tool(title="Preview creating an audience", annotations=PREVIEW_SAFE)
+    @refusals_reach_the_caller
+    def preview_create_audience(
+        kind: Annotated[str, Field(description="'saved' or 'lookalike'")],
+        name: Annotated[str, Field(description="Name for the new audience")],
+        targeting: Annotated[
+            dict[str, Any] | None,
+            Field(description="For 'saved': Meta's targeting spec"),
+        ] = None,
+        origin_audience_id: Annotated[
+            str | None, Field(description="For 'lookalike': the source, from list_audiences")
+        ] = None,
+        country: Annotated[
+            str | None, Field(description="For 'lookalike': two-letter code, e.g. CA")
+        ] = None,
+        ratio: Annotated[
+            float, Field(description="For 'lookalike': 0.01 to 0.20", ge=0.01, le=0.20)
+        ] = 0.01,
+    ) -> ChangePreview:
+        """Show a saved targeting spec or a lookalike. Writes nothing.
+
+        **Customer-list audiences are not available here and never will be.**
+        Building one uploads hashed customer emails and phone numbers to Meta;
+        that is personal data leaving the company, and it belongs in Ads
+        Manager where a person accepts the data terms. The attempt is refused
+        structurally, not just undocumented.
+
+        A lookalike is derived from a source Meta already holds, so nothing is
+        uploaded.
+        """
+        wanted = (kind or "").strip().lower()
+        if wanted == "saved":
+            plan = audiences.plan_create_saved(
+                write_client, name=name, targeting=targeting or {}
+            )
+        elif wanted == "lookalike":
+            if not origin_audience_id or not country:
+                raise ValueError(
+                    "A lookalike needs origin_audience_id and country. Use "
+                    "list_audiences to find a source."
+                )
+            plan = audiences.plan_create_lookalike(
+                write_client,
+                name=name,
+                origin_audience_id=origin_audience_id,
+                country=country,
+                ratio=ratio,
+            )
+        else:
+            raise ValueError(
+                f"kind must be 'saved' or 'lookalike', got {kind!r}. A "
+                f"customer-list audience is not available here: it would "
+                f"upload personal data to Meta."
+            )
+
+        checks = [
+            check_writes_enabled(),
+            check_account_in_scope(state.limits, default_account, default_account),
+        ]
+        return build_preview(
+            tool="apply_create_audience",
+            entity_type=plan.entity,
+            entity_id="(new)",
+            entity_name=name,
+            path=f"account {default_account}",
+            field_name="audience",
+            before="(does not exist)",
+            after=" | ".join(f"{c.field}: {c.after}" for c in plan.changes),
+            checks=checks,
+            projected=Decimal("0"),
+            currency=currency_of(),
+            warnings=plan.warnings,
+            payload={
+                "kind": wanted,
+                "name": name,
+                "targeting": targeting,
+                "origin_audience_id": origin_audience_id,
+                "country": country,
+                "ratio": ratio,
+                "before": "(does not exist)",
+                "after": name,
+            },
+            note=(
+                "Creating an audience changes no delivery on its own -- it is "
+                "available for an ad set to use. Projected delta is 0."
+            ),
+        )
+
+    @apply_tool(title="Create the audience the preview described", annotations=APPLY_REVERSIBLE)
+    @refusals_reach_the_caller
+    def apply_create_audience(
+        preview_token: Annotated[str, Field(description="From preview_create_audience")],
+    ) -> ApplyResult:
+        """Create the saved audience or lookalike."""
+        pending = state.previews.take(preview_token, "apply_create_audience")
+        payload = pending.payload
+        require_writes_enabled()
+        blocked = state.counters.would_exceed(Decimal("0"))
+        if blocked:
+            raise PreviewExpired(blocked)
+
+        if payload["kind"] == "saved":
+            plan = audiences.plan_create_saved(
+                write_client, name=payload["name"], targeting=payload["targeting"] or {}
+            )
+        else:
+            plan = audiences.plan_create_lookalike(
+                write_client,
+                name=payload["name"],
+                origin_audience_id=payload["origin_audience_id"],
+                country=payload["country"],
+                ratio=payload["ratio"],
+            )
+
+        entry_id = ledger.new_entry_id()
+        ledger.write_intent(
+            entry_id=entry_id,
+            tool="apply_create_audience",
+            account_id=default_account,
+            entity_type=plan.entity,
+            entity_id="(new)",
+            entity_name=payload["name"],
+            field_name="audience",
+            before="(does not exist)",
+            after=payload["name"],
+            projected_delta="0",
+        )
+        try:
+            result = execute(write_client, plan, apply=True)
+        except Exception as exc:
+            ledger.write_outcome(entry_id=entry_id, ok=False, error=str(exc))
+            raise
+        ledger.write_outcome(entry_id=entry_id, ok=True, resource_name=result.node_id)
+        state.counters.record(Decimal("0"))
+        return ApplyResult(
+            applied=True,
+            entry_id=entry_id,
+            entity_type=plan.entity,
+            entity_id=result.node_id or "(new)",
+            entity_name=payload["name"],
+            field_name="audience",
+            before="(does not exist)",
+            after=payload["name"],
+            session=state.counters.snapshot(),
         )
 
     # -- revert ------------------------------------------------------------
