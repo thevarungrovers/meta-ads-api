@@ -89,15 +89,25 @@ ALSO WORTH SAYING OUT LOUD: reported conversions use 7-day-click plus
 touched it, which is why Meta's number is routinely several times any
 click-based record of the same campaign. They are not measuring the same thing.
 
-WHAT IS NOT HERE, deliberately: creating or deleting campaigns, ad sets and
-ads; setting any status to DELETED or ARCHIVED (both are irreversible through
-the API -- pause instead, which is reversible and achieves the same thing);
-swapping an ad's creative (a Meta creative is immutable, so that is a create);
-targeting, optimization goal, billing event and schedule; anything touching
-billing or account access. There is no generic update/passthrough tool, so if
-an operation is not listed it cannot be performed here. Creating a campaign is
-done by a human running `scripts/manage.py campaign new`, because it carries a
-special-ad-category declaration someone has to answer for.
+WHAT THIS SERVER CANNOT DO. It changes the status, budget, bid and name of
+things that ALREADY EXIST. That is the whole surface. It cannot:
+
+  * create or delete a campaign, ad set or ad;
+  * write or change ad copy -- primary text, headline, description -- or swap
+    an image or video. A Meta creative is immutable once attached, so changing
+    what an ad SAYS means creating a new creative and a new ad;
+  * create or edit an audience of any kind: custom, lookalike or saved;
+  * change targeting, optimization goal, billing event, schedule or special ad
+    categories;
+  * set a status to DELETED or ARCHIVED (both irreversible -- pause instead);
+  * touch billing or account access.
+
+*** NONE OF THAT IS AVAILABLE ANYWHERE IN THIS TOOLCHAIN YET, including the
+CLI. *** If the human needs one of those things, say so plainly and point them
+at Ads Manager. Do NOT tell them to run a script for it -- there isn't one.
+
+There is no generic update/passthrough tool, so if an operation is not listed
+it cannot be performed here.
 
 READ-ONLY INSTALLS. If get_guardrails reports read_only_server: true, this
 process was started with META_ADS_MCP_READ_ONLY set and published no apply_*

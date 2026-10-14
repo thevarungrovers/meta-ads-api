@@ -210,3 +210,117 @@ def test_the_requirements_are_all_pinned():
         if not line or line.startswith("#"):
             continue
         assert "==" in line, f"{line} is not pinned"
+
+
+# --- documentation that promises a capability --------------------------------
+#
+# Added after a live session on 2026-10-14. The MCP server's own instructions
+# told an agent that a human could run `scripts/manage.py campaign new`. No such
+# command had ever existed -- the text was written by analogy with a sibling
+# repo. An agent following it would have sent somebody to a command that fails,
+# and the README and the skill repeated the claim.
+#
+# Documentation that names a command is a promise, and a promise is testable.
+
+
+def manage_subcommands() -> dict[str, set[str]]:
+    """What scripts/manage.py accepts: ``{group: {actions}}``.
+
+    A group with an EMPTY set takes a positional argument instead of a
+    sub-subcommand -- ``find campaign "x"`` is `find` with two arguments, not a
+    `find campaign` subcommand. Reading that off the parser rather than
+    hardcoding it is what keeps this from flagging a perfectly valid example.
+    """
+    import argparse
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_manage", REPO_ROOT / "scripts" / "manage.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    found: dict[str, set[str]] = {}
+    parser = module.build_parser()
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for group, sub in action.choices.items():
+            actions: set[str] = set()
+            for inner in sub._actions:
+                if isinstance(inner, argparse._SubParsersAction):
+                    actions |= set(inner.choices)
+            found[group] = actions
+    return found
+
+
+#: Files that tell a human or an agent what to run.
+DOC_FILES = (
+    "README.md",
+    ".claude/skills/meta-ads/SKILL.md",
+    "metaads_mcp/server.py",
+)
+
+#: `manage.py something` followed by another bare word.
+_MANAGE_INVOCATION = re.compile(r"manage\.py\s+([a-z-]+)(?:\s+([a-z-]+))?")
+
+#: Words that follow `manage.py` without naming a subcommand.
+_NOT_A_SUBCOMMAND = {"has", "is", "and", "for", "to", "the", "it", "in", "with"}
+
+
+@pytest.mark.parametrize("name", DOC_FILES)
+def test_no_doc_promises_a_manage_command_that_does_not_exist(name):
+    path = REPO_ROOT / name
+    real = manage_subcommands()
+    offenders = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        # A prose table lines up the filename with a description; only an
+        # invocation (the script actually being run) is a promise.
+        if "manage.py" in line and "scripts/manage.py" not in line:
+            continue
+        for group, action in _MANAGE_INVOCATION.findall(line):
+            if group in _NOT_A_SUBCOMMAND:
+                continue
+            if group not in real:
+                offenders.append(f"line {lineno}: manage.py {group}")
+                continue
+            # Only check the second word when this group HAS subcommands.
+            # `find` takes a positional, so `find campaign` is valid usage.
+            if not real[group]:
+                continue
+            if action and action not in _NOT_A_SUBCOMMAND and not action.startswith("-"):
+                if action not in real[group]:
+                    offenders.append(f"line {lineno}: manage.py {group} {action}")
+    assert not offenders, (
+        f"{name} names a manage.py command that does not exist: {offenders}. "
+        f"Real: {({g: sorted(a) for g, a in real.items()})}"
+    )
+
+
+def test_the_write_surface_the_docs_claim_matches_the_allowlist():
+    """The docs say the write surface is status, name, budget and bid. If
+    somebody widens WRITABLE_FIELDS, this fails and the docs get revisited."""
+    from metaads_reporting.write.client import WRITABLE_FIELDS
+
+    every = set().union(*WRITABLE_FIELDS.values())
+    assert every == {
+        "status",
+        "name",
+        "daily_budget",
+        "lifetime_budget",
+        "bid_amount",
+    }, (
+        f"the write surface changed to {sorted(every)} -- README and SKILL.md "
+        f"both state it explicitly and now need updating"
+    )
+
+
+def test_create_is_still_unreachable_from_the_server():
+    """create() has no caller. If one is added, it needs its own guard and the
+    docs need to stop saying creation is unavailable."""
+    import metaads_mcp.tools_write as tools_write
+    import metaads_reporting.write.campaigns as campaigns
+
+    for module in (tools_write, campaigns):
+        source = (REPO_ROOT / module.__file__.split("meta-ads-api/")[-1]).read_text()
+        assert ".create(" not in source, f"{module.__name__} now calls create()"

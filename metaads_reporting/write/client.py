@@ -279,14 +279,22 @@ class MutatingMetaAdsClient:
     ) -> MutationResult:
         """Create one object under the ad account.
 
-        Reached only from ``scripts/manage.py``. It is NOT exposed over MCP:
-        creating a campaign carries an objective, a budget and a special-ad-
-        category declaration that is a legal statement, and those belong to a
-        human who can answer for them.
+        *** NOTHING CALLS THIS YET. *** It is the foundation for a create path,
+        not a create path. ``scripts/manage.py`` has no create command, and the
+        MCP server cannot reach this by construction. Earlier versions of the
+        README and the server instructions claimed a
+        ``manage.py campaign new`` existed; it never did, and that claim is
+        gone.
+
+        Deliberately NOT exposed over MCP: creating a campaign carries an
+        objective, a budget and a ``special_ad_categories`` declaration that is
+        a legal statement about housing, employment, credit and social-issue
+        advertising. That belongs to a human who can answer for it.
 
         ``payload`` is not field-allowlisted the way :meth:`update` is -- a
-        create needs fields no update ever sets -- so the guard here is simply
-        that nothing in the MCP server can call it.
+        create needs fields no update ever sets -- so the only guard is that
+        nothing in the MCP server can call it. Anyone wiring this up owes it a
+        guard of its own.
         """
         if not payload:
             raise MutationError("Nothing to create: the payload is empty.")

@@ -100,11 +100,14 @@ treating the gap as a bug.
 - **DON'T try to set anything to DELETED or ARCHIVED.** Both are irreversible
   through the API and neither is exposed. Pause instead — same effect on
   delivery, and it can be undone.
-- **DON'T try to create a campaign, an ad set or an ad.** Not exposed; a human
-  runs `scripts/manage.py`, because a campaign carries a special-ad-category
-  declaration somebody has to answer for.
-- **DON'T try to change an ad's creative.** A Meta creative is immutable once
-  attached, so changing what an ad says is a *new ad*, not an edit.
+- **DON'T try to create a campaign, an ad set or an ad.** Not available here,
+  and **not available from the CLI either** — there is no script for it. Say so
+  and point the human at Ads Manager.
+- **DON'T try to change an ad's creative, copy or media.** Primary text,
+  headline, description, image, video: none of it is reachable. A Meta creative
+  is immutable once attached, so changing what an ad says is a *new ad*.
+- **DON'T try to create or edit an audience** — custom, lookalike or saved.
+  Entirely out of scope.
 - **DON'T sum `reach` or `frequency` across rows.** The same person reached on
   two days is one person. Use the `creative_fatigue` report, which collapses the
   window into one row per ad for exactly this reason.
@@ -143,16 +146,21 @@ treating the gap as a bug.
 Each `apply_*` takes **only** a `preview_token` — never the values. That is
 deliberate: it means an apply cannot be called cold, with nothing shown first.
 
-### Not here, on purpose
+### Not here — and not anywhere else in this toolchain
 
-Creating or deleting campaigns, ad sets and ads. Setting any status to DELETED or
-ARCHIVED. Swapping an ad's creative. Targeting, optimization goal, billing event,
-schedule, special ad categories. Anything touching billing or account access —
-none of those fields is on the write client's allowlist at all.
+Creating or deleting campaigns, ad sets and ads. Ad copy and creative of every
+kind: primary text, headline, description, images, video. Audiences: custom,
+lookalike, saved. Targeting, optimization goal, billing event, schedule, special
+ad categories. Setting a status to DELETED or ARCHIVED. Billing and account
+access. None of those fields is on the write client's allowlist at all.
 
 There is **no generic update/passthrough tool**, so if an operation is not in the
-tables above it cannot be done from here. If the human needs one, say so and
-point them at `scripts/manage.py`.
+tables above it cannot be done from here.
+
+**And there is no CLI fallback.** `scripts/manage.py` has the same write surface
+this server does — status, budget, bid, name — and nothing more. If the human
+needs one of the above, tell them plainly that it is not built, and point them at
+Ads Manager. Do not send them to a script.
 
 ## Reading the preview
 

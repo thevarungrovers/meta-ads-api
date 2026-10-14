@@ -278,21 +278,29 @@ resolved for you.
 | `preview/apply_ad_status` | Pause or activate one ad |
 | `revert_change` | Undo one ledger entry |
 
-### Cannot do at all
+### Cannot do at all — including from the CLI
 
-Creating or deleting campaigns, ad sets and ads. Setting any status to `DELETED`
-or `ARCHIVED`. Swapping an ad's creative. Targeting, optimization goal, billing
-event, schedule, special ad categories. Anything touching billing or account
-access.
+**This toolchain changes the status, budget, bid and name of things that already
+exist. That is its entire write surface.** Nothing in it — not the MCP server,
+not `scripts/manage.py` — can:
+
+| Not available | Why it is not a small addition |
+|---|---|
+| Create a campaign, ad set or ad | A campaign carries a `special_ad_categories` declaration, which is a legal statement about housing/employment/credit/social-issue advertising |
+| Write or edit ad copy (primary text, headline, description) | A Meta creative is **immutable once attached**, so this is a create, not an edit — and repointing a live ad at a new creative resets its social proof |
+| Upload or swap an image or video | Media goes to the `adimages`/`advideos` edges first, then into a creative |
+| Create or edit an audience (custom, lookalike, saved) | A custom audience means uploading hashed customer PII under Meta's data terms |
+| Change targeting, optimization goal, billing event, schedule | Not on the write client's field allowlist |
+| Set a status to `DELETED` or `ARCHIVED` | Irreversible through the API — pause instead |
+| Anything touching billing or account access | Out of scope by design |
 
 None of that is "refused at call time" — there is **no generic
-update/passthrough tool**, and the write client's field allowlist does not
-contain those fields. An unregistered operation is unreachable, not merely
-undocumented. `tests/test_mcp_surface.py` pins the tool names so adding one is a
-reviewed diff.
+update/passthrough tool**, and the write client's field allowlist contains only
+`status`, `name`, `daily_budget`, `lifetime_budget` and `bid_amount`. An
+unregistered operation is unreachable, not merely undocumented.
+`tests/test_mcp_surface.py` pins the tool names so adding one is a reviewed diff.
 
-Creating a campaign is a human running `scripts/manage.py`, because it carries a
-special-ad-category declaration somebody has to answer for.
+For any of the above, use Ads Manager.
 
 ## What a preview tells you
 
