@@ -434,3 +434,58 @@ def test_an_unsupported_method_is_refused_before_a_request_is_built():
 def test_a_bare_list_body_is_wrapped_so_callers_always_see_a_dict():
     session = FakeSession([FakeResponse([{"id": "1"}])])
     assert transport(session).get("x") == {"data": [{"id": "1"}]}
+
+
+# --- page size vs intentional cap vs runaway guard --------------------------
+#
+# Hit on a live account with 1500+ ads: asking for one page raised instead of
+# returning one page, because max_pages was doing double duty as both "how many
+# I want" and "I did not mean to walk the whole account".
+
+
+def test_max_items_stops_cleanly_without_raising():
+    """A deliberate cap is not an error -- stopping is what was asked for."""
+    session = FakeSession(
+        [page([{"id": "1"}, {"id": "2"}, {"id": "3"}], next_url="https://graph.facebook.com/n")]
+    )
+    items = list(transport(session).paged("act_1/ads", max_items=2))
+    assert [i["id"] for i in items] == ["1", "2"]
+
+
+def test_max_items_stops_across_a_page_boundary():
+    session = FakeSession(
+        [
+            page([{"id": "1"}, {"id": "2"}], next_url="https://graph.facebook.com/n"),
+            page([{"id": "3"}, {"id": "4"}], next_url="https://graph.facebook.com/n2"),
+        ]
+    )
+    items = list(transport(session).paged("act_1/ads", max_items=3))
+    assert [i["id"] for i in items] == ["1", "2", "3"]
+
+
+def test_max_items_does_not_fetch_a_page_it_does_not_need():
+    """Stopping mid-page must not cost another request."""
+    session = FakeSession(
+        [page([{"id": "1"}, {"id": "2"}], next_url="https://graph.facebook.com/n")]
+    )
+    list(transport(session).paged("act_1/ads", max_items=1))
+    assert len(session.calls) == 1
+
+
+def test_max_pages_still_raises_because_that_one_is_accidental():
+    """The caller did NOT ask to stop here, so silence would hide the gap."""
+    endless = [
+        page([{"id": str(i)}], next_url="https://graph.facebook.com/n") for i in range(10)
+    ]
+    with pytest.raises(GraphError) as caught:
+        list(transport(FakeSession(endless)).paged("act_1/ads", max_pages=2))
+    assert "max_items" in str(caught.value), "the message should offer the clean cap"
+
+
+def test_max_items_and_max_pages_can_coexist():
+    """The cap wins when it is reached first, and nothing raises."""
+    endless = [
+        page([{"id": str(i)}], next_url="https://graph.facebook.com/n") for i in range(10)
+    ]
+    items = list(transport(FakeSession(endless)).paged("act_1/ads", max_items=3, max_pages=50))
+    assert len(items) == 3

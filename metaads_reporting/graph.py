@@ -478,30 +478,52 @@ class GraphTransport:
         self,
         path: str,
         *,
+        max_items: int | None = None,
         max_pages: int = DEFAULT_MAX_PAGES,
         **params: Any,
     ) -> Iterator[dict[str, Any]]:
-        """Yield every object across pages, following ``paging.next``.
+        """Yield objects across pages, following ``paging.next``.
 
         Cursor paging, not offset paging: Meta's ``next`` URL already carries
         the cursor and the original field list, so it is followed verbatim
         rather than rebuilt. Re-deriving it is how a field quietly goes missing
         from page two onwards.
+
+        THREE NUMBERS, AND THEY ARE NOT THE SAME THING. Conflating the second
+        and third turned "give me the first page" into an exception on an
+        account with 1500 ads:
+
+        ``limit``      the PAGE SIZE asked of Meta. A tuning knob, nothing more.
+        ``max_items``  an INTENTIONAL cap. "I want at most 50 of these." Stops
+                       cleanly and silently, because stopping is what was asked
+                       for.
+        ``max_pages``  a RUNAWAY GUARD. "I did not intend to walk an entire
+                       account." RAISES, because hitting it means the caller
+                       got less than they asked for and silence would hide it.
+
+        So a deliberate cap never raises, and an accidental walk never
+        truncates quietly.
         """
         page = self.request("GET", path, params=params)
         pages = 0
+        yielded = 0
         while True:
             for item in page.get("data", []) or []:
                 yield item
+                yielded += 1
+                if max_items is not None and yielded >= max_items:
+                    return
             pages += 1
             next_url = ((page.get("paging") or {}).get("next")) or ""
             if not next_url:
                 return
             if pages >= max_pages:
                 raise GraphError(
-                    f"Stopped after {max_pages} pages of {path}. Narrow the "
-                    f"filter, or raise max_pages deliberately -- an unbounded "
-                    f"walk of a large account is slow and burns the rate limit."
+                    f"Stopped after {max_pages} pages of {path} with more to "
+                    f"come. Narrow the filter, pass max_items if you only want "
+                    f"the first N, or raise max_pages deliberately -- an "
+                    f"unbounded walk of a large account is slow and burns the "
+                    f"rate limit."
                 )
             # The next URL already carries the token; sending ours as well is
             # harmless but duplicative, and `request` adds it either way.

@@ -147,6 +147,9 @@ class ReadOnlyMetaAdsClient:
         except GraphAPIError as exc:
             raise MetaAdsReportingError(str(exc)) from exc
 
+    # NOTE: `limit` is the page size, `max_items` is how many you actually
+    # want, and `max_pages` is the runaway guard. See GraphTransport.paged.
+
     # -- the account ------------------------------------------------------
 
     def account(self, account_id: str | None = None) -> dict[str, Any]:
@@ -248,20 +251,23 @@ class ReadOnlyMetaAdsClient:
         fields: tuple[str, ...],
         *,
         limit: int = 100,
+        max_items: int | None = None,
         max_pages: int = 20,
         **params: Any,
     ) -> list[dict[str, Any]]:
-        """Every object on an edge, following paging.
+        """Objects on an edge, following paging.
 
-        ``limit`` is the PAGE SIZE Meta is asked for, not a cap on the result:
-        it keeps paging to ``max_pages``. Those are two different numbers and
-        conflating them is how a "limit 10" returns four hundred rows.
+        ``limit`` is the PAGE SIZE asked of Meta, ``max_items`` is how many you
+        actually want back, and ``max_pages`` is the guard against walking a
+        whole account by accident. Three different numbers; see
+        :meth:`GraphTransport.paged` for why conflating the last two is a bug.
         """
         return list(
             self._paged(
                 f"{node_id}/{edge}",
                 fields=node_fields(*fields),
                 limit=limit,
+                max_items=max_items,
                 max_pages=max_pages,
                 **params,
             )
