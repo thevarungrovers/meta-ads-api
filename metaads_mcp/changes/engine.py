@@ -44,6 +44,7 @@ from metaads_mcp.changes.base import (
     ChangeKind,
     LedgerItem,
     Proposal,
+    chain_tightens,
     entity_projection,
 )
 from metaads_mcp.guardrails import (
@@ -701,23 +702,15 @@ class Engine:
 
     @staticmethod
     def _tightening(entry: dict[str, Any]) -> bool:
-        """Whether ``entry`` -- or, for a revert row, the change it undid --
-        is marked ``tightens``.
+        """Whether the change at the root of ``entry``'s revert chain -- the
+        original, however many reverts back -- is marked ``tightens``.
 
         Undoing (or re-applying) such a change is NEVER classed as only
         lowering spend: a mixed edit can tighten one thing and add spend
         elsewhere, and a projection of 0 at revert time (no headroom left
         today) does not prove the revert cannot raise spend tomorrow.
         """
-        inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
-        if inverse.get("tightens"):
-            return True
-        if entry.get("reverts"):
-            original = ledger.find_entry(entry["reverts"]) or {}
-            undone = original.get("inverse") if isinstance(original.get("inverse"), dict) else {}
-            if undone.get("tightens"):
-                return True
-        return False
+        return chain_tightens(entry)
 
     def _revert_caps(self, prepared: list[dict[str, Any]]) -> None:
         """The caps for one revert -- or one whole batch, checked ONCE, up front.

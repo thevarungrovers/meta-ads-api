@@ -171,6 +171,40 @@ def undone_projection(ctx, entry: dict[str, Any]) -> Decimal:
     return from_cap_currency(ctx, entry, _decimal(inverse.get("undoes_projected")))
 
 
+def revert_chain(entry: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """(the original change, how many reverts deep ``entry`` is).
+
+    Follows ``reverts`` back to the row that is not a revert: the original is
+    depth 0, its revert 1, the revert of that 2, and so on.
+    """
+    from metaads_mcp import ledger
+
+    root, depth, seen = entry, 0, set()
+    while root.get("reverts") and root["reverts"] not in seen:
+        seen.add(root["reverts"])
+        parent = ledger.find_entry(root["reverts"])
+        if parent is None:
+            break
+        root, depth = parent, depth + 1
+    return root, depth
+
+
+def chain_tightens(entry: dict[str, Any]) -> bool:
+    """Whether the change at the root of ``entry``'s revert chain tightened."""
+    root, _ = revert_chain(entry)
+    inverse = root.get("inverse") if isinstance(root.get("inverse"), dict) else {}
+    return bool(inverse.get("tightens"))
+
+
+def lifts_a_restriction(entry: dict[str, Any]) -> bool:
+    """Whether REVERTING ``entry`` lifts a restriction: the chain's original
+    tightened, and ``entry`` is an even number of reverts from it (it applies
+    the tightening, so undoing it lifts)."""
+    root, depth = revert_chain(entry)
+    inverse = root.get("inverse") if isinstance(root.get("inverse"), dict) else {}
+    return bool(inverse.get("tightens")) and depth % 2 == 0
+
+
 @dataclass
 class LedgerItem:
     """One row in the ledger: one entity, one field, one before/after.
@@ -383,24 +417,26 @@ class ChangeKind:
         headroom. Kinds whose original projected 0 but whose revert resumes
         delivery (undoing a pause) override this.
         """
-        inverse = entry.get("inverse") or {}
-        if isinstance(inverse, dict) and inverse.get("tightens"):
-            # Undoing a tightening lifts the restriction: the entity can spend
-            # its unused budget again. Counted like an activation.
+        inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+        if inverse.get("revert_row") and (inverse.get("undoes_projected_entity") is not None
+                                          or inverse.get("undoes_projected") is not None):
+            # Reverting a REVERT re-applies the change it undid: it costs what
+            # that change projected, not the inverse of the revert's own.
+            stored = undone_projection(ctx, entry)
+        else:
+            stored = -entity_projection(ctx, entry)
+        if lifts_a_restriction(entry):
+            # Undoing a tightening -- or re-applying a revert that undid one,
+            # however deep the chain -- lifts the restriction: the entity can
+            # spend its unused budget again. The headroom is re-read NOW (the
+            # budget may have moved since any stored figure), never below
+            # what was stored. Counted like an activation.
             from metaads_mcp.changes.common import unused_headroom
 
-            original = entity_projection(ctx, entry)
-            lifted = max(unused_headroom(ctx, entry), -original, Decimal("0"))
+            lifted = max(unused_headroom(ctx, entry), stored, Decimal("0"))
             return lifted, lifted > 0
-        if isinstance(inverse, dict) and inverse.get("revert_row") and (
-                inverse.get("undoes_projected_entity") is not None
-                or inverse.get("undoes_projected") is not None):
-            # Reverting a REVERT re-applies the original change: it costs what
-            # the original projected, not the inverse of the revert's own.
-            again = max(undone_projection(ctx, entry), Decimal("0"))
-            return again, again > 0
-        restored = max(-entity_projection(ctx, entry), Decimal("0"))
-        return restored, restored > 0
+        again = max(stored, Decimal("0"))
+        return again, again > 0
 
     def revert_reduces_spend(self, ctx, entry: dict[str, Any]) -> bool:
         """Whether undoing ``entry`` can only LOWER spend.
