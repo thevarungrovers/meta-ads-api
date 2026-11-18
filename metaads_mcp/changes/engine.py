@@ -286,7 +286,7 @@ class Engine:
         kind that forgot to stamp cannot ship an unprefixed name.
         """
         identity = self.ctx.identity
-        names = bool(kind.creates_named) or kind.names_entities or bool(proposal.naming)
+        names = bool(kind.creates_named) or bool(proposal.naming)
         if not names:
             return []
         out: list[Check] = []
@@ -294,11 +294,12 @@ class Engine:
             if not any(c.name == "agent_identity" for c in proposal.checks):
                 out.append(Check("agent_identity", False, identity.problem))
             return out
-        if kind.creates_named:
-            if not proposal.created_names and not any(not c.ok for c in proposal.checks):
-                out.append(Check("name_prefix", False,
-                                 f"{kind.name} creates {', '.join(kind.creates_named)} but "
-                                 "reported no name to check"))
+        if kind.creates_named and not proposal.created_names and not any(
+                not c.ok for c in proposal.checks):
+            out.append(Check("name_prefix", False,
+                             f"{kind.name} creates {', '.join(kind.creates_named)} but "
+                             "reported no name to check"))
+        if proposal.created_names:
             if identity.configured:
                 bad = [f"{etype} {name!r}" for etype, name in proposal.created_names
                        if not identity.owns(name)]

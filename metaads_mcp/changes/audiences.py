@@ -79,6 +79,7 @@ class CreateAudience(ChangeKind):
     apply_title = "Create the audience the preview described"
     apply_annotations = APPLY_REVERSIBLE
     revertible = False
+    creates_named = ("audience",)
 
     # -- identities and sources the account can use ---------------------
 
@@ -231,7 +232,7 @@ class CreateAudience(ChangeKind):
         self,
         ctx,
         kind: Annotated[AudienceKind, Field(description="What the audience is built from")],
-        name: Annotated[str, Field(description="Name for the new audience")],
+        name: Annotated[str, Field(description="BASE name for the new audience; the owner/agent prefix is added")],
         targeting: Annotated[
             dict[str, Any] | None, Field(description="saved: Meta's targeting spec")
         ] = None,
@@ -287,6 +288,8 @@ class CreateAudience(ChangeKind):
         preview_ad_set_targeting. An unused audience changes nothing;
         list_audiences(unused_only=True) shows them.
         """
+        decision = ctx.name_for_create("audience", name)
+        name = decision.final
         payload = {
             "kind": (kind or "").strip().lower(),
             "name": name,
@@ -315,7 +318,7 @@ class CreateAudience(ChangeKind):
             from metaads_mcp.changes.targeting import validate_spec
 
             checks.extend(validate_spec(ctx, targeting or {}, campaign=None, require_geo=False))
-        return Proposal(
+        proposal = Proposal(
             entity_type=plan.entity,
             entity_id="(new)",
             entity_name=name,
@@ -333,6 +336,8 @@ class CreateAudience(ChangeKind):
                 "cannot be estimated before it exists; get_audience reports it."
             ),
         )
+        proposal.name(decision)
+        return proposal
 
     def current(self, ctx, payload: dict[str, Any]) -> str:
         return NOTHING

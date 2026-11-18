@@ -36,6 +36,21 @@ SpecialAdCategory = Literal[
 ]
 
 
+def name_is_free(ctx, module, name: str, **scope) -> Check:
+    """WARN when a sibling already has this exact name. Meta does not require
+    names to be unique, so this never blocks: it catches an accidental twin."""
+    try:
+        twins = [r for r in module.search(ctx.client, name, limit=50, **scope)
+                 if (r.get("name") or "") == name]
+    except Exception as exc:  # noqa: BLE001 - advisory
+        return Check("name_is_free", True, f"could not check ({str(exc).splitlines()[0]})", skipped=True)
+    if twins:
+        return Check("name_is_free", True,
+                     f"{len(twins)} existing with this exact name ({', '.join(str(t.get('id')) for t in twins[:5])}); "
+                     "Meta allows it, reports will not tell them apart", warn=True)
+    return Check("name_is_free", True, "no sibling has this name")
+
+
 class _Creates(ChangeKind):
     """Shared: weight 3, nothing before, revert pauses what was made."""
 
@@ -72,11 +87,12 @@ class CreateCampaign(_Creates):
     apply_title = "Create the PAUSED campaign the preview described"
     module = campaigns
     id_arg = "campaign_id"
+    creates_named = ("campaign",)
 
     def propose(
         self,
         ctx,
-        name: Annotated[str, Field(description="Campaign name")],
+        name: Annotated[str, Field(description="Campaign BASE name; the owner/agent prefix is added (see the preview's naming block)")],
         objective: Annotated[Objective, Field(description="The ODAX objective")],
         special_ad_categories: Annotated[
             list[SpecialAdCategory],
@@ -100,8 +116,8 @@ class CreateCampaign(_Creates):
 
         Nothing spends until a human activates it. Next: preview_create_ad_set.
         """
-        if not name.strip():
-            raise ValueError("The campaign needs a name.")
+        decision = ctx.name_for_create("campaign", name)
+        name = decision.final
         cats = [c for c in special_ad_categories if c != "NONE"]
         # Created in the write client's account: that account's currency.
         currency = ctx.currency(ctx.target_account())
@@ -126,7 +142,9 @@ class CreateCampaign(_Creates):
             # Graph form fields want "true"/"false", not Python's "False".
             payload_out["is_adset_budget_sharing_enabled"] = "false"
             budget_text = "budgets on the ad sets"
-        return Proposal(
+        if not decision.refused:
+            checks.append(name_is_free(ctx, campaigns, name))
+        proposal = Proposal(
             entity_type="campaign", entity_id="(new)", entity_name=name,
             path=name, field_name="created", before=NOTHING,
             after=(f"PAUSED {objective} campaign | {budget_text} | "
@@ -140,6 +158,8 @@ class CreateCampaign(_Creates):
             ],
             note="A PAUSED campaign spends nothing; its budget counts against the daily cap only when activated.",
         )
+        proposal.name(decision)
+        return proposal
 
     def build(self, ctx, payload):
         create = payload["create"]
@@ -155,12 +175,13 @@ class CreateAdSet(_Creates):
     apply_title = "Create the PAUSED ad set the preview described"
     module = adsets
     id_arg = "ad_set_id"
+    creates_named = ("ad set",)
 
     def propose(
         self,
         ctx,
         campaign_id: Annotated[str, Field(description="The campaign it goes in")],
-        name: Annotated[str, Field(description="Ad set name")],
+        name: Annotated[str, Field(description="Ad set BASE name; the owner/agent prefix is added")],
         optimization_goal: Annotated[OptimizationGoal, Field(description="What to optimize for")],
         targeting: Annotated[dict[str, Any], Field(description="A full targeting spec (geo_locations required); ids from search_targeting")],
         billing_event: Annotated[BillingEvent, Field(description="Usually IMPRESSIONS")] = "IMPRESSIONS",
@@ -184,6 +205,8 @@ class CreateAdSet(_Creates):
         preview_create_ad.
         """
         campaign = campaigns.find(ctx.client, campaign_id=campaign_id)
+        decision = ctx.name_for_create("ad set", name)
+        name = decision.final
         cbo = campaigns.budget_level(campaign) == "campaign"
         currency = ctx.currency_of(campaign)
         create: dict[str, Any] = {
@@ -217,7 +240,9 @@ class CreateAdSet(_Creates):
             create["start_time"] = parse_time(start_time, "start_time").isoformat()
         if end_time:
             create["end_time"] = parse_time(end_time, "end_time").isoformat()
-        return Proposal(
+        if not decision.refused:
+            checks.append(name_is_free(ctx, adsets, name, campaign_id=str(campaign["id"])))
+        proposal = Proposal(
             entity_type="ad set", entity_id="(new)", entity_name=name,
             path=f"campaign {campaign.get('id')} ({campaign.get('name')}) > {name}",
             field_name="created", before=NOTHING,
@@ -227,6 +252,8 @@ class CreateAdSet(_Creates):
             campaign_id=str(campaign["id"]), account_id=campaign.get("account_id"),
             warnings=["created PAUSED: nothing spends until a human activates it"],
         )
+        proposal.name(decision)
+        return proposal
 
     def build(self, ctx, payload):
         create = payload["create"]

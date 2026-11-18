@@ -45,11 +45,12 @@ class CreateAbTest(ChangeKind):
     apply_title = "Create the A/B test the preview described"
     apply_annotations = APPLY_SPENDS
     weight = CREATE_WEIGHT
+    creates_named = ("ad study",)
 
     def propose(
         self,
         ctx,
-        name: Annotated[str, Field(description="Study name")],
+        name: Annotated[str, Field(description="Study BASE name; the owner/agent prefix is added (cell names are left as given)")],
         variable: Annotated[
             Literal["creative", "audience", "placement"],
             Field(description="The ONE thing the cells differ in"),
@@ -71,6 +72,8 @@ class CreateAbTest(ChangeKind):
         spending when a human activates the cells with the status tools. Revert
         ends it early; it is never deleted.
         """
+        decision = ctx.name_for_create("ad study", name)
+        name = decision.final
         if not 2 <= len(cells or []) <= 5:
             raise ValueError(f"A split test has 2-5 cells, got {len(cells or [])}.")
         start = parse_time(start_time, "start_time")
@@ -140,7 +143,7 @@ class CreateAbTest(ChangeKind):
             checks.append(Check(f"cell_account[{label}]", account == study_account,
                                 f"{label} is in account {account or '(unknown)'}; the study "
                                 f"is created in {study_account}"))
-        return Proposal(
+        proposal = Proposal(
             entity_type="ad study", entity_id="(new)", entity_name=name,
             path=f"account {ctx.default_account}", field_name="created", before=NOTHING,
             after=(f"SPLIT_TEST on {variable} | {start.isoformat()} to {end.isoformat()} | "
@@ -150,6 +153,8 @@ class CreateAbTest(ChangeKind):
             warnings=[*warnings, "the cells spend only once activated with the status tools"],
             note="Creating a study spends nothing; projected 0.",
         )
+        proposal.name(decision)
+        return proposal
 
     def current(self, ctx, payload):
         return NOTHING

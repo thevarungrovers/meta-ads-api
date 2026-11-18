@@ -32,7 +32,7 @@ def test_a_split_test_between_paused_ad_sets_and_its_revert_ends_it(monkeypatch)
     tools, state = rig(monkeypatch, s)
     preview = preview_ok(tools, "create_ab_test", s, name="Audience test", variable="audience",
                          cells=CELLS, start_time=future(1), end_time=future(15))
-    assert not preview.warnings[:-1], preview.warnings
+    assert not [w for w in preview.warnings if not w.startswith("the name will be")][:-1], preview.warnings
     result = tools["apply_create_ab_test"](preview_token=preview.preview_token)
     created = next(c for c in s.created if c["edge"] == "ad_studies")["payload"]
     assert created["type"] == "SPLIT_TEST"

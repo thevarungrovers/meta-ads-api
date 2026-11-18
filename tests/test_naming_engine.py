@@ -32,7 +32,7 @@ class Forgetful(ChangeKind):
             created_names=[("campaign", n) for n in self.names],
         )
         if self.names:
-            proposal.name(ctx.name_for_create("campaign", self.names[0].split("-")[-1]))
+            proposal.name(ctx.name_for_create("campaign", self.names[0].split("-")[-1]), created=False)
         return proposal
 
     def current(self, ctx, payload):

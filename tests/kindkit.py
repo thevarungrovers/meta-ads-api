@@ -37,3 +37,11 @@ def apply_and_revert(tools, kind_name, preview, /):
 
 def failed(preview, check_name: str) -> bool:
     return any(line.startswith("FAIL") and f" {check_name}:" in line for line in preview.checks)
+
+
+def as_identity(state, identity):
+    """Run as another naming identity: the server's, and the write client's guard."""
+    state.identity = identity
+    if state.write_client is not None:
+        state.write_client.required_name_prefix = identity.prefix
+    return identity

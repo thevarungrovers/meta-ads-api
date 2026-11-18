@@ -45,13 +45,14 @@ class CreateAd(ChangeKind):
     apply_annotations = APPLY_SPENDS
     weight = CREATE_WEIGHT
     verifies_ad = True
+    creates_named = ("ad",)
 
     def propose(
         self,
         ctx,
         ad_set_id: Annotated[str, Field(description="The ad set it goes in, from find_ad_sets")],
         creative_id: Annotated[str, Field(description="An existing creative (create_creative, or get_ad's)")],
-        name: Annotated[str, Field(description="Name for the new ad")],
+        name: Annotated[str, Field(description="BASE name for the new ad; the owner/agent prefix is added")],
     ) -> Proposal:
         """Show a new ad, created PAUSED, using a creative that already exists.
 
@@ -66,9 +67,9 @@ class CreateAd(ChangeKind):
         # payload, so the after-apply diff compares the live ad against it
         # rather than against a fresh read of the same creative.
         approved = verify.approved_from_spec(ctx.client.node(str(creative_id), verify.CREATIVE_FIELDS))
-        if not name.strip():
-            raise ValueError("The ad needs a name.")
-        return Proposal(
+        decision = ctx.name_for_create("ad", name)
+        name = decision.final
+        proposal = Proposal(
             entity_type="ad", entity_id="(new)", entity_name=name,
             path=f"ad set {adset.get('id')} ({adset.get('name')}) > {name}",
             field_name="created", before=NOTHING,
@@ -81,6 +82,8 @@ class CreateAd(ChangeKind):
             note="A PAUSED ad spends nothing; projected 0.",
             verify={"adset_id": str(adset["id"]), "creative_id": str(creative_id)},
         )
+        proposal.name(decision)
+        return proposal
 
     def current(self, ctx, payload):
         return NOTHING
@@ -140,6 +143,7 @@ class CreateCreative(ChangeKind):
     weight = CREATE_WEIGHT
     verifies_ad = True
     revertible = False
+    creates_named = ("creative",)
 
     def _spec(self, ctx, p: dict[str, Any]) -> dict[str, Any]:
         media_count = sum(bool(p.get(k)) for k in ("image_path", "image_hash", "video_id"))
@@ -175,7 +179,7 @@ class CreateCreative(ChangeKind):
     def propose(
         self,
         ctx,
-        name: Annotated[str, Field(description="Name for the creative")],
+        name: Annotated[str, Field(description="BASE name for the creative (internal; the owner/agent prefix is added). The headline is NOT this")],
         link: Annotated[str, Field(description="Destination URL")],
         primary_text: Annotated[str | None, Field(description="Body text")] = None,
         headline: Annotated[str | None, Field(description="Headline")] = None,
@@ -198,12 +202,16 @@ class CreateCreative(ChangeKind):
         ones the account's existing creatives use. Previews and the ad checks
         (truncation, image shape, video length, CTA, destination) run here.
         """
-        from metaads_mcp.changes.creative_options import check_url_tags
+        from metaads_mcp.changes.creative_options import check_url_tags, name_macro_warnings
 
         if image_path:
             media.inspect_image(image_path)
         if url_tags:
             url_tags = check_url_tags(url_tags)
+        # Only the creative's top-level, internal `name` is stamped; the
+        # headline viewers see (link_data.name) is the agent's text, untouched.
+        decision = ctx.name_for_create("creative", name)
+        name = decision.final
         default_page, default_ig = default_identity(ctx)
         payload = {
             "name": name, "link": link, "primary_text": primary_text, "headline": headline,
@@ -220,7 +228,7 @@ class CreateCreative(ChangeKind):
         campaign_id = None
         if ad_set_id:
             campaign_id = str(adsets.find(ctx.client, ad_set_id=ad_set_id).get("campaign_id"))
-        return Proposal(
+        proposal = Proposal(
             entity_type="creative", entity_id="(new)", entity_name=name,
             path=f"account {ctx.default_account}", field_name="created",
             before=NOTHING,
@@ -234,6 +242,10 @@ class CreateCreative(ChangeKind):
             verify={"adset_id": ad_set_id, "spec": spec, "image_path": image_path,
                     "video_id": video_id},
         )
+        proposal.name(decision)
+        if url_tags:
+            proposal.warnings.extend(name_macro_warnings(url_tags))
+        return proposal
 
     def current(self, ctx, payload):
         return NOTHING

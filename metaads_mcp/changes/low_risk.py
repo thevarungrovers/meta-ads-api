@@ -163,12 +163,17 @@ class LowRiskChange(NodeFieldKind):
         if not value:
             raise ValueError("value is empty.")
         if field == "label_create":
-            return Proposal(
+            # Labels are prefixed like everything else this server creates.
+            decision = ctx.name_for_create("label", value)
+            value = decision.final
+            proposal = Proposal(
                 entity_type="ad label", entity_id="(new)", entity_name=value,
                 path=f"account {ctx.default_account}", field_name="label_create",
                 before=NOTHING, after=f"label {value!r}", checks=[], projected=Decimal("0"),
                 payload={"field": field, "value": value, "graph_field": "name"},
             ).with_inverse({"field": field})
+            proposal.name(decision)
+            return proposal
         graph_field = ALLOWED[key]
         row = self.read_typed(ctx, entity_type, entity_id)
         if graph_field == "name":

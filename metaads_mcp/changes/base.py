@@ -202,13 +202,16 @@ class Proposal:
     #: decided: requested, final, prefix, base, length, max_length, rule.
     naming: list[dict[str, Any]] = field(default_factory=list)
 
-    def name(self, decision) -> str:
+    def name(self, decision, *, created: bool = True) -> str:
         """Fold a :class:`~metaads_mcp.changes.context.NameDecision` in: its
-        checks, warnings and block. Returns the final name."""
+        checks, warnings and block, and (``created``) the name as one this
+        change creates. Returns the final name."""
         self.checks.extend(decision.checks)
         self.warnings.extend(w for w in decision.warnings if w not in self.warnings)
         if decision.block:
             self.naming.append(decision.block)
+        if created and not decision.refused:
+            self.created_names.append((decision.entity_type, decision.final))
         return decision.final
 
     def with_inverse(self, inverse: dict[str, Any]) -> "Proposal":
@@ -267,9 +270,6 @@ class ChangeKind:
     #: configured prefix; tests/test_mcp_surface.py requires every creating
     #: kind to declare it.
     creates_named: tuple[str, ...] = ()
-    #: A kind that renames (or names) existing entities: its preview gets the
-    #: agent_identity check too.
-    names_entities: bool = False
 
     def follow_ups(self, ctx, payload: dict[str, Any], result, created: list[str]) -> list:
         """Writes to make right after a successful apply, each its own ledger

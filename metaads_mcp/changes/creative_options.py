@@ -62,6 +62,22 @@ def check_url_tags(raw: str) -> str:
     return text
 
 
+_NAME_MACRO = re.compile(r"\{\{\s*(campaign|adset|ad)\.name\s*\}\}")
+
+
+def name_macro_warnings(url_tags: str | None) -> list[str]:
+    """url_tags that copy a NAME into the URL carry the owner/agent prefix too.
+
+    >>> name_macro_warnings("utm_campaign={{campaign.name}}")[0][:30]
+    'url_tags use {{campaign.name}}'
+    """
+    found = sorted({f"{{{{{m}.name}}}}" for m in _NAME_MACRO.findall(url_tags or "")})
+    if not found:
+        return []
+    return [f"url_tags use {', '.join(found)}: the values will carry the agent prefix "
+            "(OWNER-agent-) wherever the names have one, in UTMs and analytics"]
+
+
 def _placements(targeting: dict[str, Any]) -> dict[str, Any]:
     return {k: targeting[k] for k in PLACEMENT_KEYS if targeting.get(k)}
 
