@@ -261,7 +261,7 @@ def test_a_redirect_to_another_host_is_noticed():
     [
         ("http://127.0.0.1/admin", "127.0.0.1"),
         ("http://169.254.169.254/latest/meta-data", "169.254.169.254"),
-        ("http://intranet.example.com/", "10.1.2.3"),
+        ("http://intranet.internal/", "10.1.2.3"),
     ],
 )
 def test_private_addresses_are_refused_before_any_request(url, address):

@@ -1,7 +1,7 @@
 """What each placement shows: text cut-offs, image shapes, video lengths.
 
 THE NUMBERS ARE META'S ADS GUIDE, AND THEY MOVE. Source: the Meta Ads Guide
-(facebook.com/business/ads-guide), per placement, as understood on
+(www.facebook.com/business/ads-guide), per placement, as understood on
 2026-11-18. Re-check them against the guide before relying on one for a
 decision; every check built on this table is a WARN, except an image below the
 hard minimum width, which Meta itself refuses.
