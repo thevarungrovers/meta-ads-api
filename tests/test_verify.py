@@ -326,3 +326,102 @@ def test_the_creative_fixture_is_still_untouched(tools):
     before = json.dumps(sim.objects[CREATIVE_ID], sort_keys=True)
     tool["preview_update_ad_copy"](ad_id=AD_ID, headline="new")
     assert json.dumps(sim.objects[CREATIVE_ID], sort_keys=True) == before
+
+
+# --- the SSRF guard: pinned connections, shared address space ------------------
+
+
+class Recording(Scripted):
+    def request(self, method, url, **kw):
+        self.headers = getattr(self, "headers", []) + [dict(kw.get("headers") or {})]
+        return super().request(method, url, **kw)
+
+
+@pytest.mark.parametrize("address", ["100.64.0.1", "100.127.255.254", "::ffff:10.0.0.1",
+                                     "64:ff9b::7f00:1", "2002:7f00:1::1", "192.0.0.8",
+                                     "198.18.0.1", "0.0.0.0"])
+def test_every_non_global_address_is_refused(address):
+    session = Scripted([])
+    result = linkcheck.check_link("http://example.com/", session=session, resolver=lambda h: [address])
+    assert result.refused and session.seen == [], address
+
+
+def test_the_request_goes_to_the_address_that_was_checked():
+    """DNS rebinding: a second lookup would answer differently. There is none."""
+    answers = [["93.184.216.34"], ["127.0.0.1"]]
+    calls = []
+
+    def rebinding(host):
+        calls.append(host)
+        return answers[min(len(calls) - 1, 1)]
+
+    session = Recording([(200, None)])
+    result = linkcheck.check_link("https://example.com:8443/a?b=1", session=session, resolver=rebinding)
+    assert result.ok and calls == ["example.com"], "resolved exactly once"
+    method, url = session.seen[0]
+    assert url == "https://93.184.216.34:8443/a?b=1", url
+    assert session.headers[0]["Host"] == "example.com:8443"
+    assert result.final_url == "https://example.com:8443/a?b=1"
+
+
+def test_every_redirect_hop_is_resolved_once_and_pinned():
+    answers = {"example.com": [["93.184.216.34"]], "example.org": [["93.184.216.35"], ["127.0.0.1"]]}
+
+    def resolver(host):
+        return answers[host].pop(0)
+
+    session = Recording([(302, "https://example.org/x"), (200, None)])
+    result = linkcheck.check_link("https://example.com/a", session=session, resolver=resolver)
+    assert result.ok
+    assert [u for _, u in session.seen] == ["https://93.184.216.34/a", "https://93.184.216.35/x"]
+    assert session.headers[1]["Host"] == "example.org"
+
+
+def test_a_redirect_into_shared_address_space_is_refused():
+    session = Scripted([(302, "http://cgnat.example/")])
+
+    def resolver(host):
+        return ["100.64.1.1"] if host == "cgnat.example" else ["93.184.216.34"]
+
+    result = linkcheck.check_link("https://example.com/a", session=session, resolver=resolver)
+    assert result.refused and len(session.seen) == 1
+
+
+def test_the_tls_adapter_verifies_and_sends_sni_for_the_hostname():
+    adapter = linkcheck._PinnedTLSAdapter("example.com")
+    kw = adapter.poolmanager.connection_pool_kw
+    assert kw["server_hostname"] == "example.com" and kw["assert_hostname"] == "example.com"
+
+
+def test_a_pinned_request_really_connects_to_the_pinned_address():
+    """End to end over a real socket: the host name does not resolve at all,
+    so the request can only have reached the server through the pinned IP."""
+    import http.server
+    import threading
+
+    import requests
+
+    seen = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            seen["host"] = self.headers.get("Host")
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        with requests.Session() as session:
+            session.trust_env = False
+            response = linkcheck._request_pinned(
+                session, "HEAD", f"http://unresolvable.invalid:{port}/p", "127.0.0.1")
+        assert response.status_code == 204
+        assert seen["host"] == f"unresolvable.invalid:{port}"
+    finally:
+        server.server_close()

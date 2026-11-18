@@ -6,11 +6,17 @@ only HEAD, falling back to a streamed GET when a server refuses HEAD, and reads
 no body. ``tests/test_readonly_guard.py`` pins that it names no write method.
 
 SSRF GUARD. The URL comes from an agent, so it is treated as hostile: only
-http(s), the host is resolved first and every address it resolves to must be
-public -- no loopback, private, link-local (169.254.169.254 is the cloud
-metadata service), multicast or reserved range -- and every redirect hop is
-checked again before it is followed. No credentials, cookies or proxies from
-the environment are sent, and each request times out after 5 seconds.
+http(s), the host is resolved ONCE and every address it resolves to must be
+globally routable -- no loopback, private, link-local (169.254.169.254 is the
+cloud metadata service), carrier-grade NAT (100.64.0.0/10), multicast, reserved
+or documentation range, and no IPv6 wrapper (mapped, 6to4, Teredo, NAT64)
+around one. The request then CONNECTS TO THAT CHECKED ADDRESS, with the host
+name sent as the Host header and, for https, as SNI and the name the
+certificate is verified against -- so a DNS answer that changes between the
+check and the connection (rebinding) cannot redirect it. Every redirect hop is
+resolved, checked and pinned the same way before it is followed. No
+credentials, cookies or proxies from the environment are sent, and each
+request times out after 5 seconds.
 """
 
 from __future__ import annotations
@@ -67,6 +73,58 @@ def _new_session():
     return session
 
 
+def _tls_adapter_class():
+    from requests.adapters import HTTPAdapter
+
+    class PinnedTLSAdapter(HTTPAdapter):
+        """https to an IP literal, verified as ``hostname``: SNI and the
+        certificate check both use the name, the socket the checked address."""
+
+        def __init__(self, hostname: str) -> None:
+            self._hostname = hostname
+            super().__init__(max_retries=0)
+
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            pool_kwargs["server_hostname"] = self._hostname
+            pool_kwargs["assert_hostname"] = self._hostname
+            super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    return PinnedTLSAdapter
+
+
+def _PinnedTLSAdapter(hostname: str):  # noqa: N802 - a class, built lazily
+    return _tls_adapter_class()(hostname)
+
+
+def _pinned_url(url: str, address: str) -> tuple[str, str]:
+    """(``url`` with its host replaced by ``address``, the Host header)."""
+    parsed = urlparse(url)
+    literal = f"[{address}]" if ":" in address else address
+    netloc = f"{literal}:{parsed.port}" if parsed.port else literal
+    host = parsed.hostname or ""
+    host_header = f"[{host}]" if ":" in host else host
+    if parsed.port:
+        host_header = f"{host_header}:{parsed.port}"
+    return parsed._replace(netloc=netloc).geturl(), host_header
+
+
+def _request_pinned(session, method: str, url: str, address: str, **kwargs):
+    """Send ``method`` to ``url`` over a connection to ``address`` only.
+
+    No second DNS lookup happens: the URL handed to the transport is the IP
+    literal. https gets an adapter that verifies the certificate for the host
+    NAME (a real session only; a test double has no ``mount``).
+    """
+    pinned, host_header = _pinned_url(url, address)
+    parsed = urlparse(url)
+    if parsed.scheme == "https" and hasattr(session, "mount"):
+        prefix = f"https://{urlparse(pinned).netloc}/"
+        session.mount(prefix, _PinnedTLSAdapter(parsed.hostname or ""))
+    headers = {**(kwargs.pop("headers", None) or {}), "Host": host_header}
+    return session.request(method, pinned, headers=headers, allow_redirects=False,
+                           timeout=TIMEOUT_SECONDS, **kwargs)
+
+
 def public_address(address: str) -> bool:
     """True for an address an outside website could legitimately have.
 
@@ -76,35 +134,67 @@ def public_address(address: str) -> bool:
     False
     """
     ip = ipaddress.ip_address(address)
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
+    # An IPv6 address that only wraps an IPv4 one is judged by what it wraps.
+    if ip.version == 6:
+        if not all(public_address(str(inner)) for inner in _embedded_v4(ip)):
+            return False
+    return (
+        ip.is_global
+        and not ip.is_multicast
+        and not ip.is_reserved
+        and not ip.is_unspecified
+        and ip not in _SHARED_ADDRESS_SPACE
     )
 
 
-def _refusal(url: str, resolver) -> str | None:
+#: RFC 6598 carrier-grade NAT space. Not global, and refused by name as well,
+#: because inside a cloud provider it is where internal services live.
+_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_v4(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    out = []
+    if ip.ipv4_mapped:
+        out.append(ip.ipv4_mapped)
+    if ip.sixtofour:
+        out.append(ip.sixtofour)
+    if ip.teredo:
+        out.extend(ip.teredo)
+    if ip in _NAT64:
+        out.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+    return out
+
+
+def _vet(url: str, resolver) -> tuple[str | None, str | None]:
+    """(the checked address to connect to, or None; the refusal, or None).
+
+    The host is resolved exactly once here, and the address returned is the
+    one the request connects to.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return f"only http(s) links are checked, not {parsed.scheme or 'no scheme'}"
+        return None, f"only http(s) links are checked, not {parsed.scheme or 'no scheme'}"
     host = parsed.hostname
     if not host:
-        return "the link has no host"
+        return None, "the link has no host"
     if parsed.username or parsed.password:
-        return "the link carries credentials"
+        return None, "the link carries credentials"
     try:
-        addresses = resolver(host)
+        addresses = list(resolver(host))
     except OSError as exc:
-        return f"{host} does not resolve ({exc})"
+        return None, f"{host} does not resolve ({exc})"
+    except ValueError as exc:
+        return None, f"{host} does not resolve ({exc})"
     if not addresses:
-        return f"{host} does not resolve"
-    private = [a for a in addresses if not public_address(a)]
+        return None, f"{host} does not resolve"
+    try:
+        private = [a for a in addresses if not public_address(a)]
+    except ValueError:
+        return None, f"{host} resolves to something that is not an IP address"
     if private:
-        return f"{host} resolves to a non-public address ({', '.join(private)})"
-    return None
+        return None, f"{host} resolves to a non-public address ({', '.join(private)})"
+    return addresses[0], None
 
 
 def with_url_tags(link: str, url_tags: str | None) -> str:
@@ -129,20 +219,15 @@ def check_link(url: str, *, session=None, resolver=None) -> LinkResult:
     session = session or _new_session()
     try:
         for _ in range(MAX_REDIRECTS + 1):
-            refused = _refusal(current, resolver)
+            address, refused = _vet(current, resolver)
             if refused:
                 result.refused = refused
                 result.final_url = current
                 return result
             try:
-                response = session.request(
-                    "HEAD", current, allow_redirects=False, timeout=TIMEOUT_SECONDS
-                )
+                response = _request_pinned(session, "HEAD", current, address)
                 if response.status_code in (405, 501):
-                    response = session.request(
-                        "GET", current, allow_redirects=False,
-                        timeout=TIMEOUT_SECONDS, stream=True,
-                    )
+                    response = _request_pinned(session, "GET", current, address, stream=True)
                     close = getattr(response, "close", None)
                     if callable(close):
                         close()
