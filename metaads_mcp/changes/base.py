@@ -349,7 +349,10 @@ class ChangeKind:
 
     def follow_ups(self, ctx, payload: dict[str, Any], result, created: list[str]) -> list:
         """Writes to make right after a successful apply, each its own ledger
-        row: ``[(PlannedChange, LedgerItem), ...]``. The copies' renames."""
+        row: ``[(PlannedChange, LedgerItem), ...]``. The copies' renames.
+
+        A ``None`` plan is a write the kind refused: it is reported as failed
+        (the reason in ``item.inverse["refused"]``), never sent or ledgered."""
         return []
 
     def validates(self, payload: dict[str, Any]) -> bool:

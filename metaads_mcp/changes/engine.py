@@ -459,6 +459,12 @@ class Engine:
         batch_id = secrets.token_hex(6)
         out = []
         for plan, item in planned:
+            if plan is None:
+                # Refused by the kind: reported, never sent, nothing ledgered.
+                out.append({"entry_id": None, "entity_id": str(item.entity_id),
+                            "name": item.after, "ok": False,
+                            "error": str((item.inverse or {}).get("refused") or "not sent")})
+                continue
             entry_id = ledger.new_entry_id()
             ledger.write_intent(
                 entry_id=entry_id, tool=tool, account_id=account or self.ctx.default_account,

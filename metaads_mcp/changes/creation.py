@@ -367,13 +367,44 @@ class _Duplicate(_Creates):
             changes=[FieldChange("copy", None, payload["source_id"])], edge="copies",
         )
 
+    def prepare_apply(self, ctx, plan, payload):
+        """Re-count what the copy will make, before anything is sent.
+
+        The preview counted the tree against max_entities_per_call; an ad
+        added since would be copied (and need its own rename) without ever
+        being counted. Over the limit now, the apply is refused: nothing is
+        copied.
+        """
+        if payload.get("renames"):
+            source_id = str(payload["source_id"])
+            children = self._children(ctx, source_id) if payload.get("deep_copy") else []
+            count = len(self._tree(ctx, {"id": source_id}, children))
+            limit = ctx.limits.max_entities_per_call
+            if count > limit:
+                raise ValueError(
+                    f"The copy would now make {count} object(s), each needing a rename, "
+                    f"against max_entities_per_call {limit} (the preview counted "
+                    f"{len(payload['renames'])}): something was added since. Nothing was "
+                    "copied. Take a fresh preview, copy less (deep_copy=False), or copy "
+                    "it in Ads Manager."
+                )
+        return plan
+
     def follow_ups(self, ctx, payload, result, created):
-        """One name update per object the copy created, to its previewed name."""
+        """One name update per object the copy created, to its previewed name.
+
+        An object Meta copied that the preview did not list is named the same
+        way; if that name is refused, or renaming it would go over
+        max_entities_per_call, it is skipped and reported (a ``None`` plan),
+        never sent.
+        """
         from metaads_mcp.changes.base import LedgerItem
 
         renames = {r["source_id"]: r for r in payload.get("renames") or []}
         if not renames:
             return []
+        limit = ctx.limits.max_entities_per_call
+        counted = len(renames)
         made = [(str(payload["source_id"]), result.node_id, self.graph_type)]
         for child in result.response.get("ad_object_ids") or []:
             if isinstance(child, dict) and child.get("copied_id"):
@@ -387,14 +418,32 @@ class _Duplicate(_Creates):
             graph_type = (wanted or {}).get("graph_type") or graph_type
             if graph_type not in _COPY_TYPES:
                 continue
+            live = None
             if wanted is None:
                 # Not in the preview's tree (Meta copied more than it listed):
-                # named the same way, from its source.
+                # named the same way, from its source -- unless that name is
+                # refused or the rename would exceed the limit.
                 source = ctx.read.node(source_id, ("id", "name"))
-                final = ctx.name_for_copy(_COPY_TYPES[graph_type][1], source.get("name") or "").final
+                decision = ctx.name_for_copy(_COPY_TYPES[graph_type][1], source.get("name") or "")
+                final = decision.final
+                live = ctx.read.node(copied_id, ("id", "name")).get("name") or ""
+                if live == final:
+                    continue
+                refusal = "; ".join(c.detail for c in decision.checks if not c.ok)
+                if not refusal and counted >= limit:
+                    refusal = (f"renaming it would make {counted + 1} renames against "
+                               f"max_entities_per_call {limit}")
+                if refusal:
+                    out.append((None, LedgerItem(
+                        entity_type=_COPY_TYPES[graph_type][1], entity_id=copied_id,
+                        entity_name=live, field_name="name", before=live, after=live,
+                        inverse={"refused": f"not renamed (the preview did not list it): {refusal}"})))
+                    continue
+                counted += 1
             else:
                 final = wanted["final"]
-            live = ctx.read.node(copied_id, ("id", "name")).get("name") or ""
+            if live is None:
+                live = ctx.read.node(copied_id, ("id", "name")).get("name") or ""
             if live == final:
                 continue
             plan = PlannedChange(

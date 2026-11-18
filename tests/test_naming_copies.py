@@ -203,3 +203,44 @@ def test_a_rename_that_fails_is_reported_and_the_copy_stands(monkeypatch):
     entry = ledger.find_entry(failures[0]["entry_id"])
     assert not entry["applied"] and entry["error"]
     assert s.objects[result.entity_id]["status"] == "PAUSED"
+
+
+# --- an object Meta copied that the preview did not list -----------------------------
+
+
+def _add_ad_after_preview(s, name):
+    """A second ad lands in the ad set between the preview and the apply."""
+    from tests.test_mcp_write_path import AD_ID, ADSET_ID
+
+    s.objects["AD2"] = {**s.objects[AD_ID], "id": "AD2", "name": name}
+    s.edges[ADSET_ID]["ads"] = [*s.edges[ADSET_ID]["ads"], "AD2"]
+
+
+def test_an_unlisted_copy_whose_name_is_refused_is_skipped_and_reported(monkeypatch):
+    from tests.test_mcp_write_path import ADSET_ID
+
+    s = _copy_sim()
+    tools, state = rig(monkeypatch, s)
+    as_identity(state, Identity("AB", ""))
+    preview = preview_ok(tools, "duplicate_ad_set", s, ad_set_id=ADSET_ID)
+    # Under an owner-only prefix this base would read as agent "spring".
+    _add_ad_after_preview(s, "spring-promo")
+    result = tools["apply_duplicate_ad_set"](preview_token=preview.preview_token)
+    copied = f"{result.entity_id}_AD2"
+    assert s.objects[copied]["name"] == "spring-promo - Copy", "nothing refused is sent"
+    report = next(f for f in result.follow_ups if f["entity_id"] == copied)
+    assert report["ok"] is False and "would read as agent" in report["error"], report
+    assert report["entry_id"] is None, "a refused name is reported, never sent or ledgered"
+
+
+def test_an_unlisted_copy_counts_against_max_entities_per_call(monkeypatch):
+    from tests.test_mcp_write_path import ADSET_ID
+
+    s = _copy_sim()
+    tools, _ = rig(monkeypatch, s, max_entities_per_call=2)
+    preview = preview_ok(tools, "duplicate_ad_set", s, ad_set_id=ADSET_ID)  # 2 objects
+    _add_ad_after_preview(s, "Creative B")  # now 3
+    with pytest.raises(Exception) as caught:
+        tools["apply_duplicate_ad_set"](preview_token=preview.preview_token)
+    assert "max_entities_per_call" in str(caught.value)
+    assert not [c for c in s.created if c["edge"] == "copies"], "nothing was copied"
