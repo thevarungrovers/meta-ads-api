@@ -134,6 +134,7 @@ class ServerState:
     read_client: Any = None
     write_client: Any = None
     engine: Any = None
+    headroom: Any = None
     default_account_id: str = ""
 
 

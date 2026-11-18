@@ -52,6 +52,13 @@ def register(mcp, state) -> None:
     state.read_client = client
     state.default_account_id = client.settings.account_id or ""
 
+    def headroom() -> dict[str, Any]:
+        """Meta's rate-limit usage as of the last call: every read reports it,
+        so an agent sees 80% coming rather than meeting 100% as an error."""
+        return {"worst_percent_used": client.rate_limit().get("worst_percent_used")}
+
+    state.headroom = headroom
+
     def money(value: Any, currency: str) -> str | None:
         from metaads_reporting.currency import format_money, from_minor_units
 
@@ -291,6 +298,7 @@ def register(mcp, state) -> None:
             "row_count": len(rows),
             "totals": summarise(rows),
             "rows": rows,
+            "rate_limit": headroom(),
             "note": (
                 "Totals omit reach and frequency: they cannot be summed across "
                 "rows. Use the creative_fatigue report, which collapses the "
@@ -340,6 +348,7 @@ def register(mcp, state) -> None:
             ad_name=ad.get("name"),
             effective_status=ad.get("effective_status"),
             social_proof=creatives.social_proof(_as_write_shim(client), creative),
+            rate_limit=headroom(),
         )
         return out
 
@@ -366,6 +375,7 @@ def register(mcp, state) -> None:
             out["custom"] = audiences.list_custom(shim, limit=limit)
         if wanted in ("saved", "all"):
             out["saved"] = audiences.list_saved(shim, limit=limit)
+        out["rate_limit"] = headroom()
         out["note"] = (
             "Only 'saved' and 'lookalike' audiences can be CREATED here. A "
             "customer-list audience must be made in Ads Manager, where a "

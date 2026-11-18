@@ -100,6 +100,13 @@ RATE_LIMIT_BACKOFF_SECONDS = 32.0
 
 DEFAULT_TIMEOUT = 60.0
 
+#: The longest this process will SLEEP on a rate limit before answering. An MCP
+#: client times a tool call out after a minute or two, so a read that sleeps
+#: 4 x 32s inside the call outlives the caller and the answer is thrown away.
+#: Past this, the error is raised at once with ``retry_after`` set, and the
+#: agent waits instead of the transport.
+MAX_INLINE_WAIT_SECONDS = 60.0
+
 #: Hard ceiling on how many pages one call will follow. Without it a mistyped
 #: filter walks an entire account one page at a time, which is slow, expensive
 #: against the rate limit, and indistinguishable from a hang.
@@ -138,7 +145,14 @@ class GraphAPIError(GraphError):
         self.user_title = user_title
         self.user_message = user_message
         self.path = path
+        #: Seconds Meta says to wait before trying again, when it said.
+        self.retry_after: float | None = None
         super().__init__(message)
+
+    @property
+    def wants_less_data(self) -> bool:
+        """Insights code 1 "reduce the amount of data": repeating cannot help."""
+        return self.code == 1 and "reduce the amount of data" in str(self).lower()
 
     @property
     def retryable(self) -> bool:
@@ -237,6 +251,24 @@ class RateLimit:
             business_usage=parse("X-Business-Use-Case-Usage"),
             account_usage=parse("X-Ad-Account-Usage"),
         )
+
+    @property
+    def regain_seconds(self) -> float | None:
+        """How long Meta says until access is regained, in seconds, if it said.
+
+        ``estimated_time_to_regain_access`` in X-Business-Use-Case-Usage is in
+        MINUTES; ``reset_time_duration`` in X-Ad-Account-Usage is in seconds.
+        """
+        waits: list[float] = []
+        for entries in self.business_usage.values():
+            for entry in entries if isinstance(entries, list) else []:
+                minutes = entry.get("estimated_time_to_regain_access") if isinstance(entry, dict) else None
+                if isinstance(minutes, (int, float)) and minutes > 0:
+                    waits.append(float(minutes) * 60)
+        reset = self.account_usage.get("reset_time_duration")
+        if isinstance(reset, (int, float)) and reset > 0:
+            waits.append(float(reset))
+        return max(waits) if waits else None
 
     @property
     def worst_percent(self) -> float:
@@ -387,7 +419,10 @@ class GraphTransport:
         safe and necessary.
         """
         if method in READ_METHODS:
-            return error.retryable
+            # Insights code 1 "reduce the amount of data" is in the ambiguous
+            # transient family, but asking again for the same data fails the
+            # same way four more times.
+            return error.retryable and not error.wants_less_data
         return error.is_rate_limit
 
     # -- the one request path ----------------------------------------------
@@ -481,6 +516,13 @@ class GraphTransport:
 
                 last_error = _as_error(payload, response.status_code, url)
                 slot["status"] = response.status_code
+                if last_error.is_rate_limit:
+                    wait = self.last_rate_limit.regain_seconds or backoff_delay(attempt, last_error)
+                    last_error.retry_after = wait
+                    if wait > MAX_INLINE_WAIT_SECONDS:
+                        # Meta's own estimate (or the next backoff) is longer than
+                        # a tool call can wait: hand the wait to the caller.
+                        raise last_error
                 if attempt + 1 >= attempts or not self.may_retry(method, last_error):
                     raise last_error
                 _sleep_backoff(attempt, last_error)
@@ -660,5 +702,8 @@ def backoff_delay(attempt: int, error: GraphAPIError | None = None) -> float:
 
 
 def _sleep_backoff(attempt: int, error: GraphAPIError | None = None) -> None:
-    """Wait before a retry. See :func:`backoff_delay` for the arithmetic."""
+    """Wait before a retry: Meta's own estimate when it gave one, else backoff."""
+    if error is not None and error.retry_after:
+        time.sleep(error.retry_after)
+        return
     time.sleep(backoff_delay(attempt, error))
