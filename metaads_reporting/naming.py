@@ -58,8 +58,22 @@ NAME_LIMITS: dict[str, int] = {
     for kind in ("campaign", "ad set", "ad", "creative", "audience", "ad study", "label")
 }
 
-#: Characters no name may carry.
-_CONTROL = {"\x00": "NUL", "\r": "CR", "\n": "LF", "\t": "TAB"}
+#: Unicode categories no name may carry: control (Cc, NUL/CR/LF/TAB ...),
+#: format (Cf, invisible: U+200B zero-width space, U+202E bidi override ...),
+#: line and paragraph separators (Zl U+2028, Zp U+2029).
+_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def invisible_characters(text: str) -> list[str]:
+    r"""The refused characters in ``text``, as U+XXXX codes.
+
+    >>> invisible_characters("a\u200bb\nc")
+    ['U+000A', 'U+200B']
+    """
+    import unicodedata
+
+    return sorted({f"U+{ord(ch):04X}" for ch in text
+                   if unicodedata.category(ch) in _REFUSED_CATEGORIES})
 
 NO_IDENTITY_RULE = "no identity configured; name used as given"
 
@@ -216,8 +230,10 @@ class Identity:
                 continue
             found = dotenv_values(path)
             for key in (OWNER_KEY, AGENT_KEY):
-                if key in found and found[key] is not None:
-                    values[key] = found[key] or ""
+                # An EMPTY value never overrides a set one from an earlier
+                # file: empty means "not set here", not "clear it".
+                if (found.get(key) or "").strip():
+                    values[key] = found[key]
             if any(k in found for k in (OWNER_KEY, AGENT_KEY)):
                 sources.append(Path(path).name)
         warnings = []
@@ -283,27 +299,41 @@ class Stamped:
 
 
 def _base_of(identity: Identity, name: str, entity_type: str) -> tuple[str, str]:
-    """(the base to stamp, the rule) for a requested name. Refuses impersonation."""
+    """(the base to stamp, the rule) for a requested name.
+
+    Refuses impersonation -- a name that parses as ANOTHER owner/agent
+    prefix, identity configured or not -- and a double prefix: after our own
+    prefix is stripped once, what is left may not start with it again nor
+    parse as any prefix.
+    """
     parsed = parse(name)
     if parsed is not None:
         if identity.configured and (parsed.owner, parsed.agent) == (identity.owner, identity.agent):
-            return parsed.base.strip(), "already_ours"
+            base, rule = parsed.base.strip(), "already_ours"
+        else:
+            raise NameRefused(
+                f"the {entity_type} name starts with {parsed.prefix}, which is "
+                f"{'the CLI marker' if parsed.agent == 'cli' else 'another agent'}'s prefix; "
+                "pass the base name only (reorder it if the base itself looks like a prefix)"
+            )
+    elif identity.configured and name.startswith(identity.prefix):
+        base, rule = name[len(identity.prefix):].strip(), "already_ours"
+    else:
+        return name, "stamped" if identity.configured else NO_IDENTITY_RULE
+    if parse(base) is not None or (identity.configured and base.startswith(identity.prefix)):
         raise NameRefused(
-            f"the {entity_type} name starts with {parsed.prefix}, which is "
-            f"{'the CLI marker' if parsed.agent == 'cli' else 'another agent'}'s prefix; "
-            "pass the base name only (reorder it if the base itself looks like a prefix)"
+            f"the {entity_type} name carries a prefix twice ({name!r}); pass the base name only"
         )
-    if identity.configured and name.startswith(identity.prefix):
-        return name[len(identity.prefix):].strip(), "already_ours"
-    return name, "stamped" if identity.configured else NO_IDENTITY_RULE
+    return base, rule
 
 
 def _check_base(base: str, identity: Identity, entity_type: str) -> None:
     if not base:
         raise NameRefused(f"the {entity_type} name is empty")
-    bad = sorted({label for char, label in _CONTROL.items() if char in base})
+    bad = invisible_characters(base)
     if bad:
-        raise NameRefused(f"the {entity_type} name contains control characters ({', '.join(bad)})")
+        raise NameRefused(f"the {entity_type} name contains control or invisible characters "
+                          f"({', '.join(bad)})")
     limit = NAME_LIMITS.get(entity_type, NAME_LIMIT)
     room = limit - len(identity.prefix)
     if len(base) > room:
@@ -352,13 +382,16 @@ def derived(name: str, *, entity_type: str) -> Stamped:
 
 def strip_prefix(identity: Identity, name: str) -> str:
     """``name`` without any full prefix (ours, another agent's, the CLI's), and
-    without our own partial one."""
-    parsed = parse(name)
-    if parsed is not None:
-        return parsed.base
-    if identity.configured and name.startswith(identity.prefix):
-        return name[len(identity.prefix):]
-    return name
+    without our own partial one -- repeatedly, so a source that already
+    carried two never yields a copy with a prefix inside its base."""
+    while True:
+        parsed = parse(name)
+        if parsed is not None:
+            name = parsed.base.lstrip()
+        elif identity.configured and name.startswith(identity.prefix):
+            name = name[len(identity.prefix):].lstrip()
+        else:
+            return name
 
 
 def restamp_for_copy(identity: Identity, source_name: str, *, entity_type: str,

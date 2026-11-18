@@ -36,18 +36,29 @@ SpecialAdCategory = Literal[
 ]
 
 
+#: How many same-named siblings name_is_free reads before it gives up.
+NAME_SCAN_CAP = 50
+
+
 def name_is_free(ctx, module, name: str, **scope) -> Check:
     """WARN when a sibling already has this exact name. Meta does not require
-    names to be unique, so this never blocks: it catches an accidental twin."""
+    names to be unique, so this never blocks: it catches an accidental twin.
+    A scan that could not finish (an error, or the cap reached) WARNs that the
+    name could not be verified free -- it never passes silently."""
     try:
-        twins = [r for r in module.search(ctx.client, name, limit=50, **scope)
-                 if (r.get("name") or "") == name]
+        rows = module.search(ctx.client, name, limit=NAME_SCAN_CAP, **scope)
     except Exception as exc:  # noqa: BLE001 - advisory
-        return Check("name_is_free", True, f"could not check ({str(exc).splitlines()[0]})", skipped=True)
+        return Check("name_is_free", True,
+                     f"could not verify the name is free ({str(exc).splitlines()[0]})", warn=True)
+    twins = [r for r in rows if (r.get("name") or "") == name]
     if twins:
         return Check("name_is_free", True,
                      f"{len(twins)} existing with this exact name ({', '.join(str(t.get('id')) for t in twins[:5])}); "
                      "Meta allows it, reports will not tell them apart", warn=True)
+    if len(rows) >= NAME_SCAN_CAP:
+        return Check("name_is_free", True,
+                     f"could not verify the name is free: the scan stopped at {NAME_SCAN_CAP} "
+                     "similar names", warn=True)
     return Check("name_is_free", True, "no sibling has this name")
 
 
@@ -346,7 +357,6 @@ class _Duplicate(_Creates):
             proposal.naming.append({"requested": None, "final": None, "prefix": "",
                                     "base": None, "length": None, "max_length": None,
                                     "rule": f"{NO_IDENTITY_RULE}; Meta's copy naming is kept"})
-            proposal.created_names.append((self.noun, "(named by Meta)"))
         return proposal
 
     def build(self, ctx, payload):

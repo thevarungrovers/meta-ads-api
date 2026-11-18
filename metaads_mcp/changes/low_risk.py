@@ -226,7 +226,7 @@ class LowRiskChange(NodeFieldKind):
         ).with_inverse({"previous": previous, "field": field, "graph_field": graph_field,
                         "graph_type": GRAPH_TYPE[entity_type]})
         if decision is not None:
-            proposal.name(decision, created=False)
+            proposal.name(decision)
         return proposal
 
 

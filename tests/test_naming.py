@@ -248,3 +248,48 @@ def test_startup_warns_about_a_process_value_and_a_bad_one(tmp_path, monkeypatch
     warnings = identity_warnings(state)
     assert any(naming.AGENT_KEY in w and "IGNORED" in w for w in warnings)
     assert any(naming.OWNER_KEY in w for w in warnings)
+
+
+# --- the review's naming rules -------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["AB-bot-x", "AB-cli-x"])
+def test_initials_only_never_own_another_agents_or_the_clis_names(name):
+    assert not OWNER_ONLY.owns(name)
+    assert OWNER_ONLY.owns("AB-x")
+    with pytest.raises(NameRefused):
+        rename(OWNER_ONLY, name, "y", entity_type="ad", ledger_owned=False)
+
+
+def test_impersonation_is_refused_even_with_no_identity():
+    with pytest.raises(NameRefused, match="CD-bot-"):
+        stamp(NEITHER, "CD-bot-x", entity_type="ad")
+
+
+@pytest.mark.parametrize("identity, name", [
+    (BOTH, "AB-max-AB-max-x"),
+    (BOTH, "AB-max-CD-bot-x"),
+    (OWNER_ONLY, "AB-AB-x"),
+    (OWNER_ONLY, "AB-CD-bot-x"),
+    (AGENT_ONLY, "max-max-x"),
+])
+def test_a_double_prefix_is_refused(identity, name):
+    with pytest.raises(NameRefused, match="twice"):
+        stamp(identity, name, entity_type="campaign")
+
+
+def test_a_copy_of_a_double_prefixed_source_strips_them_all():
+    assert restamp_for_copy(BOTH, "CD-bot-AB-max-x", entity_type="ad").final == "AB-max-x"
+
+
+@pytest.mark.parametrize("char", ["​", " ", " ", "‮", "﻿", "\x7f"])
+def test_invisible_and_format_unicode_is_refused(char):
+    with pytest.raises(NameRefused, match="invisible"):
+        stamp(BOTH, f"spring{char}promo", entity_type="ad")
+
+
+def test_an_empty_env_value_does_not_override_config_env(tmp_path):
+    config = _write(tmp_path / "config.env", "CD", "bot")
+    env = _write(tmp_path / ".env", "", "")
+    identity = Identity.from_env([config, env])
+    assert (identity.owner, identity.agent) == ("CD", "bot")

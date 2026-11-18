@@ -29,10 +29,9 @@ class Forgetful(ChangeKind):
             path="", field_name="created", before=NOTHING, after="PAUSED", checks=[],
             projected=Decimal("0"),
             payload={"name": self.names[0] if self.names else "x"},
-            created_names=[("campaign", n) for n in self.names],
         )
         if self.names:
-            proposal.name(ctx.name_for_create("campaign", self.names[0].split("-")[-1]), created=False)
+            proposal.name(ctx.name_for_create("campaign", self.names[0].split("-")[-1]))
         return proposal
 
     def current(self, ctx, payload):
@@ -92,3 +91,22 @@ def test_the_ledger_row_carries_the_identity_and_the_requested_name(monkeypatch)
     inverse = ledger.find_entry(result.entry_id)["inverse"]
     assert inverse["identity"] == {"owner_initials": "AB", "agent_name": "max", "source": ".env"}
     assert inverse["requested_name"] == "spring"
+
+
+class Liar(Forgetful):
+    """Reports a prefixed name in its preview but SENDS an unprefixed one."""
+
+    name = "liar_create"
+
+    def build(self, ctx, payload):
+        plan = super().build(ctx, payload)
+        plan.payload["name"] = "spring"
+        return plan
+
+
+def test_the_backstop_checks_the_name_actually_sent(monkeypatch):
+    tools, state = rig(monkeypatch, make_sim())
+    preview = state.engine.preview(Liar(["AB-max-spring"]), {})
+    assert preview.naming[0]["final"] == "AB-max-spring"
+    assert failed(preview, "name_prefix"), preview.checks
+    assert any("'spring'" in c for c in preview.checks if "name_prefix" in c)

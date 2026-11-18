@@ -151,7 +151,6 @@ class Engine:
         if proposal.campaign_id is not None:
             checks.append(check_campaign_in_scope(ctx.limits, str(proposal.campaign_id)))
         checks.extend(proposal.checks)
-        checks.extend(self._naming_checks(kind, proposal))
         # Anything that can restore or add spend (an activation, a widening,
         # an extension) is in an allowed currency, whether or not the kind
         # checked it itself.
@@ -215,6 +214,8 @@ class Engine:
             "account_id": account,
         }
 
+        checks.extend(self._naming_checks(kind, proposal, payload))
+
         previews = proposal.previews
         if kind.verifies_ad:
             from metaads_mcp import verify
@@ -277,37 +278,63 @@ class Engine:
             naming=proposal.naming or None,
         )
 
-    def _naming_checks(self, kind: ChangeKind, proposal: Proposal) -> list[Check]:
+    def _naming_checks(self, kind: ChangeKind, proposal: Proposal,
+                       payload: dict[str, Any]) -> list[Check]:
         """The identity, and the backstop that no create goes out unprefixed.
 
         An EMPTY identity is not a failure (names are used as given); a
-        MALFORMED one is, for anything that names. When a prefix is
-        configured, every name a creating kind reports must carry it, so a
-        kind that forgot to stamp cannot ship an unprefixed name.
+        MALFORMED one is, for anything that names. With a prefix configured,
+        the request is BUILT here and every name it would actually send -- a
+        create on a named edge, a rename, a copy's follow-up renames -- must
+        carry the prefix: what a kind reports is not what is checked.
         """
         identity = self.ctx.identity
-        names = bool(kind.creates_named) or bool(proposal.naming)
-        if not names:
+        if not (kind.creates_named or proposal.naming):
             return []
-        out: list[Check] = []
         if identity.problem:
             if not any(c.name == "agent_identity" for c in proposal.checks):
-                out.append(Check("agent_identity", False, identity.problem))
-            return out
-        if kind.creates_named and not proposal.created_names and not any(
-                not c.ok for c in proposal.checks):
-            out.append(Check("name_prefix", False,
-                             f"{kind.name} creates {', '.join(kind.creates_named)} but "
-                             "reported no name to check"))
-        if proposal.created_names:
-            if identity.configured:
-                bad = [f"{etype} {name!r}" for etype, name in proposal.created_names
-                       if not identity.owns(name)]
-                out.append(Check(
-                    "name_prefix", not bad,
-                    (f"not prefixed with {identity.prefix!r}: {', '.join(bad)}" if bad
-                     else f"every name carries {identity.prefix!r}"),
-                ))
+                return [Check("agent_identity", False, identity.problem)]
+            return []
+        if not identity.configured or any(not c.ok for c in proposal.checks):
+            return []
+        try:
+            sent = self._sent_names(kind.build(self.ctx, payload))
+        except Exception as exc:  # noqa: BLE001 - validate_only reports the build failure
+            return [Check("name_prefix", True, f"request not built ({str(exc).splitlines()[0]}); "
+                                               "the write client checks the names it sends",
+                          skipped=True)]
+        sent += [r.get("final") or "" for r in payload.get("renames") or []]
+        if kind.creates_named and not sent:
+            return [Check("name_prefix", False,
+                          f"{kind.name} creates {', '.join(kind.creates_named)} but its request "
+                          "sends no name to check")]
+        if not sent:
+            return []
+        bad = [repr(n) for n in sent if not identity.owns(n)]
+        return [Check(
+            "name_prefix", not bad,
+            (f"would send names without {identity.prefix!r}: {', '.join(bad)}" if bad
+             else f"every name sent carries {identity.prefix!r}"),
+        )]
+
+    @staticmethod
+    def _sent_names(plan) -> list[str]:
+        """Every name a built request (and what it requires first) would send."""
+        from metaads_reporting.write.client import NAMED_EDGES, NAMED_TYPES
+
+        out: list[str] = []
+        stack = list(plan) if isinstance(plan, list) else [plan]
+        while stack:
+            step = stack.pop()
+            if step is None:
+                continue
+            if getattr(step, "requires", None) is not None:
+                stack.append(step.requires)
+            body = getattr(step, "payload", None) or {}
+            if step.edge in NAMED_EDGES or (step.edge is None and step.entity_type in NAMED_TYPES
+                                            and "name" in body
+                                            and not getattr(step, "allow_unprefixed_name", False)):
+                out.append(str(body.get("name") or ""))
         return out
 
     # -- apply -----------------------------------------------------------

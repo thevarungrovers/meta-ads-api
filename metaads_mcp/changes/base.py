@@ -195,23 +195,17 @@ class Proposal:
     #: itself, but undoing it lifts the restriction: the ledger marks it, and
     #: its revert projects the unused budget headroom and counts it.
     tightens: bool = False
-    #: Names this change CREATES (entity_type, final name): the engine checks
-    #: each carries the configured prefix (the ``name_prefix`` backstop).
-    created_names: list[tuple[str, str]] = field(default_factory=list)
     #: The preview's ``naming`` blocks (metaads_reporting.naming), one per name
     #: decided: requested, final, prefix, base, length, max_length, rule.
     naming: list[dict[str, Any]] = field(default_factory=list)
 
-    def name(self, decision, *, created: bool = True) -> str:
+    def name(self, decision) -> str:
         """Fold a :class:`~metaads_mcp.changes.context.NameDecision` in: its
-        checks, warnings and block, and (``created``) the name as one this
-        change creates. Returns the final name."""
+        checks, warnings and block. Returns the final name."""
         self.checks.extend(decision.checks)
         self.warnings.extend(w for w in decision.warnings if w not in self.warnings)
         if decision.block:
             self.naming.append(decision.block)
-        if created and not decision.refused:
-            self.created_names.append((decision.entity_type, decision.final))
         return decision.final
 
     def with_inverse(self, inverse: dict[str, Any]) -> "Proposal":
@@ -265,10 +259,10 @@ class ChangeKind:
     #: the ad verification (previews and checks before, field diff and review
     #: after) and no kind can opt out of it -- see metaads_mcp.verify.
     verifies_ad: bool = False
-    #: Entity types this kind CREATES with a name. Declaring one makes the
-    #: engine require every name in ``Proposal.created_names`` to carry the
-    #: configured prefix; tests/test_mcp_surface.py requires every creating
-    #: kind to declare it.
+    #: Entity types this kind CREATES with a name. With a prefix configured,
+    #: the engine builds the request and requires every name it actually
+    #: SENDS to carry the prefix (and at least one name to be sent);
+    #: tests/test_mcp_surface.py requires every creating kind to declare it.
     creates_named: tuple[str, ...] = ()
 
     def follow_ups(self, ctx, payload: dict[str, Any], result, created: list[str]) -> list:

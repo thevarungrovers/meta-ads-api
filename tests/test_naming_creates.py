@@ -188,3 +188,36 @@ def test_a_label_is_created_with_the_prefix(monkeypatch, identity, prefix):
                          field="label_create", value="spring")
     tools["apply_low_risk_change"](preview_token=preview.preview_token)
     assert _sent(s, "adlabels")["name"] == f"{prefix}spring"
+
+
+# --- the review's naming rules -----------------------------------------------------
+
+
+def test_a_capped_duplicate_scan_warns_it_could_not_verify(monkeypatch):
+    from metaads_mcp.changes import creation
+    from tests.fakes import campaign
+
+    s = make_sim()
+    for i in range(creation.NAME_SCAN_CAP):
+        cid = f"1202000000009{i:02d}"
+        s.objects[cid] = campaign(cid, name=f"AB-max-spring {i}")
+        s.edges["act_1234567890"]["campaigns"].append(cid)
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_create_campaign"](name="spring", objective="OUTCOME_SALES",
+                                               special_ad_categories=[], budget_level="adset")
+    assert any(c.startswith("WARN name_is_free") and "could not verify" in c for c in preview.checks)
+    assert not preview.blocked
+
+
+def test_a_failed_duplicate_scan_warns_it_could_not_verify(monkeypatch):
+    from metaads_mcp.changes import creation
+
+    tools, _ = rig(monkeypatch, make_sim())
+
+    def broken(*a, **k):
+        raise RuntimeError("search down")
+
+    monkeypatch.setattr(creation.campaigns, "search", broken)
+    preview = tools["preview_create_campaign"](name="spring", objective="OUTCOME_SALES",
+                                               special_ad_categories=[], budget_level="adset")
+    assert any(c.startswith("WARN name_is_free") and "could not verify" in c for c in preview.checks)
