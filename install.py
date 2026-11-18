@@ -120,6 +120,10 @@ SAFE_TOOLS = (
     "preview_create_ad",
     "preview_create_creative",
     "preview_multi_ad_status",
+    "preview_create_campaign",
+    "preview_create_ad_set",
+    "preview_duplicate_ad_set",
+    "preview_duplicate_campaign",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -153,6 +157,10 @@ WRITE_TOOLS = (
     "apply_create_ad",
     "apply_create_creative",
     "apply_multi_ad_status",
+    "apply_create_campaign",
+    "apply_create_ad_set",
+    "apply_duplicate_ad_set",
+    "apply_duplicate_campaign",
     "revert_change",
 )
 

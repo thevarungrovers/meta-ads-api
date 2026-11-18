@@ -123,7 +123,7 @@ no-op.
 It asks whether you want **basic permissions only**, and that answer means
 something slightly different per client:
 
-- **Claude Code** has a per-tool allowlist, so the 64 safe tools are
+- **Claude Code** has a per-tool allowlist, so the 68 safe tools are
   pre-approved and the 7 that change the account still stop and ask you. That is
   strictly better, so Claude Code always gets the full tool set with an
   allowlist.
@@ -266,7 +266,7 @@ resolved for you.
 
 ## What the agent can do
 
-94 tools: 35 read, 29 `preview_*`/`apply_*` pairs, and `revert_change`.
+102 tools: 35 read, 33 `preview_*`/`apply_*` pairs, and `revert_change`.
 
 ### Can read (safe)
 

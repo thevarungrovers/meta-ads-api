@@ -85,6 +85,10 @@ PREVIEW_TOOLS = frozenset(
         "preview_create_ad",
         "preview_create_creative",
         "preview_multi_ad_status",
+        "preview_create_campaign",
+        "preview_create_ad_set",
+        "preview_duplicate_ad_set",
+        "preview_duplicate_campaign",
     }
 )
 
@@ -120,6 +124,10 @@ APPLY_TOOLS = frozenset(
         "apply_create_ad",
         "apply_create_creative",
         "apply_multi_ad_status",
+        "apply_create_campaign",
+        "apply_create_ad_set",
+        "apply_duplicate_ad_set",
+        "apply_duplicate_campaign",
     }
 )
 
@@ -246,6 +254,10 @@ SPENDS = {
     "apply_create_ad",
     "apply_create_creative",
     "apply_multi_ad_status",
+    "apply_create_campaign",
+    "apply_create_ad_set",
+    "apply_duplicate_ad_set",
+    "apply_duplicate_campaign",
 }
 
 

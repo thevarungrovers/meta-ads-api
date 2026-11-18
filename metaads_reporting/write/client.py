@@ -146,10 +146,18 @@ class MutationResult:
 
     @property
     def success(self) -> bool:
-        """Meta answers an update with ``{"success": true}``, a create with an id."""
+        """Meta answers an update with ``{"success": true}``, a create with an
+        id, and a copy with ``copied_<type>_id``."""
         if self.response.get("success") is True:
             return True
-        return bool(self.response.get("id"))
+        return bool(self.response.get("id") or _copied_id(self.response))
+
+
+def _copied_id(response: dict[str, Any]) -> str:
+    for key in ("copied_campaign_id", "copied_adset_id", "copied_ad_id"):
+        if response.get(key):
+            return str(response[key])
+    return ""
 
     def __str__(self) -> str:
         verb = "validated" if self.validated_only else "APPLIED"
@@ -333,8 +341,10 @@ class MutatingMetaAdsClient:
         payload: dict[str, Any],
         apply: bool = False,
         account_id: str | None = None,
+        parent: str | None = None,
     ) -> MutationResult:
-        """Create one object under the ad account.
+        """Create one object under the ad account -- or, for ``copies``, under
+        the object being copied (``<parent>/copies``).
 
         Called through :func:`~metaads_reporting.write.plan.execute` by the
         creative and audience plans: a new creative, a new PAUSED ad, a saved
@@ -361,10 +371,15 @@ class MutatingMetaAdsClient:
         if not apply:
             body["execution_options"] = json.dumps(["validate_only"])
 
-        path = f"{account_path(target)}/{edge}"
+        if edge == "copies":
+            if not parent:
+                raise MutationError("A copy needs the id of the object being copied.")
+            path = f"{parent}/copies"
+        else:
+            path = f"{account_path(target)}/{edge}"
         correlation_id = self._audit.attempt(
             account_id=target,
-            node_id="(new)",
+            node_id=f"(copy of {parent})" if edge == "copies" else "(new)",
             method="POST",
             edge=edge,
             payload={**payload, "validate_only": not apply},
@@ -379,7 +394,7 @@ class MutatingMetaAdsClient:
         self._audit.outcome(correlation_id, ok=True, response=response)
         return MutationResult(
             validated_only=not apply,
-            node_id=str(response.get("id") or ""),
+            node_id=str(response.get("id") or _copied_id(response) or ""),
             response=response,
         )
 

@@ -107,12 +107,14 @@ def execute(
             f"landed if the second step fails."
         )
     if plan.is_create:
+        extra = {"parent": plan.node_id} if plan.edge == "copies" else {}
         return client.create(
             entity_type=plan.entity_type,
             edge=plan.edge,
             payload=plan.payload,
             apply=apply,
             account_id=account_id,
+            **extra,
         )
     return client.update(
         plan.node_id,

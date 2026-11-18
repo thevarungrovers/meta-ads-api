@@ -185,6 +185,10 @@ class GraphSim:
         "adimages": "IMAGE",
         "customaudiences": "AUD",
         "saved_audiences": "SAVED",
+        "campaigns": "CAMP",
+        "adsets": "ADSET",
+        "ad_studies": "STUDY",
+        "adlabels": "LABEL",
     }
 
     def _post(self, segments: list[str], body: dict[str, Any]) -> FakeResponse:
@@ -193,6 +197,9 @@ class GraphSim:
 
         if edge in self.CREATE_EDGES:
             return self._create(edge, body)
+
+        if edge == "copies":
+            return self._copy(node, dict(body))
 
         if edge == "insights":
             # An async report run: an object with a status, rows on its edge.
@@ -260,6 +267,31 @@ class GraphSim:
 
         self.objects[new_id] = {"id": new_id, **payload}
         return FakeResponse({"id": new_id})
+
+    def _copy(self, node: str, body: dict[str, Any]) -> FakeResponse:
+        """POST <node>/copies: a PAUSED copy, children too when deep_copy."""
+        validate_only = "validate_only" in json.loads(body.get("execution_options") or "[]")
+        if node not in self.objects:
+            return FakeResponse({"error": {"message": f"no object {node}", "code": 100}}, status=400)
+        if validate_only:
+            self.validated.append({"edge": "copies", "node": node, "payload": body})
+            return FakeResponse({"success": True})
+        source = self.objects[node]
+        is_campaign = "objective" in source
+        new_id = f"COPY{len(self.created) + 1}"
+        self.created.append({"edge": "copies", "node": node, "payload": body})
+        self.objects[new_id] = {**source, "id": new_id, "status": body.get("status_option", "PAUSED"),
+                                "effective_status": body.get("status_option", "PAUSED")}
+        children = []
+        if body.get("deep_copy") in (True, "true", "True"):
+            child_edge = "adsets" if is_campaign else "ads"
+            for child in (self.edges.get(node) or {}).get(child_edge, []):
+                child_id = f"{new_id}_{child}"
+                self.objects[child_id] = {**self.objects[child], "id": child_id, "status": "PAUSED"}
+                children.append({"ad_object_type": child_edge[:-1], "source_id": child,
+                                 "copied_id": child_id})
+        key = "copied_campaign_id" if is_campaign else "copied_adset_id"
+        return FakeResponse({key: new_id, "ad_object_ids": children})
 
     # -- assertions helpers -------------------------------------------------
 
