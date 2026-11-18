@@ -18,6 +18,48 @@ from metaads_reporting.insights import InsightsQuery
 PENDING_UPLOAD = "<pending upload>"
 
 
+class NameDecision:
+    """The name a kind will SEND, with what the preview says about it.
+
+    A refused name does not raise: it becomes a FAIL line (``agent_identity``,
+    ``name_length`` or ``naming``) in the preview the human reads, and the
+    apply is blocked with it. ``final`` is then the name as requested, which
+    nothing will send.
+    """
+
+    def __init__(self, final: str, *, block: dict | None = None, checks=None,
+                 warnings=None, entity_type: str = "") -> None:
+        self.final = final
+        self.block = block
+        self.checks = list(checks or [])
+        self.warnings = list(warnings or [])
+        self.entity_type = entity_type
+
+    @property
+    def refused(self) -> bool:
+        return any(not c.ok for c in self.checks)
+
+
+def _decide(identity, entity_type: str, fallback: str, make) -> NameDecision:
+    from metaads_reporting.naming import NameRefused
+
+    try:
+        stamped = make()
+    except NameRefused as exc:
+        message = str(exc)
+        if identity.problem and identity.problem in message:
+            name = "agent_identity"
+        elif "too long" in message:
+            name = "name_length"
+        else:
+            name = "naming"
+        return NameDecision((fallback or "").strip(), entity_type=entity_type,
+                            checks=[Check(name, False, message)])
+    warnings = [w for w in [stamped.warning(), *stamped.notes] if w]
+    return NameDecision(stamped.final, block=stamped.block(), warnings=warnings,
+                        entity_type=entity_type)
+
+
 class WriteContext:
     def __init__(
         self,
@@ -58,6 +100,30 @@ class WriteContext:
 
             identity = Identity()
         return identity
+
+    def name_for_create(self, entity_type: str, requested: str) -> NameDecision:
+        """The final name of something the agent CREATES (metaads_reporting.naming)."""
+        from metaads_reporting.naming import stamp
+
+        return _decide(self.identity, entity_type, requested,
+                       lambda: stamp(self.identity, requested, entity_type=entity_type))
+
+    def name_for_copy(self, entity_type: str, source_name: str, suffix: str = "") -> NameDecision:
+        """The name of a copy the agent makes: our prefix on the source's base."""
+        from metaads_reporting.naming import restamp_for_copy
+
+        return _decide(self.identity, entity_type, f"{source_name}{suffix}",
+                       lambda: restamp_for_copy(self.identity, source_name,
+                                                entity_type=entity_type, suffix=suffix))
+
+    def name_for_rename(self, entity_type: str, current: str, requested: str, *,
+                        ledger_owned: bool) -> NameDecision:
+        """The new name of one of the agent's OWN entities; others are refused."""
+        from metaads_reporting.naming import rename
+
+        return _decide(self.identity, entity_type, requested,
+                       lambda: rename(self.identity, current, requested,
+                                      entity_type=entity_type, ledger_owned=ledger_owned))
 
     @property
     def default_account(self) -> str:

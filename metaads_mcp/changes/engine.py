@@ -151,6 +151,7 @@ class Engine:
         if proposal.campaign_id is not None:
             checks.append(check_campaign_in_scope(ctx.limits, str(proposal.campaign_id)))
         checks.extend(proposal.checks)
+        checks.extend(self._naming_checks(kind, proposal))
         # Anything that can restore or add spend (an activation, a widening,
         # an extension) is in an allowed currency, whether or not the kind
         # checked it itself.
@@ -191,6 +192,14 @@ class Engine:
                 f"activating resumes spend up to {proposal.projected:.2f}/day; it "
                 f"{daily_total.detail}"
             )
+
+        if proposal.naming:
+            # Who named it, on every row: the identity and what was asked for.
+            stamp = {"identity": {k: v for k, v in ctx.identity.describe().items()
+                                  if k in ("owner_initials", "agent_name", "source")},
+                     "requested_name": proposal.naming[0].get("requested")}
+            for item in items:
+                item.inverse = {**(item.inverse or {}), **stamp}
 
         payload = dict(proposal.payload)
         payload["before"] = proposal.before
@@ -265,7 +274,40 @@ class Engine:
             ),
             apply_weight=kind.weight,
             previews=previews,
+            naming=proposal.naming or None,
         )
+
+    def _naming_checks(self, kind: ChangeKind, proposal: Proposal) -> list[Check]:
+        """The identity, and the backstop that no create goes out unprefixed.
+
+        An EMPTY identity is not a failure (names are used as given); a
+        MALFORMED one is, for anything that names. When a prefix is
+        configured, every name a creating kind reports must carry it, so a
+        kind that forgot to stamp cannot ship an unprefixed name.
+        """
+        identity = self.ctx.identity
+        names = bool(kind.creates_named) or kind.names_entities or bool(proposal.naming)
+        if not names:
+            return []
+        out: list[Check] = []
+        if identity.problem:
+            if not any(c.name == "agent_identity" for c in proposal.checks):
+                out.append(Check("agent_identity", False, identity.problem))
+            return out
+        if kind.creates_named:
+            if not proposal.created_names and not any(not c.ok for c in proposal.checks):
+                out.append(Check("name_prefix", False,
+                                 f"{kind.name} creates {', '.join(kind.creates_named)} but "
+                                 "reported no name to check"))
+            if identity.configured:
+                bad = [f"{etype} {name!r}" for etype, name in proposal.created_names
+                       if not identity.owns(name)]
+                out.append(Check(
+                    "name_prefix", not bad,
+                    (f"not prefixed with {identity.prefix!r}: {', '.join(bad)}" if bad
+                     else f"every name carries {identity.prefix!r}"),
+                ))
+        return out
 
     # -- apply -----------------------------------------------------------
 

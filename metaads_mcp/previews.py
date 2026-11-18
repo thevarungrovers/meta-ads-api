@@ -81,6 +81,13 @@ class ChangePreview(BaseModel):
             "do not store them."
         ),
     )
+    naming: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "For anything named here: {requested, final, prefix, base, length, "
+            "max_length, rule}. `final` is EXACTLY the name that will be sent."
+        ),
+    )
 
 
 class ApplyResult(BaseModel):
@@ -110,6 +117,13 @@ class ApplyResult(BaseModel):
             "For an ad change: the live ad and creative re-read and diffed "
             "against what was approved, its review state, and fresh preview "
             "links. passed=false says what differs; nothing is auto-reverted."
+        ),
+    )
+    follow_ups: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Writes made right after the main one (a copy's renames), each its "
+            "own ledger entry: {entry_id, entity_id, name, ok, error}."
         ),
     )
 
