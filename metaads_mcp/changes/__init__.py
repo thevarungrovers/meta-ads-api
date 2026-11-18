@@ -10,6 +10,7 @@ from __future__ import annotations
 def all_kinds() -> list:
     from metaads_mcp.changes.audiences import CreateAudience
     from metaads_mcp.changes.bidding import BIDDING_KINDS
+    from metaads_mcp.changes.creative_options import OPTION_KINDS
     from metaads_mcp.changes.targeting import AdSetTargeting
     from metaads_mcp.changes.creative import DuplicateAd, UpdateAdCopy
     from metaads_mcp.changes.delivery import (
@@ -33,4 +34,5 @@ def all_kinds() -> list:
         CreateAudience(),
         *(kind() for kind in BIDDING_KINDS),
         AdSetTargeting(),
+        *(kind() for kind in OPTION_KINDS),
     ]

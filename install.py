@@ -110,6 +110,11 @@ SAFE_TOOLS = (
     "preview_ad_set_dayparting",
     "preview_ad_set_frequency_cap",
     "preview_ad_set_targeting",
+    "preview_ad_set_placements",
+    "preview_url_tags",
+    "preview_advantage_creative_options",
+    "preview_attach_lead_form",
+    "preview_replace_ad_creative",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -133,6 +138,11 @@ WRITE_TOOLS = (
     "apply_ad_set_dayparting",
     "apply_ad_set_frequency_cap",
     "apply_ad_set_targeting",
+    "apply_ad_set_placements",
+    "apply_url_tags",
+    "apply_advantage_creative_options",
+    "apply_attach_lead_form",
+    "apply_replace_ad_creative",
     "revert_change",
 )
 

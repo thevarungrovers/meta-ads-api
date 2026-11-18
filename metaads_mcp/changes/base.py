@@ -186,6 +186,8 @@ class Proposal:
     #: For a kind with ``verifies_ad``: what the preview checks and fetches
     #: previews for. See :mod:`metaads_mcp.verify`.
     verify: dict[str, Any] | None = None
+    #: Preview links a kind fetched itself (placements: every ad, new set).
+    previews: list[dict[str, Any]] | None = None
     #: What revert_change needs beyond before/after, for the single-row case.
     inverse: dict[str, Any] | None = None
 

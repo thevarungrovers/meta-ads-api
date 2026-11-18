@@ -182,7 +182,7 @@ class Engine:
             "field_name": proposal.field_name,
         }
 
-        previews = None
+        previews = proposal.previews
         if kind.verifies_ad:
             from metaads_mcp import verify
 
