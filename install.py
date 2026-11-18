@@ -125,6 +125,7 @@ SAFE_TOOLS = (
     "preview_duplicate_ad_set",
     "preview_duplicate_campaign",
     "preview_create_ab_test",
+    "preview_low_risk_change",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -163,6 +164,7 @@ WRITE_TOOLS = (
     "apply_duplicate_ad_set",
     "apply_duplicate_campaign",
     "apply_create_ab_test",
+    "apply_low_risk_change",
     "revert_change",
 )
 

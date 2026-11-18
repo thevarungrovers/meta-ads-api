@@ -90,6 +90,7 @@ PREVIEW_TOOLS = frozenset(
         "preview_duplicate_ad_set",
         "preview_duplicate_campaign",
         "preview_create_ab_test",
+        "preview_low_risk_change",
     }
 )
 
@@ -130,6 +131,7 @@ APPLY_TOOLS = frozenset(
         "apply_duplicate_ad_set",
         "apply_duplicate_campaign",
         "apply_create_ab_test",
+        "apply_low_risk_change",
     }
 )
 

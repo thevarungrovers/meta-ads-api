@@ -119,7 +119,7 @@ treating the gap as a bug.
 
 ## The tools
 
-104 in total: 35 read, 34 `preview_*`/`apply_*` pairs, plus `revert_change`.
+106 in total: 35 read, 35 `preview_*`/`apply_*` pairs, plus `revert_change`.
 
 ### Read — safe, call freely
 

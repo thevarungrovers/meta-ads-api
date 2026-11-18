@@ -12,6 +12,7 @@ def all_kinds() -> list:
     from metaads_mcp.changes.audiences import CreateAudience
     from metaads_mcp.changes.bidding import BIDDING_KINDS
     from metaads_mcp.changes.creation import CREATION_KINDS
+    from metaads_mcp.changes.low_risk import LowRiskChange
     from metaads_mcp.changes.studies import CreateAbTest
     from metaads_mcp.changes.creative_options import OPTION_KINDS
     from metaads_mcp.changes.targeting import AdSetTargeting
@@ -41,4 +42,5 @@ def all_kinds() -> list:
         *(kind() for kind in ADS_KINDS),
         *(kind() for kind in CREATION_KINDS),
         CreateAbTest(),
+        LowRiskChange(),
     ]

@@ -79,12 +79,12 @@ def test_an_unknown_entity_type_is_refused():
         check_writable("adaccount", {"spend_cap": 1})
 
 
-def test_an_ad_exposes_status_name_and_creative_and_nothing_else():
+def test_an_ad_exposes_status_name_creative_and_labels_and_nothing_else():
     """`creative` repoints an existing ad at a different creative -- the only
     way to change what a live ad says, because a creative is immutable once
     attached. The copy itself is still not editable in place: you build a new
     creative (see write/creatives.py) and point at it."""
-    assert WRITABLE_FIELDS["ad"] == frozenset({"status", "name", "creative"})
+    assert WRITABLE_FIELDS["ad"] == frozenset({"status", "name", "creative", "adlabels"})
 
 
 def test_an_ad_still_cannot_have_its_targeting_or_parent_changed():

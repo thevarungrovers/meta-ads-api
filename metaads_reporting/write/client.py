@@ -51,6 +51,8 @@ WRITABLE_FIELDS: dict[str, frozenset[str]] = {
         "bid_strategy",
         # The schedule. start_time only before the campaign has delivered.
         "start_time", "stop_time",
+        # Labels, through the low-risk tool's closed allowlist.
+        "adlabels",
     }),
     "adset": frozenset({
         "status", "name", "daily_budget", "lifetime_budget", "bid_amount",
@@ -66,12 +68,13 @@ WRITABLE_FIELDS: dict[str, frozenset[str]] = {
         # What the ad set optimizes for, how it is billed, and the window it
         # attributes conversions over.
         "optimization_goal", "billing_event", "attribution_spec",
+        "adlabels",
     }),
     # `creative` points an EXISTING ad at a different creative. It is the only
     # way to change what a live ad says, because a creative is immutable once
     # attached. The value is {"creative_id": "..."} -- a dict, which `update`
     # JSON-encodes on the way out.
-    "ad": frozenset({"status", "name", "creative"}),
+    "ad": frozenset({"status", "name", "creative", "adlabels"}),
     # An A/B test is never deleted; undoing one ends it early.
     "adstudy": frozenset({"end_time"}),
 }

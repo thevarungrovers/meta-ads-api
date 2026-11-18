@@ -322,6 +322,7 @@ def test_the_write_surface_the_docs_claim_matches_the_allowlist():
         "targeting",  # ad_set_targeting: always the full merged spec
         "optimization_goal", "billing_event", "attribution_spec",  # optimization kinds
         "end_time",  # (also) an A/B test's: its revert ends it early
+        "adlabels",  # the low-risk tool: labels on campaigns, ad sets and ads
     }, (
         f"the write surface changed to {sorted(every)} -- README and SKILL.md "
         f"both state it explicitly and now need updating"
