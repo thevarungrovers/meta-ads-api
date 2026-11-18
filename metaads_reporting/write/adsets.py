@@ -218,7 +218,8 @@ def plan_set_daily_budget(
     campaign off campaign-budget optimization.
     """
     row = find(client, ad_set_id=ad_set_id, name=name, account_id=account_id)
-    currency = client.currency(account_id)
+    # The AD SET's account, not the default one: a token reaches several.
+    currency = client.currency(row.get("account_id") or account_id)
     client.check_daily_budget(float(amount), override=override_guardrail)
 
     using = budget_field(row)
@@ -291,7 +292,8 @@ def plan_set_bid_amount(
     bid moved.
     """
     row = find(client, ad_set_id=ad_set_id, name=name, account_id=account_id)
-    currency = client.currency(account_id)
+    # The AD SET's account, not the default one: a token reaches several.
+    currency = client.currency(row.get("account_id") or account_id)
     strategy = effective_bid_strategy(client, row)
 
     if strategy not in STRATEGIES_USING_BID_AMOUNT:

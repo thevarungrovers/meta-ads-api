@@ -238,7 +238,8 @@ def plan_set_daily_budget(
     convert the campaign to CBO, redistributing spend across every ad set.
     """
     row = find(client, campaign_id=campaign_id, name=name, account_id=account_id)
-    currency = client.currency(account_id)
+    # The CAMPAIGN's account, not the default one: a token reaches several.
+    currency = client.currency(row.get("account_id") or account_id)
     client.check_daily_budget(float(amount), override=override_guardrail)
 
     level = budget_level(row)

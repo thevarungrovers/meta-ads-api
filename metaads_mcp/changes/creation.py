@@ -99,7 +99,8 @@ class CreateCampaign(_Creates):
         if not name.strip():
             raise ValueError("The campaign needs a name.")
         cats = [c for c in special_ad_categories if c != "NONE"]
-        currency = ctx.currency()
+        # Created in the write client's account: that account's currency.
+        currency = ctx.currency(ctx.target_account())
         payload_out: dict[str, Any] = {
             "name": name, "objective": objective, "status": "PAUSED",
             "buying_type": "AUCTION", "special_ad_categories": cats,
@@ -180,7 +181,7 @@ class CreateAdSet(_Creates):
         """
         campaign = campaigns.find(ctx.client, campaign_id=campaign_id)
         cbo = campaigns.budget_level(campaign) == "campaign"
-        currency = ctx.currency()
+        currency = ctx.currency_of(campaign)
         create: dict[str, Any] = {
             "name": name, "campaign_id": str(campaign["id"]), "status": "PAUSED",
             "optimization_goal": optimization_goal, "billing_event": billing_event,

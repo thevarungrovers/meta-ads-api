@@ -64,8 +64,19 @@ class WriteContext:
             return str(resolve()).replace("act_", "")
         return self.default_account
 
-    def currency(self) -> str:
-        return self.client.currency()
+    def currency(self, account_id: str | None = None) -> str:
+        """The currency of ``account_id`` -- the default account's only when None.
+
+        Every kind passes the account of the object it touches (see
+        :meth:`currency_of`): scope allows any allowed_account_ids account, and
+        a JPY ad set read as CAD is a hundredfold error in the approval prompt.
+        """
+        return self.client.currency(account_id)
+
+    def currency_of(self, row: dict[str, Any] | None) -> str:
+        """The currency of the account ``row`` (a campaign, ad set or ad) is in."""
+        account = (row or {}).get("account_id")
+        return self.currency(str(account) if account else None)
 
     # -- sending ---------------------------------------------------------
 

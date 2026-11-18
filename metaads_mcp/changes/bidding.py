@@ -188,7 +188,7 @@ class _CampaignKind(NodeFieldKind):
 
 
 def _lifetime(kind, ctx, row, new_amount: str, end_field: str, what: str) -> Proposal:
-    currency = ctx.currency()
+    currency = ctx.currency_of(row)
     after = parse_money(new_amount, "new_lifetime_budget")
     if campaigns.budget_field(row) != "lifetime_budget":
         raise ValueError(
@@ -222,7 +222,7 @@ class AdSetLifetimeBudget(_AdSetKind):
     ledger_keys = (("ad set", "lifetime_budget"),)
 
     def render(self, ctx, row):
-        return rendered(row, "lifetime_budget", ctx.currency())
+        return rendered(row, "lifetime_budget", ctx.currency_of(row))
 
     def propose(
         self,
@@ -246,7 +246,7 @@ class CampaignLifetimeBudget(_CampaignKind):
     ledger_keys = (("campaign", "lifetime_budget"),)
 
     def render(self, ctx, row):
-        return rendered(row, "lifetime_budget", ctx.currency())
+        return rendered(row, "lifetime_budget", ctx.currency_of(row))
 
     def propose(
         self,
@@ -269,7 +269,7 @@ class CampaignLifetimeBudget(_CampaignKind):
 
 
 def _strategy_render(ctx, row, strategy_from=None) -> str:
-    currency = ctx.currency()
+    currency = ctx.currency_of(row)
     strategy = strategy_from or row.get("bid_strategy") or "(not set)"
     parts = [strategy]
     if row.get("bid_amount"):
@@ -313,7 +313,7 @@ class AdSetBidStrategy(_AdSetKind):
         this refuses and points at preview_campaign_bid_strategy.
         """
         row = self.read_row(ctx, ad_set_id)
-        currency = ctx.currency()
+        currency = ctx.currency_of(row)
         if campaigns.budget_field(row) is None:
             raise ValueError(
                 f"Ad set {row.get('name')!r} has no budget of its own: its campaign uses "
@@ -384,7 +384,7 @@ class CampaignBidStrategy(_CampaignKind):
         campaign: there the strategy is per ad set.
         """
         row = self.read_row(ctx, campaign_id)
-        currency = ctx.currency()
+        currency = ctx.currency_of(row)
         if campaigns.budget_level(row) != "campaign":
             raise ValueError(
                 f"Campaign {row.get('name')!r} does not hold its budget; its ad sets "
@@ -434,7 +434,7 @@ class AdSetRoasFloor(_AdSetKind):
         before = _floor(row)
         projected = Decimal("0")
         if before is not None and after < before:
-            projected = _headroom(ctx, row, ctx.currency(), "adset", "end_time")
+            projected = _headroom(ctx, row, ctx.currency_of(row), "adset", "end_time")
         change = Decimal("0") if not before else abs((after - before) / before * 100)
         return self._proposal(
             ctx, row, before=self.render(ctx, row), after=f"ROAS floor {after}",
@@ -472,7 +472,7 @@ def _schedule(kind, ctx, row, end_value: str | None, start_value: str | None,
         fields["start_time"] = parse_time(start_value, "start_time").isoformat()
     if not fields:
         raise ValueError(f"Give {end_field} and/or start_time.")
-    currency = ctx.currency()
+    currency = ctx.currency_of(row)
     projected = Decimal("0")
     if row.get("lifetime_budget"):
         # The same lifetime pot over a different number of days: shortening a

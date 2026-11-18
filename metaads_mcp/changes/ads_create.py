@@ -300,7 +300,7 @@ class MultiAdStatus(AdStatus):
                 if (a.get("status") or "") == "ACTIVE" and str(a.get("id")) not in {str(r["id"]) for r in rows}
             ]
             if not siblings:
-                projected, note = ad_activation_bound(ctx, {**changing[0], "id": "(batch)"}, ctx.currency())
+                projected, note = ad_activation_bound(ctx, {**changing[0], "id": "(batch)"}, ctx.currency_of(changing[0]))
         items = [LedgerItem(entity_type="ad", entity_id=str(r["id"]), entity_name=r.get("name") or "",
                             field_name="status", before=r.get("status") or "", after=wanted)
                  for r in changing]

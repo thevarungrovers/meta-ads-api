@@ -37,6 +37,9 @@ class GraphSim:
         insights: list[dict[str, Any]] | None = None,
     ) -> None:
         self.account = dict(account)
+        #: Other ad accounts the token reaches, keyed "act_<id>". Anything not
+        #: here answers as ``account``, which is what every one-account test wants.
+        self.accounts: dict[str, dict[str, Any]] = {}
         self.objects = {k: dict(v) for k, v in (objects or {}).items()}
         #: parent id -> edge name -> child ids
         self.edges = edges or {}
@@ -138,7 +141,7 @@ class GraphSim:
         if node == "debug_token":
             return FakeResponse({"data": dict(self.token_debug)})
         if node.startswith("act_"):
-            return FakeResponse(self._project(self.account, fields))
+            return FakeResponse(self._project(self.accounts.get(node, self.account), fields))
         if node == "me":
             return FakeResponse({"id": "SYSTEM_USER_1", "name": "Test System User"})
         if node in self.objects:

@@ -111,7 +111,7 @@ class StatusKind(ChangeKind):
         if entry.get("before") != "ACTIVE":
             return Decimal("0"), False
         row = self.find(ctx, entry["entity_id"])
-        bound, _ = self.activation_bound(ctx, row, ctx.currency())
+        bound, _ = self.activation_bound(ctx, row, ctx.currency_of(row))
         return bound, bound > 0
 
 

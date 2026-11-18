@@ -655,7 +655,7 @@ class AdSetTargeting(NodeFieldKind):
             # More people means the budget can be spent where it was not: the
             # ad set's unused headroom, counted like an activation (exempt from
             # the per-change limit, counted in the daily and session totals).
-            bound, why = ad_set_activation_bound(ctx, row, ctx.currency())
+            bound, why = ad_set_activation_bound(ctx, row, ctx.currency_of(row))
             spent = ctx.spend_7d(ctx.metrics_7d(str(row["id"]), "adset")) / 7
             projected = max(bound - spent, Decimal("0")).quantize(Decimal("0.01"))
             warnings.append(

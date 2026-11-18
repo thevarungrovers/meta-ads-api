@@ -136,13 +136,10 @@ class Engine:
         # token routinely reaches several accounts, and before this any
         # campaign id the token could see was writable. Something not yet
         # created has no account of its own; it goes to the write client's.
+        account = str(proposal.account_id or ctx.target_account()).replace("act_", "")
         checks: list[Check] = [
             check_writes_enabled(),
-            check_account_in_scope(
-                ctx.limits,
-                str(proposal.account_id or ctx.target_account()).replace("act_", ""),
-                ctx.default_account,
-            ),
+            check_account_in_scope(ctx.limits, account, ctx.default_account),
         ]
         if proposal.campaign_id is not None:
             checks.append(check_campaign_in_scope(ctx.limits, str(proposal.campaign_id)))
@@ -180,6 +177,9 @@ class Engine:
             "entity_id": str(proposal.entity_id),
             "entity_name": proposal.entity_name,
             "field_name": proposal.field_name,
+            # The ENTITY's account: what the ledger records and whose currency
+            # the preview shows.
+            "account_id": account,
         }
 
         previews = proposal.previews
@@ -218,8 +218,8 @@ class Engine:
             field_name=proposal.field_name,
             before=proposal.before,
             after=proposal.after,
-            account_id=ctx.default_account,
-            currency=ctx.currency(),
+            account_id=account,
+            currency=ctx.currency(account),
             status=proposal.status,
             effective_status=proposal.effective_status,
             metrics_7d=proposal.metrics,
@@ -336,6 +336,7 @@ class Engine:
         payload: dict[str, Any] | None = None,
         reverts: list[str] | None = None,
         kind_name: str | None = None,
+        account_id: str | None = None,
     ):
         """Ledger intents, the mutation, ledger outcomes. Raises on failure.
 
@@ -350,6 +351,11 @@ class Engine:
         batch_id = secrets.token_hex(6) if len(items) > 1 else None
         entry_ids: list[str] = []
         name = kind_name or (kind.name if kind else None)
+        account = (
+            account_id
+            or ((payload or {}).get("_entity") or {}).get("account_id")
+            or ctx.default_account
+        )
         for index, item in enumerate(items):
             entry_id = ledger.new_entry_id()
             entry_ids.append(entry_id)
@@ -362,7 +368,7 @@ class Engine:
             ledger.write_intent(
                 entry_id=entry_id,
                 tool=tool,
-                account_id=ctx.default_account,
+                account_id=account,
                 entity_type=item.entity_type,
                 entity_id=str(item.entity_id),
                 entity_name=item.entity_name,
@@ -486,6 +492,7 @@ class Engine:
             weight=1,
             reverts=[entry_id],
             kind_name=kind.name,
+            account_id=entry.get("account_id"),
         )
         ctx.counters.record(projected)
         result = self._revert_result(entry, entry_ids[0])

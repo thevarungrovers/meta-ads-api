@@ -61,7 +61,7 @@ class CampaignStatus(StatusKind):
         """
         wanted = wanted_status(new_status)
         row = campaigns.find(ctx.client, campaign_id=campaign_id)
-        currency = ctx.currency()
+        currency = ctx.currency_of(row)
         before = row.get("status") or ""
         metrics = ctx.metrics_7d(str(row["id"]), "campaign")
 
@@ -133,7 +133,7 @@ class AdSetStatus(StatusKind):
         """Show what pausing or activating an ad set would do. Writes nothing."""
         wanted = wanted_status(new_status)
         row = adsets.find(ctx.client, ad_set_id=ad_set_id)
-        currency = ctx.currency()
+        currency = ctx.currency_of(row)
         before = row.get("status") or ""
         metrics = ctx.metrics_7d(str(row["id"]), "adset")
 
@@ -215,7 +215,7 @@ class AdStatus(StatusKind):
         if wanted == "PAUSED":
             projected = Decimal("0")
         else:
-            projected, bound_note = ad_activation_bound(ctx, row, ctx.currency())
+            projected, bound_note = ad_activation_bound(ctx, row, ctx.currency_of(row))
 
         warnings = []
         if before == wanted:
@@ -283,10 +283,12 @@ class _MoneyKind(ChangeKind):
         return self.module.find(ctx.client, **{self.id_arg: str(entity_id)})
 
     def current(self, ctx, payload: dict[str, Any]) -> str:
-        return rendered(self.find(ctx, payload["entity_id"]), self.field, ctx.currency())
+        row = self.find(ctx, payload["entity_id"])
+        return rendered(row, self.field, ctx.currency_of(row))
 
     def current_for_entry(self, ctx, entry: dict[str, Any]) -> str | None:
-        return rendered(self.find(ctx, entry["entity_id"]), self.field, ctx.currency())
+        row = self.find(ctx, entry["entity_id"])
+        return rendered(row, self.field, ctx.currency_of(row))
 
     def plan(self, ctx, entity_id: str, amount: Decimal):  # pragma: no cover
         raise NotImplementedError
@@ -337,9 +339,9 @@ class CampaignDailyBudget(_MoneyKind):
         The delta is EXACT, not an estimate: a daily budget is the cap itself
         moving, not a guess about behaviour.
         """
-        currency = ctx.currency()
         after = parse_money(new_daily_budget, "new_daily_budget")
         row = campaigns.find(ctx.client, campaign_id=campaign_id)
+        currency = ctx.currency_of(row)
 
         if campaigns.budget_level(row) != "campaign":
             raise ValueError(
@@ -418,9 +420,9 @@ class AdSetDailyBudget(_MoneyKind):
         Refuses when the CAMPAIGN holds the budget, because then this ad set has
         none to change.
         """
-        currency = ctx.currency()
         after = parse_money(new_daily_budget, "new_daily_budget")
         row = adsets.find(ctx.client, ad_set_id=ad_set_id)
+        currency = ctx.currency_of(row)
 
         using = campaigns.budget_field(row)
         if using is None:
@@ -494,9 +496,9 @@ class AdSetBidAmount(_MoneyKind):
         are on, Meta ACCEPTS a `bid_amount` write and ignores it. Without the
         check, a human would be told their bid moved when nothing happened.
         """
-        currency = ctx.currency()
         after = parse_money(new_bid_amount, "new_bid_amount")
         row = adsets.find(ctx.client, ad_set_id=ad_set_id)
+        currency = ctx.currency_of(row)
         strategy = adsets.effective_bid_strategy(ctx.client, row)
 
         usable = adsets.STRATEGIES_USING_BID_AMOUNT
