@@ -416,7 +416,7 @@ undoes, in the cap currency (converted once, from the entity's currency).
 Undoing a change that tightened delivery -- and every later revert in that
 chain that lifts it again -- projects the live unused budget headroom
 (undoing a shortened daily-budget flight projects the whole daily budget, as
-does adding days to one). A pause or a cut in a currency with no configured
+does adding days to one, or re-applying an extension by reverting its revert). A pause or a cut in a currency with no configured
 rate is let through (counted as 0), and so is a change whose direction is
 provably down (a stricter frequency cap, a lower bid or cost cap, a higher ROAS
 floor, targeting only narrowed, a flight only shortened); a projection of 0

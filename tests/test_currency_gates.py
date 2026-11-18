@@ -295,3 +295,28 @@ def test_only_a_tightening_frequency_cap_is_marked_tightens(monkeypatch):
         ad_set_id=JPY_ADSET, max_frequency=1, interval_days=7)
     result = tools["apply_ad_set_frequency_cap"](preview_token=tighten.preview_token)
     assert ledger.find_entry(result.entry_id)["inverse"].get("tightens") is True
+
+
+def test_re_applying_an_extension_recorded_at_zero_projects_the_daily_budget(monkeypatch):
+    """An extension row written when extensions recorded the unused headroom
+    (often 0): reverting its revert re-extends, and adds a whole day's budget
+    on every day it puts back, whatever was stored."""
+    from metaads_mcp.changes import bidding
+    from tests.kindkit import rig
+    from tests.test_kinds_bidding import abo_sim
+    from tests.test_mcp_write_path import ADSET_ID
+
+    sim = abo_sim(start_time="2026-01-01T00:00:00+0000", end_time=_at(10))
+    tools, _ = rig(monkeypatch, sim)
+    _no_headroom(monkeypatch)
+    real_bound = bidding._daily_bound_of
+    # The old projection: the headroom, 0 here.
+    monkeypatch.setattr(bidding, "_daily_bound_of", lambda ctx, row, end: (Decimal("0"), "old"))
+    extend = tools["preview_ad_set_schedule"](ad_set_id=ADSET_ID, end_time=_at(30))
+    assert Decimal(extend.projected_daily_spend_delta) == 0
+    result = tools["apply_ad_set_schedule"](preview_token=extend.preview_token)
+    monkeypatch.setattr(bidding, "_daily_bound_of", real_bound)
+    undo = tools["revert_change"](entry_id=result.entry_id)
+    assert Decimal(undo.projected_daily_spend_delta) == 0, "shortening adds nothing"
+    redo = tools["revert_change"](entry_id=undo.entry_id)
+    assert Decimal(redo.projected_daily_spend_delta) == pytest.approx(Decimal("50.00"))

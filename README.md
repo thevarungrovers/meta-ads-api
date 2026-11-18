@@ -710,7 +710,10 @@ that **tightened** delivery (a cap, a floor, narrowed targeting) projects the
 entity's unused budget headroom, and so does every later step of that revert
 chain that lifts the restriction again, however deep: the headroom is re-read
 at that moment, never taken from an older step. Undoing a shortened
-daily-budget flight puts days back, so it projects the whole daily budget.
+daily-budget flight puts days back, so it projects the whole daily budget --
+and so does re-applying an extension through a revert of its revert, never
+less than that bound whatever an older row recorded (rows from before
+extensions projected the daily budget hold the headroom, often 0).
 
 ## How reading and writing are kept apart
 

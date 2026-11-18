@@ -626,14 +626,18 @@ def _daily_bound_of(ctx, row: dict[str, Any], end_field: str) -> tuple[Decimal, 
 
 
 class _ScheduleRevert:
-    """Undoing a shortened daily-budget flight puts the days back: each one
-    spends the whole daily budget again, not only today's unused headroom."""
+    """A revert that puts days back on a daily-budget flight -- undoing a
+    shortening, or re-applying an extension through a revert of its revert --
+    spends the whole daily budget on each of them, not only today's unused
+    headroom. The bound is re-read now and never below what was stored: an
+    extension row written when extensions recorded the headroom (often 0)
+    would otherwise re-extend at 0, past the currency checks."""
 
     def revert_projection(self, ctx, entry):
         from metaads_mcp.changes.base import lifts_a_restriction
 
         projected, activation = super().revert_projection(ctx, entry)
-        if not lifts_a_restriction(entry):
+        if not (lifts_a_restriction(entry) or self._revert_adds_days(entry)):
             return projected, activation
         row = self.read_row(ctx, str(entry["entity_id"]))
         if row.get("lifetime_budget"):
@@ -641,6 +645,33 @@ class _ScheduleRevert:
         bound, _ = _daily_bound_of(ctx, row, self.end_field)
         lifted = max(bound, projected)
         return lifted, lifted > 0
+
+    def _revert_adds_days(self, entry) -> bool:
+        """Whether going from ``entry``'s after back to its before runs on days
+        the after does not. Unreadable: assume it does, so it is counted."""
+        live = _parse_schedule(entry.get("after"), self.end_field)
+        target = _parse_schedule(entry.get("before"), self.end_field)
+        if live is None or target is None:
+            return True
+        if target[self.end_field] is None and live[self.end_field] is not None:
+            return True  # the end is taken off: it runs on with no end
+        return _adds_days(live, {k: v for k, v in target.items() if v is not None},
+                          self.end_field)
+
+
+def _parse_schedule(text: Any, end_field: str) -> dict[str, Any] | None:
+    """A rendered schedule ("start <iso> | end <iso>") back into row fields;
+    "(not set)" is None. None when it does not read as one."""
+    names = {"start": "start_time", "end": "end_time", "stop": "stop_time"}
+    fields: dict[str, Any] = {}
+    for part in str(text or "").split(" | "):
+        label, _, value = part.strip().partition(" ")
+        if label not in names or not value:
+            return None
+        fields[names[label]] = None if value == "(not set)" else value
+    if set(fields) != {"start_time", end_field}:
+        return None
+    return fields
 
 
 def _when(raw):
