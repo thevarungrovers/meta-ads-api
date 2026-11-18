@@ -412,16 +412,19 @@ def restamp_for_copy(identity: Identity, source_name: str, *, entity_type: str,
 
     A copy made by the agent is created by the agent: OUR prefix on the
     source's base, any prefix stripped. With no identity configured, the
-    source name plus ``suffix`` -- the naming used before this existed.
+    source name plus ``suffix`` -- still with any full ``OWNER-agent-``
+    prefix stripped, so a copy never claims another agent made it.
 
     >>> restamp_for_copy(Identity("AB", "max"), "CD-bot-launch", entity_type="ad",
     ...                  suffix=" (copy)").final
     'AB-max-launch (copy)'
+    >>> restamp_for_copy(Identity(), "CD-bot-launch", entity_type="ad", suffix=" (copy)").final
+    'launch (copy)'
     """
     _require_valid(identity)
     source = (source_name or "").strip()
     if not identity.configured:
-        final = f"{source}{suffix}"
+        final = f"{strip_prefix(identity, source).strip()}{suffix}".strip()
         _check_base(final, identity, entity_type)
         return Stamped(final=final, base=final, requested=final, prefix="",
                        rule=NO_IDENTITY_RULE, entity_type=entity_type)

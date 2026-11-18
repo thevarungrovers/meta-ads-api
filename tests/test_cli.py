@@ -435,6 +435,20 @@ def test_manage_ad_duplicate_stamps_the_cli_prefix(sim, monkeypatch, tmp_path, c
 
 
 @pytest.mark.parametrize("owner, agent, prefix", CLI_COMBOS)
+def test_manage_ad_duplicate_strips_a_foreign_prefix_from_the_copy(sim, monkeypatch, tmp_path,
+                                                                    owner, agent, prefix):
+    from scripts import manage
+    from tests.test_mcp_creative_path import CREATIVE_ID, link_creative_obj
+
+    _env(monkeypatch, tmp_path, owner, agent)
+    sim.objects[AD_ID]["name"] = "CD-bot-launch"
+    sim.objects[AD_ID]["creative"] = {"id": CREATIVE_ID}
+    sim.objects[CREATIVE_ID] = link_creative_obj()
+    assert manage.main(["ad", "duplicate", "--id", AD_ID, "--headline", "new", "--yes"]) == 0
+    assert _sent(sim, "ads")["name"] == f"{prefix}launch (copy)"
+
+
+@pytest.mark.parametrize("owner, agent, prefix", CLI_COMBOS)
 def test_manage_audiences_stamp_the_cli_prefix(sim, monkeypatch, tmp_path, owner, agent, prefix):
     from scripts import manage
 

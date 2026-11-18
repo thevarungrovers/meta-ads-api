@@ -62,10 +62,8 @@ def test_create_stamps_each_combination(identity, prefix):
 @pytest.mark.parametrize("identity, prefix", COMBOS)
 def test_copy_restamps_each_combination(identity, prefix):
     out = restamp_for_copy(identity, "CD-bot-launch", entity_type="ad", suffix=" (copy)")
-    if prefix:
-        assert out.final == f"{prefix}launch (copy)"
-    else:
-        assert out.final == "CD-bot-launch (copy)", "no identity: the old copy naming"
+    # Another agent's prefix is stripped even with no identity configured.
+    assert out.final == f"{prefix}launch (copy)"
 
 
 @pytest.mark.parametrize("identity, prefix", COMBOS[:3])
@@ -323,4 +321,16 @@ def test_owner_only_copy_of_an_ambiguous_source_is_refused_too():
 def test_other_identities_still_accept_a_hyphenated_base():
     for identity in (BOTH, AGENT_ONLY, NEITHER):
         assert stamp(identity, "spring-promo", entity_type="campaign").base == "spring-promo"
+
+
+# --- a copy never carries a foreign prefix, identity or not ---------------------
+
+
+@pytest.mark.parametrize("identity, prefix", COMBOS)
+@pytest.mark.parametrize("source", ["CD-bot-x", "CD-cli-x", "AB-max-CD-bot-x"])
+def test_a_copy_base_never_keeps_a_full_prefix(identity, prefix, source):
+    stamped = restamp_for_copy(identity, source, entity_type="ad", suffix=" (copy)")
+    assert stamped.final == f"{prefix}x (copy)"
+    parsed = parse(stamped.final)
+    assert parsed is None or (parsed.owner, parsed.agent) == (identity.owner, identity.agent)
 

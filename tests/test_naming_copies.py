@@ -45,10 +45,9 @@ def test_duplicate_ad_without_a_name_restamps_the_source(monkeypatch, identity, 
     tools["apply_duplicate_ad"](preview_token=preview.preview_token)
     ad = _created(s, "ads")[0]["name"]
     creative = _created(s, "adcreatives")[0]["name"]
-    if prefix:
-        assert ad == f"{prefix}launch (copy)"
-    else:
-        assert ad == "CD-bot-launch (copy)", "no identity: the old copy naming"
+    # Another agent's prefix is stripped whatever the identity: with none
+    # configured the copy is plain, never "CD-bot-launch (copy)".
+    assert ad == f"{prefix}launch (copy)"
     assert creative == f"{ad} creative"
 
 
