@@ -309,7 +309,9 @@ def test_a_saved_audience_is_created_with_its_targeting(tools):
 def test_a_customer_list_audience_cannot_be_requested_at_all(tools):
     """The kind is refused before any payload is built."""
     tool, state, sim = tools
-    for kind in ("custom", "CUSTOM", "customer_list", "website"):
+    # "website" was in this list until website audiences (built from pixel
+    # events Meta already holds, no upload) became a kind of their own.
+    for kind in ("custom", "CUSTOM", "customer_list"):
         with pytest.raises(Exception) as caught:
             tool["preview_create_audience"](kind=kind, name="x")
         assert "upload personal data" in str(caught.value), kind
