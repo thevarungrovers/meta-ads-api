@@ -312,8 +312,12 @@ class ReadOnlyMetaAdsClient:
         node_id: str | None = None,
         account_id: str | None = None,
         max_pages: int = 20,
+        max_items: int | None = None,
     ) -> list[dict[str, Any]]:
         """Run ``query`` against an account (the default) or one object.
+
+        ``max_items`` is a real row cap; ``query.limit`` is only Meta's page
+        size, and without a cap a daily ad-level report walks every page.
 
         Returns raw rows: money stays as Meta sent it. Use :meth:`insight_rows`
         for rows with the units already resolved.
@@ -328,7 +332,10 @@ class ReadOnlyMetaAdsClient:
         ) as slot:
             rows = list(
                 self._paged(
-                    f"{target}/insights", max_pages=max_pages, **query.to_params()
+                    f"{target}/insights",
+                    max_pages=max_pages,
+                    max_items=max_items,
+                    **query.to_params(),
                 )
             )
             slot["row_count"] = len(rows)
@@ -341,6 +348,7 @@ class ReadOnlyMetaAdsClient:
         node_id: str | None = None,
         account_id: str | None = None,
         max_pages: int = 20,
+        max_items: int | None = None,
     ) -> list[dict[str, Any]]:
         """Insights rows flattened to ``{field: value}``, units resolved.
 
@@ -350,7 +358,8 @@ class ReadOnlyMetaAdsClient:
         """
         code = self.currency(account_id)
         rows = self.insights(
-            query, node_id=node_id, account_id=account_id, max_pages=max_pages
+            query, node_id=node_id, account_id=account_id, max_pages=max_pages,
+            max_items=max_items,
         )
         columns = tuple(query.fields) + ("date_start", "date_stop")
         return [object_to_row(row, columns, code) for row in rows]

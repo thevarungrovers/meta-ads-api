@@ -277,52 +277,82 @@ def register(mcp, state) -> None:
             str | None,
             Field(description="Report on one campaign, ad set or ad id instead of the account"),
         ] = None,
-        limit: Annotated[int, Field(ge=1, le=500)] = 200,
+        max_rows: Annotated[
+            int, Field(description="Most rows to return", ge=1, le=5000)
+        ] = 200,
+        aggregate: Annotated[
+            bool,
+            Field(description="True: one row per entity for the whole window. False: one per day"),
+        ] = True,
+        action_types: Annotated[
+            list[str] | None,
+            Field(description="Keep only these action types in actions/action_values, e.g. ['purchase']"),
+        ] = None,
     ) -> dict[str, Any]:
         """Account, campaign, ad set or ad performance from the insights edge.
 
         Today is excluded from `days` on purpose: today's metrics are partial
-        all day and drag every average down.
+        all day and drag every average down. `days` is evaluated in the
+        ACCOUNT's time zone (a Meta date preset where one exists).
+
+        `max_rows` is a real cap on rows returned; `truncated: true` says
+        there were more. `aggregate=False` gives a row per day, which on an
+        ad-level report is a lot of rows.
 
         THREE THINGS TO KNOW ABOUT THESE NUMBERS:
 
         - **Attribution is 7-day-click plus 1-day-view** unless a report says
           otherwise. The 1-day-view half counts people who SAW an ad and never
           touched it, which is why Meta's conversion count is routinely several
-          times larger than any click-based record of the same campaign. They
-          are not measuring the same thing, and neither is wrong.
+          times larger than any click-based record of the same campaign.
         - **Dates are in the ACCOUNT's time zone.** See `get_account`.
         - **`reach` and `frequency` cannot be summed across rows.** The same
           person reached on two days is one person. The totals below leave them
           out for that reason.
         """
+        from metaads_reporting.insights import window_for_days
+
         definition = get_report(report)
         filters = (
             (name_contains("campaign", campaign_name),) if campaign_name else ()
         )
+        increment = None if aggregate else 1
         if since or until:
             query = definition.build(
-                since=since, until=until, filtering=filters, limit=limit
+                since=since, until=until, filtering=filters, time_increment=increment,
             )
         else:
-            from metaads_reporting.insights import last_n_days
-
-            window = last_n_days(days or 30)
+            tz = (client.account() or {}).get("timezone_name")
+            window = window_for_days(days or 30, tz)
             query = definition.build(
-                since=window["since"],
-                until=window["until"],
+                preset=window.get("date_preset"),
+                since=window.get("since"),
+                until=window.get("until"),
                 filtering=filters,
-                limit=limit,
+                time_increment=increment,
             )
 
-        rows = client.insight_rows(query, node_id=node_id)
+        rows = client.insight_rows(query, node_id=node_id, max_items=max_rows + 1)
+        truncated = len(rows) > max_rows
+        rows = rows[:max_rows]
+        if action_types:
+            wanted = set(action_types)
+            for row in rows:
+                for key in ("actions", "action_values", "cost_per_action_type"):
+                    if isinstance(row.get(key), list):
+                        row[key] = [
+                            e for e in row[key]
+                            if isinstance(e, dict) and e.get("action_type") in wanted
+                        ]
         return {
             "report": report,
             "level": definition.level,
             "window": query.describe_window(),
+            "aggregate": aggregate,
             "attribution_windows": list(query.attribution_windows),
             "currency": client.currency(),
-            "row_count": len(rows),
+            "rows_returned": len(rows),
+            "truncated": truncated,
             "totals": summarise(rows),
             "rows": rows,
             "rate_limit": headroom(),

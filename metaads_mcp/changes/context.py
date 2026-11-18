@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 from metaads_mcp.guardrails import Check
-from metaads_reporting.insights import InsightsQuery, last_n_days
+from metaads_reporting.insights import InsightsQuery
 
 #: What a not-yet-uploaded image looks like inside a creative payload.
 PENDING_UPLOAD = "<pending upload>"
@@ -151,12 +151,12 @@ class WriteContext:
         daily rows, because ``reach`` and ``frequency`` cannot be added across
         days -- the same person reached twice is one person.
         """
-        window = last_n_days(7)
+        # A preset, so Meta evaluates "the last 7 days" in the ACCOUNT's time
+        # zone rather than this machine's.
         query = InsightsQuery(
             fields=("spend", "impressions", "clicks", "reach", "frequency", "ctr", "cpc"),
             level=level,
-            since=window["since"],
-            until=window["until"],
+            date_preset="last_7d",
             time_increment=None,
             limit=5,
         )
@@ -178,7 +178,7 @@ class WriteContext:
             "frequency": row.get("frequency"),
             "ctr": row.get("ctr"),
             "cpc": row.get("cpc"),
-            "window": f"{window['since']} to {window['until']}",
+            "window": f"{row.get('date_start')} to {row.get('date_stop')} (account time zone)",
         }
 
     @staticmethod

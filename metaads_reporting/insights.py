@@ -165,6 +165,38 @@ def time_range(since: date | str, until: date | str) -> dict[str, str]:
     return {"since": start, "until": end}
 
 
+#: N -> the date_preset Meta evaluates in the ACCOUNT's time zone for "the N
+#: days ending yesterday".
+DAY_PRESETS = {3: "last_3d", 7: "last_7d", 14: "last_14d", 28: "last_28d",
+               30: "last_30d", 90: "last_90d"}
+
+
+def window_for_days(days: int, timezone_name: str | None = None) -> dict[str, str]:
+    """The ``days`` days ending yesterday, in the ACCOUNT's time zone.
+
+    A date_preset where one exists (Meta evaluates it in the account's zone);
+    otherwise a range computed in ``timezone_name``, not this machine's zone --
+    an account in another zone would otherwise be asked for the wrong days.
+
+    >>> window_for_days(7)
+    {'date_preset': 'last_7d'}
+    >>> sorted(window_for_days(10, "UTC"))
+    ['since', 'until']
+    """
+    if days in DAY_PRESETS:
+        return {"date_preset": DAY_PRESETS[days]}
+    today = None
+    if timezone_name:
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            today = datetime.now(ZoneInfo(timezone_name)).date()
+        except Exception:  # noqa: BLE001 - an unknown zone falls back to local
+            today = None
+    return last_n_days(days, today=today)
+
+
 def last_n_days(days: int, *, today: date | None = None) -> dict[str, str]:
     """The ``days`` days ending YESTERDAY, as a ``time_range``.
 
