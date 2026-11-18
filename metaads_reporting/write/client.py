@@ -131,6 +131,20 @@ NAMED_EDGES = frozenset({"campaigns", "adsets", "ads", "adcreatives", "customaud
 NAMED_TYPES = frozenset({"campaign", "adset", "ad"})
 
 
+def bare_segment(value: str, what: str) -> str:
+    """``value`` as ONE path segment: classified on its urlsplit path, and
+    refused if it carries anything else (a query, a fragment, a slash), so a
+    ``campaigns?x`` edge or a ``123/campaigns`` node cannot route around the
+    name and status checks that key on it."""
+    from urllib.parse import urlsplit
+
+    text = str(value or "")
+    path = urlsplit(text).path
+    if not path or path != text or "/" in path:
+        raise MutationError(f"Refusing {what} {text!r}: it must be one bare path segment.")
+    return path
+
+
 def check_name_prefix(prefix: str, name: Any, what: str) -> None:
     """Refuse a name without the configured prefix, below every tool.
 
@@ -321,6 +335,7 @@ class MutatingMetaAdsClient:
         """
         if not payload:
             raise MutationError("Nothing to write: the payload is empty.")
+        node_id = bare_segment(node_id, "node id")
         check_writable(entity_type, payload)
         if "name" in payload and entity_type in NAMED_TYPES and not allow_unprefixed_name:
             # A rename keeps the prefix. Only a revert, putting back a name
@@ -395,6 +410,9 @@ class MutatingMetaAdsClient:
         """
         if not payload:
             raise MutationError("Nothing to create: the payload is empty.")
+        edge = bare_segment(edge, "edge")
+        if parent is not None:
+            parent = bare_segment(parent, "parent id")
         check_create_paused(edge, payload)
         if edge in NAMED_EDGES:
             check_name_prefix(self.required_name_prefix, payload.get("name"), f"creating on {edge}")
