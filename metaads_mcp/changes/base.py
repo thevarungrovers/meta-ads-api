@@ -345,9 +345,12 @@ class Proposal:
     #: itself, but undoing it lifts the restriction: the ledger marks it, and
     #: its revert projects the unused budget headroom and counts it.
     tightens: bool = False
-    #: The kind says this change can only LOWER spend (a cut, a pause): the
-    #: engine may then skip the cap_currency refusal when nothing is
-    #: projected. A projection of 0 alone never proves that.
+    #: The kind says this change can only LOWER spend: computed from before
+    #: and after, set only where the direction is provable (a cap made
+    #: stricter, a bid or cost cap lowered, a ROAS floor raised, targeting
+    #: only narrowed, a flight only shortened). The engine may then skip the
+    #: cap_currency refusal when nothing is projected. A projection of 0
+    #: alone never proves that, and neither does ``tightens``.
     reduces_spend: bool = False
     #: The preview's ``naming`` blocks (metaads_reporting.naming), one per name
     #: decided: requested, final, prefix, base, length, max_length, rule.

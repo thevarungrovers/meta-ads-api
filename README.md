@@ -590,8 +590,12 @@ limits and totals are counted in the *cap currency*: `cap_currency` under
 an entity whose account is in another currency is **refused at preview**
 (`FAIL cap_currency`), because adding JPY amounts to CAD ones makes every total
 meaningless -- unless it provably can only **lower** spend (a pause, a cut, a
-tightening that projects nothing, a rename or a PAUSED creation), which is let
-through and counted as 0. A projection of 0 alone is not that proof. The one exception is a conversion you configure
+rename or a PAUSED creation, or -- projecting nothing -- a frequency cap made
+stricter, a bid or cost cap lowered or a ROAS floor raised under the same
+strategy, targeting only narrowed, a daily-budget flight only shortened), which
+is let through and counted as 0. A projection of 0 alone is not that proof, and
+neither is "tightening": a looser frequency cap, or one bid strategy swapped for
+another, is refused without a rate. The one exception is a conversion you configure
 yourself; no rate is ever looked up or guessed, and a rate for a currency that
 is not in `allowed_currencies` is refused when the file loads:
 

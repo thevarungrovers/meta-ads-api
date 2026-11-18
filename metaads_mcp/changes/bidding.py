@@ -68,6 +68,56 @@ def _floor(row: dict[str, Any]) -> Decimal | None:
     return None if raw in (None, "") else (Decimal(str(raw)) / ROAS_SCALE).quantize(Decimal("0.01"))
 
 
+def _strategy_direction(row: dict[str, Any], strategy: str, before_bid: Decimal | None,
+                        after_bid: Decimal | None, after_floor: Decimal | None) -> tuple[bool, bool]:
+    """(may restrict, provably only restricts) for an ad set strategy change.
+
+    Removing the cap restricts nothing. Under the SAME strategy the amount
+    decides: a lower bid or cost cap, or a higher ROAS floor, restricts and
+    cannot add spend; the other way loosens. A cap added where there was none,
+    or one restricting strategy swapped for another, may restrict (its revert
+    may lift) but its direction is not provable.
+    """
+    if strategy == "LOWEST_COST_WITHOUT_CAP":
+        return False, False
+    was = row.get("bid_strategy") or "LOWEST_COST_WITHOUT_CAP"
+    if was != strategy:
+        return True, False
+    if strategy == "LOWEST_COST_WITH_MIN_ROAS":
+        before_floor = _floor(row)
+        stricter = (before_floor is not None and after_floor is not None
+                    and after_floor > before_floor)
+    else:
+        stricter = before_bid is not None and after_bid is not None and after_bid < before_bid
+    return stricter, stricter
+
+
+def _frequency_direction(old: list[Any], max_frequency: int,
+                         interval_days: int) -> tuple[bool, bool]:
+    """(restricts, provably only restricts) for replacing ``old`` with one cap
+    of ``max_frequency`` impressions per ``interval_days``.
+
+    Stricter means no more impressions over no shorter an interval, against
+    EVERY cap it replaces; a first cap is stricter than none. Restricts means
+    stricter in at least one way against some cap: a mixed change (fewer
+    impressions over a shorter interval) restricts and may also loosen, so
+    its revert is counted but it is not provably a reduction.
+    """
+    caps = []
+    for spec in old if isinstance(old, list) else [old]:
+        try:
+            caps.append((int(spec["max_frequency"]), int(spec["interval_days"]),
+                         spec.get("event", "IMPRESSIONS")))
+        except (KeyError, TypeError, ValueError):
+            return True, False  # unreadable: count its revert, prove nothing
+    if not caps:
+        return True, True
+    stricter = all(event == "IMPRESSIONS" and max_frequency <= freq and interval_days >= days
+                   for freq, days, event in caps)
+    restricts = any(max_frequency < freq or interval_days > days for freq, days, _ in caps)
+    return restricts or stricter, stricter
+
+
 def _headroom(ctx, row: dict[str, Any], currency: str, level: str, end_field: str) -> Decimal:
     """Unused daily budget: the honest bound for anything that loosens a cap."""
     bound, _ = daily_bound(row, currency, end_field)
@@ -154,7 +204,8 @@ class _AdSetKind(NodeFieldKind):
     apply_annotations = APPLY_SPENDS
 
     def _proposal(self, ctx, row, *, before, after, fields, checks, projected,
-                  warnings=(), note=None, tightens=False, is_activation=False) -> Proposal:
+                  warnings=(), note=None, tightens=False, is_activation=False,
+                  reduces_spend=False) -> Proposal:
         # `after` is what a re-read will render once the change lands -- the
         # string revert_change and reconcile_ledger compare against -- so it is
         # rendered from the row with the new fields, never hand-written.
@@ -177,6 +228,7 @@ class _AdSetKind(NodeFieldKind):
             campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),
             tightens=tightens,
+            reduces_spend=reduces_spend,
             is_activation=is_activation,
         ).with_inverse(_inverse_of(row, fields))
 
@@ -188,7 +240,8 @@ class _CampaignKind(NodeFieldKind):
     apply_annotations = APPLY_SPENDS
 
     def _proposal(self, ctx, row, *, before, after, fields, checks, projected,
-                  warnings=(), note=None, tightens=False, is_activation=False) -> Proposal:
+                  warnings=(), note=None, tightens=False, is_activation=False,
+                  reduces_spend=False) -> Proposal:
         after = self.render(ctx, {**row, **fields})
         return Proposal(
             entity_type="campaign",
@@ -208,6 +261,7 @@ class _CampaignKind(NodeFieldKind):
             campaign_id=str(row["id"]),
             account_id=row.get("account_id"),
             tightens=tightens,
+            reduces_spend=reduces_spend,
             is_activation=is_activation,
         ).with_inverse(_inverse_of(row, fields))
 
@@ -380,6 +434,9 @@ class AdSetBidStrategy(_AdSetKind):
         elif (row.get("bid_strategy") or "LOWEST_COST_WITHOUT_CAP") != "LOWEST_COST_WITHOUT_CAP":
             # Removing a cap or a floor lets the ad set spend its whole budget.
             projected = _headroom(ctx, row, currency, "adset", "end_time")
+        restricts, only_restricts = _strategy_direction(
+            row, strategy, before_bid, after_bid,
+            parse_money(roas_floor, "roas_floor") if fields.get("bid_constraints") else None)
         after = " | ".join(
             [strategy]
             + ([f"bid {format_money(after_bid, currency)}"] if after_bid is not None else [])
@@ -389,8 +446,11 @@ class AdSetBidStrategy(_AdSetKind):
             ctx, row, before=self.render(ctx, row), after=after, fields=fields,
             checks=checks, projected=projected,
             # A cap, a cost target or a floor restricts what the ad set wins:
-            # undoing it lets the ad set spend its unused budget.
-            tightens=strategy != "LOWEST_COST_WITHOUT_CAP",
+            # undoing one added, made stricter or swapped in lets the ad set
+            # spend its unused budget. Only a lower cap or a higher floor under
+            # the SAME strategy provably cannot add spend.
+            tightens=restricts,
+            reduces_spend=only_restricts,
             warnings=["changing the bid strategy sends the ad set back into the learning phase"],
             note="Removing a cap is bounded by the unused daily budget; adding one cannot raise spend.",
         )
@@ -426,13 +486,17 @@ class CampaignBidStrategy(_CampaignKind):
                 "carry their own bid strategies. Use preview_ad_set_bid_strategy."
             )
         projected = Decimal("0")
-        if strategy == "LOWEST_COST_WITHOUT_CAP" and (row.get("bid_strategy") or strategy) != strategy:
+        was = row.get("bid_strategy") or "LOWEST_COST_WITHOUT_CAP"
+        if strategy == "LOWEST_COST_WITHOUT_CAP" and was != strategy:
             projected = _headroom(ctx, row, currency, "campaign", "stop_time")
         return self._proposal(
             ctx, row, before=self.render(ctx, row), after=strategy,
             fields={"bid_strategy": strategy}, checks=[check_currency(ctx.limits, currency)],
             projected=projected,
-            tightens=strategy != "LOWEST_COST_WITHOUT_CAP",
+            # Adding a restricting strategy, or swapping one for another (whose
+            # direction is unknown), may restrict: its revert may lift. Neither
+            # provably cannot add spend, so neither sets reduces_spend.
+            tightens=strategy != "LOWEST_COST_WITHOUT_CAP" and strategy != was,
             warnings=["every ad set in the campaign goes back into the learning phase"],
         )
 
@@ -483,6 +547,7 @@ class AdSetRoasFloor(_AdSetKind):
             ],
             projected=projected,
             tightens=before is not None and after > before,
+            reduces_spend=before is not None and after > before,
             warnings=["a ROAS floor change re-enters learning on most ad sets"],
             note="Lowering the floor is bounded by the unused daily budget.",
         )
@@ -544,6 +609,8 @@ def _schedule(kind, ctx, row, end_value: str | None, start_value: str | None,
         ctx, row, before=kind.render(ctx, row), after=after, fields=fields,
         checks=[], projected=projected, warnings=warnings, is_activation=extends,
         tightens=shortens,
+        # Only shortened (no day added anywhere): it cannot add spend.
+        reduces_spend=shortens and not _adds_days(row, fields, end_field),
         note=("On a daily budget, added days spend the daily budget again; on a lifetime "
               "budget the schedule re-paces it."),
     )
@@ -754,11 +821,14 @@ class AdSetFrequencyCap(_AdSetKind):
             )
         specs = [{"event": "IMPRESSIONS", "interval_days": interval_days,
                   "max_frequency": max_frequency}]
+        restricts, only_restricts = _frequency_direction(
+            as_obj(row.get("frequency_control_specs")) or [], max_frequency, interval_days)
         return self._proposal(
             ctx, row, before=self.render(ctx, row), after=canonical(specs),
             fields={"frequency_control_specs": specs}, checks=[], projected=Decimal("0"),
-            tightens=True,
-            note="A cap can only reduce delivery; projected 0. Undoing it is not free.",
+            tightens=restricts, reduces_spend=only_restricts,
+            note=("A stricter cap can only reduce delivery; projected 0. Loosening one "
+                  "lets the ad set reach people more often. Undoing a cap is not free."),
         )
 
 

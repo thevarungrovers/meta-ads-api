@@ -311,16 +311,18 @@ class Engine:
         """Whether ``proposal`` provably cannot add spend.
 
         A negative projection; or nothing projected AND one of: the change
-        pauses (its after-state is PAUSED), the kind declares it a reduction
-        (a cut, a tightening), or the kind cannot add spend by construction.
-        Never a projection of 0 on its own.
+        pauses (its after-state is PAUSED), the kind computed from before and
+        after that it only restricts (``reduces_spend``), or the kind cannot
+        add spend by construction. Never a projection of 0 on its own, and
+        never ``tightens``: that marks what a REVERT lifts, and a change can
+        carry it while loosening something else.
         """
         if proposal.projected < 0:
             return True
         if proposal.projected > 0 or proposal.is_activation:
             return False
         pauses = proposal.field_name == "status" and proposal.after == "PAUSED"
-        return pauses or proposal.reduces_spend or proposal.tightens or kind.adds_no_spend
+        return pauses or proposal.reduces_spend or kind.adds_no_spend
 
     def _naming_checks(self, kind: ChangeKind, proposal: Proposal,
                        payload: dict[str, Any]) -> list[Check]:

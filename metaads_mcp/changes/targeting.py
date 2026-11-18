@@ -745,6 +745,9 @@ class AdSetTargeting(NodeFieldKind):
             is_activation=grows,
             # Undoing a narrowing widens again: that revert projects the headroom.
             tightens=bool(reach_widening(new, current)),
+            # Only narrowed -- nothing widens, structurally or by the estimate:
+            # it cannot add spend.
+            reduces_spend=bool(reach_widening(new, current)) and not grows,
             payload={"entity_id": str(row["id"]), "name": row.get("name") or "",
                      "fields": {"targeting": new}, "full_before": canonical(current),
                      "touched": touched, "sent": sent},

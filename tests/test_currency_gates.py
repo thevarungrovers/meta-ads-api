@@ -110,3 +110,120 @@ def test_extending_a_campaign_flight_projects_its_daily_budget(monkeypatch):
     budget = Decimal(str(sim.objects[CAMPAIGN_ID]["daily_budget"])) / 100
     preview = tools["preview_campaign_schedule"](campaign_id=CAMPAIGN_ID, stop_time=_at(30))
     assert Decimal(preview.projected_daily_spend_delta) == budget
+
+
+# --- "tightens" is not proof of a reduction ---------------------------------------
+#
+# ``tightens`` says a change's REVERT lifts a restriction. Some kinds set it
+# whatever the direction, so it cannot stand in for "cannot add spend": a
+# loosened frequency cap or a switch between two restricting bid strategies
+# was waved past the missing rate. Only a change that is provably
+# one-directional -- the kind computes it from before and after -- skips it.
+
+
+def _cap_line(preview) -> str:
+    return next(c for c in preview.checks if " cap_currency" in c)
+
+
+def _reach_sim(monkeypatch, **adset):
+    tools, sim = two_accounts(monkeypatch, currency_rates=())
+    sim.objects[JPY_ADSET].update(status="ACTIVE", optimization_goal="REACH", **adset)
+    return tools, sim
+
+
+def test_loosening_a_frequency_cap_is_refused_without_a_rate(monkeypatch):
+    tools, _ = _reach_sim(monkeypatch, frequency_control_specs=[
+        {"event": "IMPRESSIONS", "interval_days": 7, "max_frequency": 1}])
+    preview = tools["preview_ad_set_frequency_cap"](
+        ad_set_id=JPY_ADSET, max_frequency=30, interval_days=1)
+    assert preview.blocked and failed(preview, "cap_currency"), preview.checks
+
+
+def test_a_frequency_cap_loosened_in_one_dimension_is_refused_without_a_rate(monkeypatch):
+    tools, _ = _reach_sim(monkeypatch, frequency_control_specs=[
+        {"event": "IMPRESSIONS", "interval_days": 7, "max_frequency": 2}])
+    preview = tools["preview_ad_set_frequency_cap"](
+        ad_set_id=JPY_ADSET, max_frequency=1, interval_days=1)
+    assert failed(preview, "cap_currency"), preview.checks
+
+
+@pytest.mark.parametrize("specs", [
+    None,  # a first cap
+    [{"event": "IMPRESSIONS", "interval_days": 1, "max_frequency": 30}],
+])
+def test_a_stricter_frequency_cap_needs_no_rate(monkeypatch, specs):
+    tools, _ = _reach_sim(monkeypatch, frequency_control_specs=specs)
+    preview = tools["preview_ad_set_frequency_cap"](
+        ad_set_id=JPY_ADSET, max_frequency=1, interval_days=7)
+    assert not preview.blocked, preview.checks
+    assert _cap_line(preview).startswith("SKIP"), preview.checks
+
+
+def test_switching_min_roas_to_cost_cap_is_refused_without_a_rate(monkeypatch):
+    tools, sim = two_accounts(monkeypatch, currency_rates=())
+    sim.objects[JPY_ADSET].update(status="ACTIVE", bid_strategy="LOWEST_COST_WITH_MIN_ROAS",
+                                  bid_amount=None, bid_constraints={"roas_average_floor": 50000})
+    preview = tools["preview_ad_set_bid_strategy"](
+        ad_set_id=JPY_ADSET, strategy="COST_CAP", bid_amount="5000")
+    assert Decimal(preview.projected_daily_spend_delta) == 0
+    assert preview.blocked and failed(preview, "cap_currency"), preview.checks
+
+
+def test_a_lower_cap_under_the_same_strategy_needs_no_rate(monkeypatch):
+    from metaads_mcp.changes import bidding
+
+    # No clicks to project from: the projection is 0, and only the direction
+    # proves the change cannot add spend.
+    monkeypatch.setattr(bidding, "project_bid_change", lambda *a, **k: Decimal("0"))
+    tools, sim = two_accounts(monkeypatch, currency_rates=())
+    sim.objects[JPY_ADSET]["status"] = "ACTIVE"
+    preview = tools["preview_ad_set_bid_strategy"](
+        ad_set_id=JPY_ADSET, strategy="LOWEST_COST_WITH_BID_CAP", bid_amount="80")
+    assert not preview.blocked, preview.checks
+    assert _cap_line(preview).startswith("SKIP"), preview.checks
+
+
+def test_a_raised_roas_floor_needs_no_rate_and_a_lowered_one_does(monkeypatch):
+    tools, sim = two_accounts(monkeypatch, currency_rates=())
+    sim.objects[JPY_ADSET].update(status="ACTIVE", bid_strategy="LOWEST_COST_WITH_MIN_ROAS",
+                                  bid_amount=None, bid_constraints={"roas_average_floor": 20000})
+    raised = tools["preview_ad_set_roas_floor"](ad_set_id=JPY_ADSET, new_roas_floor="2.2")
+    assert _cap_line(raised).startswith("SKIP"), raised.checks
+    raised_by_strategy = tools["preview_ad_set_bid_strategy"](
+        ad_set_id=JPY_ADSET, strategy="LOWEST_COST_WITH_MIN_ROAS", roas_floor="2.2")
+    assert _cap_line(raised_by_strategy).startswith("SKIP"), raised_by_strategy.checks
+
+
+def test_narrowing_targeting_only_needs_no_rate_and_a_mixed_edit_does(monkeypatch):
+    from tests.kindkit import rig
+    from tests.test_kinds_targeting import sim as targeting_sim
+    from tests.test_mcp_write_path import ADSET_ID
+
+    s = targeting_sim()
+    s.account["currency"] = "JPY"
+    tools, _ = rig(monkeypatch, s, allowed_currencies=("CAD", "JPY"), currency_rates=())
+    narrowed = tools["preview_ad_set_targeting"](ad_set_id=ADSET_ID, age_min=30)
+    assert _cap_line(narrowed).startswith("SKIP"), narrowed.checks
+    mixed = tools["preview_ad_set_targeting"](ad_set_id=ADSET_ID, age_min=30, age_max=65)
+    assert failed(mixed, "cap_currency"), mixed.checks
+
+
+def test_only_a_tightening_frequency_cap_is_marked_tightens(monkeypatch):
+    """The ledger mark drives what a revert projects: a loosening's revert
+    re-tightens, so it is not marked."""
+    from metaads_mcp import ledger
+    from tests.test_multi_account_currency import two_accounts as rated
+
+    tools, sim = rated(monkeypatch)
+    sim.objects[JPY_ADSET].update(status="ACTIVE", optimization_goal="REACH",
+                                  frequency_control_specs=[
+                                      {"event": "IMPRESSIONS", "interval_days": 7,
+                                       "max_frequency": 1}])
+    loosen = tools["preview_ad_set_frequency_cap"](
+        ad_set_id=JPY_ADSET, max_frequency=3, interval_days=7)
+    result = tools["apply_ad_set_frequency_cap"](preview_token=loosen.preview_token)
+    assert not ledger.find_entry(result.entry_id)["inverse"].get("tightens")
+    tighten = tools["preview_ad_set_frequency_cap"](
+        ad_set_id=JPY_ADSET, max_frequency=1, interval_days=7)
+    result = tools["apply_ad_set_frequency_cap"](preview_token=tighten.preview_token)
+    assert ledger.find_entry(result.entry_id)["inverse"].get("tightens") is True

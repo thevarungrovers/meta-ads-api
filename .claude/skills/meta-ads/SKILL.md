@@ -417,7 +417,10 @@ Undoing a change that tightened delivery -- and every later revert in that
 chain that lifts it again -- projects the live unused budget headroom
 (undoing a shortened daily-budget flight projects the whole daily budget, as
 does adding days to one). A pause or a cut in a currency with no configured
-rate is let through (counted as 0), but a projection of 0 alone is not enough;
+rate is let through (counted as 0), and so is a change whose direction is
+provably down (a stricter frequency cap, a lower bid or cost cap, a higher ROAS
+floor, targeting only narrowed, a flight only shortened); a projection of 0
+alone is not enough, and a looser cap or a swap between bid strategies is refused;
 every change that can move money, a pause included, needs the currency in
 `allowed_currencies`.
 
