@@ -211,3 +211,64 @@ def test_attribution_spec_round_trips(monkeypatch):
                          click_days=1, view_days=0)
     result, _ = apply_and_revert(tools, "ad_set_attribution_spec", preview)
     assert json.loads(sim.objects[ADSET_ID]["attribution_spec"])[0]["window_days"] == 7
+
+
+# --- a field that was EMPTY before the change ------------------------------------
+
+
+def test_a_first_frequency_cap_reverts_to_no_cap(monkeypatch):
+    from metaads_mcp.changes.common import as_obj
+
+    sim = abo_sim(optimization_goal="REACH")
+    sim.objects[ADSET_ID].pop("frequency_control_specs", None)
+    tools, _ = rig(monkeypatch, sim)
+    preview = preview_ok(tools, "ad_set_frequency_cap", sim, ad_set_id=ADSET_ID,
+                         max_frequency=2, interval_days=7)
+    assert preview.before == "(not set)"
+    result, undo = apply_and_revert(tools, "ad_set_frequency_cap", preview)
+    assert as_obj(sim.objects[ADSET_ID]["frequency_control_specs"]) in (None, []), "the cap is gone"
+    again = tools["revert_change"](entry_id=undo.entry_id)
+    assert as_obj(sim.objects[ADSET_ID]["frequency_control_specs"])[0]["max_frequency"] == 2
+    assert again.after == preview.after
+
+
+def test_a_first_bid_cap_reverts_to_no_bid(monkeypatch):
+    sim = abo_sim(bid_strategy="LOWEST_COST_WITHOUT_CAP")
+    sim.objects[ADSET_ID].pop("bid_amount", None)
+    tools, _ = rig(monkeypatch, sim)
+    preview = preview_ok(tools, "ad_set_bid_strategy", sim, ad_set_id=ADSET_ID,
+                         strategy="LOWEST_COST_WITH_BID_CAP", bid_amount="4.00")
+    assert preview.before == "LOWEST_COST_WITHOUT_CAP"
+    result, undo = apply_and_revert(tools, "ad_set_bid_strategy", preview)
+    assert sim.objects[ADSET_ID]["bid_strategy"] == "LOWEST_COST_WITHOUT_CAP"
+    # Re-applying the cap through a revert of the revert finds nothing stale.
+    tools["revert_change"](entry_id=undo.entry_id)
+    assert sim.objects[ADSET_ID]["bid_strategy"] == "LOWEST_COST_WITH_BID_CAP"
+    assert str(sim.objects[ADSET_ID]["bid_amount"]) == "400"
+
+
+def test_a_first_end_time_reverts_to_ongoing(monkeypatch):
+    sim = abo_sim(start_time="2026-01-01T00:00:00+0000")
+    sim.objects[ADSET_ID].pop("end_time", None)
+    tools, _ = rig(monkeypatch, sim)
+    preview = preview_ok(tools, "ad_set_schedule", sim, ad_set_id=ADSET_ID, end_time=future(20))
+    apply_and_revert(tools, "ad_set_schedule", preview)
+    assert sim.objects[ADSET_ID].get("end_time") in (None, "", 0, "0"), "end_time=0: ongoing again"
+    from metaads_mcp import ledger
+
+    assert ledger.entries()[-1]["after"] == "start 2026-01-01T00:00:00+00:00 | end (not set)"
+
+
+def test_a_first_campaign_stop_time_is_refused_on_revert_not_sent_partially(monkeypatch):
+    sim = make_sim()
+    sim.objects[CAMPAIGN_ID]["start_time"] = "2026-01-01T00:00:00+0000"
+    sim.objects[CAMPAIGN_ID].pop("stop_time", None)
+    tools, _ = rig(monkeypatch, sim)
+    preview = preview_ok(tools, "campaign_schedule", sim, campaign_id=CAMPAIGN_ID, stop_time=future(20))
+    assert any("revert_change cannot undo" in w for w in preview.warnings), preview.warnings
+    result = tools["apply_campaign_schedule"](preview_token=preview.preview_token)
+    applied = len(sim.applied)
+    with pytest.raises(Exception) as caught:
+        tools["revert_change"](entry_id=result.entry_id)
+    assert "stop_time" in str(caught.value) and "empty" in str(caught.value)
+    assert len(sim.applied) == applied, "nothing sent"

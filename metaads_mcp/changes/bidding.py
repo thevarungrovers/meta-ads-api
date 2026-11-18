@@ -25,6 +25,8 @@ from pydantic import Field
 
 from metaads_mcp.changes.base import APPLY_SPENDS, Proposal, parse_money
 from metaads_mcp.changes.common import (
+    CLEARED,
+    OMITTED_WHEN_CLEARED,
     NodeFieldKind,
     _remaining_days,
     as_obj,
@@ -89,8 +91,11 @@ def parse_time(raw: str, name: str) -> dt.datetime:
 
 
 def _iso(raw: Any) -> str:
-    """A Meta time in one spelling (Meta writes -0500, Python +00:00 ...)."""
-    if not raw:
+    """A Meta time in one spelling (Meta writes -0500, Python +00:00 ...).
+
+    0 is Meta's spelling for "no end" (an ongoing ad set).
+    """
+    if not raw or str(raw) == "0":
         return "(not set)"
     try:
         value = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
@@ -121,6 +126,27 @@ def _started(row: dict[str, Any], field: str = "start_time") -> bool:
     return start <= dt.datetime.now(dt.timezone.utc)
 
 
+def _inverse_of(row: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
+    """The previous values of ``fields``, and which of them were EMPTY.
+
+    A field the change sets for the first time (a first frequency cap, a
+    first bid) has no previous value to send back: it is recorded as
+    ``cleared``, and the revert sends it empty (see common.CLEARED).
+    """
+    previous = previous_values(row, fields)
+    cleared = sorted(k for k in fields if k not in previous)
+    return {"previous": previous, **({"cleared": cleared} if cleared else {})}
+
+
+def _unclearable_warning(row: dict[str, Any], fields: dict[str, Any]) -> list[str]:
+    cleared = _inverse_of(row, fields).get("cleared") or []
+    stuck = [k for k in cleared if k not in CLEARED and k not in OMITTED_WHEN_CLEARED]
+    if not stuck:
+        return []
+    return [f"{', '.join(stuck)} is empty now and the API has no documented way to empty "
+            "it again, so revert_change cannot undo this; plan the way back first"]
+
+
 class _AdSetKind(NodeFieldKind):
     graph_type = "adset"
     entity_type = "ad set"
@@ -146,13 +172,13 @@ class _AdSetKind(NodeFieldKind):
             payload={"entity_id": str(row["id"]), "name": row.get("name") or "", "fields": fields},
             status=row.get("status"),
             effective_status=row.get("effective_status"),
-            warnings=list(warnings),
+            warnings=[*warnings, *_unclearable_warning(row, fields)],
             note=note,
             campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),
             tightens=tightens,
             is_activation=is_activation,
-        ).with_inverse({"previous": previous_values(row, fields)})
+        ).with_inverse(_inverse_of(row, fields))
 
 
 class _CampaignKind(NodeFieldKind):
@@ -177,13 +203,13 @@ class _CampaignKind(NodeFieldKind):
             payload={"entity_id": str(row["id"]), "name": row.get("name") or "", "fields": fields},
             status=row.get("status"),
             effective_status=row.get("effective_status"),
-            warnings=list(warnings),
+            warnings=[*warnings, *_unclearable_warning(row, fields)],
             note=note,
             campaign_id=str(row["id"]),
             account_id=row.get("account_id"),
             tightens=tightens,
             is_activation=is_activation,
-        ).with_inverse({"previous": previous_values(row, fields)})
+        ).with_inverse(_inverse_of(row, fields))
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +302,9 @@ def _strategy_render(ctx, row, strategy_from=None) -> str:
     currency = ctx.currency_of(row)
     strategy = strategy_from or row.get("bid_strategy") or "(not set)"
     parts = [strategy]
-    if row.get("bid_amount"):
+    # A bid counts only under a strategy that uses one: Meta ignores (and may
+    # keep returning) a stale bid_amount under any other.
+    if row.get("bid_amount") and strategy in ("LOWEST_COST_WITH_BID_CAP", "COST_CAP", "(not set)"):
         parts.append(f"bid {rendered(row, 'bid_amount', currency)}")
     floor = _floor(row)
     if floor is not None:
@@ -523,7 +551,7 @@ def _schedule(kind, ctx, row, end_value: str | None, start_value: str | None,
 
 
 def _when(raw):
-    if not raw:
+    if not raw or str(raw) == "0":
         return None
     value = dt.datetime.fromisoformat(_iso(raw))
     return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
@@ -622,7 +650,7 @@ class AdSetDayparting(_AdSetKind):
     ledger_keys = (("ad set", "dayparting"),)
 
     def render(self, ctx, row):
-        return canonical(row.get("adset_schedule"))
+        return canonical(as_obj(row.get("adset_schedule")) or None)
 
     def propose(
         self,
@@ -673,7 +701,7 @@ class AdSetFrequencyCap(_AdSetKind):
     ledger_keys = (("ad set", "frequency_cap"),)
 
     def render(self, ctx, row):
-        return canonical(row.get("frequency_control_specs"))
+        return canonical(as_obj(row.get("frequency_control_specs")) or None)
 
     def propose(
         self,
