@@ -49,6 +49,21 @@ def test_a_placement_apply_refuses_when_other_targeting_moved(monkeypatch):
     assert "has changed since the preview" in str(caught.value)
 
 
+def test_a_placement_revert_keeps_a_targeting_change_made_since(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "ad_set_placements", s, ad_set_id=ADSET_ID,
+                         publisher_platforms=["facebook"])
+    result = tools["apply_ad_set_placements"](preview_token=preview.preview_token)
+    moved = {**json.loads(s.objects[ADSET_ID]["targeting"]), "age_min": 30}
+    s.objects[ADSET_ID]["targeting"] = moved
+    tools["revert_change"](entry_id=result.entry_id)
+    after = s.objects[ADSET_ID]["targeting"]
+    after = json.loads(after) if isinstance(after, str) else after
+    assert "publisher_platforms" not in after, "the placement change was undone"
+    assert after["age_min"] == 30, "the age change made since was kept"
+
+
 def test_url_tags_make_a_new_creative_and_verify_it(monkeypatch):
     s = sim()
     tools, _ = rig(monkeypatch, s)

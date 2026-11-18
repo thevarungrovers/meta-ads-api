@@ -31,7 +31,7 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from metaads_mcp.changes.base import APPLY_SPENDS, Proposal
-from metaads_mcp.changes.common import NodeFieldKind, as_obj, daily_bound
+from metaads_mcp.changes.common import NodeFieldKind, as_obj, canonical, daily_bound
 from metaads_mcp.guardrails import Check
 from metaads_reporting import reach, special_ad_rules
 from metaads_reporting.audience_status import usability
@@ -46,17 +46,37 @@ DETAILED = ("interests", "behaviors", "demographics", "life_events", "industries
 #: Pairs checked for overlap at most (each costs three estimate calls).
 MAX_OVERLAP_PAIRS = 5
 
+#: WHERE the ads run: placements, then devices and operating systems. Part of
+#: the targeting spec (so Meta replaces them with it), but not something this
+#: kind edits -- so they must survive every write and every revert it makes.
+PLACEMENT_KEYS = ("publisher_platforms", "facebook_positions", "instagram_positions",
+                  "messenger_positions", "audience_network_positions")
+DEVICE_KEYS = ("device_platforms", "user_os", "user_device", "excluded_user_device",
+               "wireless_carrier")
+WHERE_KEYS = PLACEMENT_KEYS + DEVICE_KEYS
+
+#: Top-level keys :func:`fingerprint` reads. Any other key is compared raw.
+FINGERPRINTED = ("geo_locations", "excluded_geo_locations", "age_min", "age_max", "genders",
+                 "locales", "flexible_spec", "exclusions", "custom_audiences",
+                 "excluded_custom_audiences", "targeting_automation", *WHERE_KEYS)
+
 
 def _ids(items) -> list[str]:
     return sorted(str(i.get("id") if isinstance(i, dict) else i) for i in items or [])
 
 
-def fingerprint(spec: dict[str, Any] | None) -> str:
-    """The parts of a targeting spec this server manages, in one spelling.
+def fingerprint(spec: dict[str, Any] | None, *, where: bool = True) -> str:
+    """The parts of a targeting spec a human approves, in one spelling.
 
-    The staleness key. Meta adds derived keys when it reads targeting back
-    (location_types, brand-safety defaults ...); comparing the raw spec would
-    call every targeting change stale the moment it landed.
+    What the preview shows as before/after, and the per-dimension staleness key
+    for a revert. Meta adds derived keys when it reads targeting back
+    (location_types, brand-safety defaults ...), so a revert comparing the raw
+    spec would call every targeting change stale the moment it landed. The
+    APPLY compares the raw spec instead (both sides are Meta read-backs).
+
+    Placements and devices are included (``where=False`` drops them, for rows
+    written before they were): they ride in the same spec, and a before/after
+    that hid them would hide the one change a write could make silently.
     """
     import json
 
@@ -93,8 +113,44 @@ def fingerprint(spec: dict[str, Any] | None) -> str:
         "excluded_custom_audiences": _ids(spec.get("excluded_custom_audiences")),
         "advantage_audience": (spec.get("targeting_automation") or {}).get("advantage_audience"),
     }
+    if where:
+        out["placements"] = {
+            k: sorted(str(v) for v in (spec[k] if isinstance(spec[k], list) else [spec[k]]))
+            for k in WHERE_KEYS if spec.get(k)
+        }
     return json.dumps({k: v for k, v in out.items() if v not in ({}, [], [None, None], None)},
                       sort_keys=True, separators=(",", ":"))
+
+
+def touched_keys(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """The top-level targeting keys an edit changed: the dimensions it owns."""
+    return sorted(k for k in set(before) | set(after)
+                  if canonical(before.get(k)) != canonical(after.get(k)))
+
+
+def dimensions(spec: dict[str, Any], keys, *, sent: dict[str, Any] | None = None) -> str:
+    """``spec`` restricted to ``keys``, spelled for comparison.
+
+    Fingerprinted keys compare by fingerprint (ignoring what Meta derives on
+    read). Any other key compares raw, but only when it was SENT: a key the
+    edit dropped that Meta then re-derives on read is not a change.
+    """
+    keys = list(keys)
+    known = {k: spec[k] for k in keys if k in FINGERPRINTED and k in spec}
+    other = {k: spec.get(k) for k in keys
+             if k not in FINGERPRINTED and (sent is None or k in sent)}
+    return f"{fingerprint(known)} {canonical(other)}"
+
+
+def with_dimensions(spec: dict[str, Any], keys, values: dict[str, Any]) -> dict[str, Any]:
+    """``spec`` with ``keys`` set from ``values`` (absent there: removed)."""
+    out = copy.deepcopy(spec)
+    for key in keys:
+        if key in values:
+            out[key] = copy.deepcopy(values[key])
+        else:
+            out.pop(key, None)
+    return out
 
 
 def _merge_places(target: dict, places: dict, *, remove: bool = False) -> None:
@@ -243,6 +299,65 @@ class AdSetTargeting(NodeFieldKind):
     def render(self, ctx, row):
         return fingerprint(row.get("targeting"))
 
+    def _spec(self, ctx, entity_id) -> dict[str, Any]:
+        return as_obj(self.read_row(ctx, entity_id).get("targeting")) or {}
+
+    def current(self, ctx, payload):
+        # The before/after shown is the fingerprint, but the APPLY compares the
+        # WHOLE raw spec (both sides are Meta read-backs, so derived keys match):
+        # anything moved since the preview -- a placement, a device, a key
+        # this server has no name for -- refuses rather than being merged blind.
+        spec = self._spec(ctx, payload["entity_id"])
+        if canonical(spec) == payload["full_before"]:
+            return payload["before"]
+        shown = fingerprint(spec)
+        return shown if shown != payload["before"] else f"{shown} (other targeting changed)"
+
+    def build(self, ctx, payload):
+        # Re-read and merge ONLY the dimensions this edit owns onto what is
+        # there now, so nothing else in the spec is sent back from memory.
+        spec = with_dimensions(self._spec(ctx, payload["entity_id"]),
+                               payload["touched"], payload["sent"])
+        return self._plan(payload["entity_id"], payload.get("name", ""),
+                          {"targeting": spec}, payload["before"], payload["after"])
+
+    @staticmethod
+    def _owned(entry) -> tuple[list[str], dict[str, Any], dict[str, Any] | None]:
+        """(dimensions the entry's change owns, their previous values, what it sent).
+
+        A row written before rows named their dimensions holds the WHOLE
+        previous spec and nothing it sent: it owns every key but the
+        placements and devices, which are left as they are now.
+        """
+        inverse = entry.get("inverse") or {}
+        previous = as_obj((inverse.get("previous") or {}).get("targeting")) or {}
+        if inverse.get("touched") is not None:
+            return list(inverse["touched"]), previous, inverse.get("sent") or {}
+        return [k for k in previous if k not in WHERE_KEYS], previous, None
+
+    def current_for_entry(self, ctx, entry):
+        spec = self._spec(ctx, entry["entity_id"])
+        touched, _, sent = self._owned(entry)
+        if sent is None:
+            return fingerprint(spec, where=False)
+        if dimensions(spec, touched, sent=sent) == dimensions(sent, touched, sent=sent):
+            # Only what this entry changed is compared: a placement or another
+            # dimension moved since is kept, not a reason to refuse.
+            return entry["after"]
+        shown = fingerprint(spec)
+        return shown if shown != entry["after"] else f"{shown} (changed since)"
+
+    def inverse(self, ctx, entry):
+        touched, previous, _ = self._owned(entry)
+        if not previous and not touched:
+            raise ValueError(
+                f"Entry {entry['entry_id']} recorded no previous targeting, so there "
+                "is nothing exact to put back. Use preview_ad_set_targeting."
+            )
+        spec = with_dimensions(self._spec(ctx, entry["entity_id"]), touched, previous)
+        return self._plan(entry["entity_id"], entry.get("entity_name") or "",
+                          {"targeting": spec}, entry["after"], entry["before"])
+
     def _estimate(self, ctx, spec, goal):
         try:
             return reach.estimate(ctx.read, spec, goal or "REACH")
@@ -367,6 +482,8 @@ class AdSetTargeting(NodeFieldKind):
         new = apply_edits(current, edits, saved)
         if fingerprint(new) == fingerprint(current):
             raise ValueError("These edits leave the targeting exactly as it is.")
+        touched = touched_keys(current, new)
+        sent = {k: new[k] for k in touched if k in new}
 
         campaign = ctx.read.node(str(row.get("campaign_id")), ("id", "special_ad_categories"))
         goal = row.get("optimization_goal")
@@ -412,7 +529,8 @@ class AdSetTargeting(NodeFieldKind):
             checks=checks,
             projected=projected,
             payload={"entity_id": str(row["id"]), "name": row.get("name") or "",
-                     "fields": {"targeting": new}},
+                     "fields": {"targeting": new}, "full_before": canonical(current),
+                     "touched": touched, "sent": sent},
             status=row.get("status"),
             effective_status=row.get("effective_status"),
             warnings=warnings,
@@ -423,7 +541,10 @@ class AdSetTargeting(NodeFieldKind):
                 f"{after_est and after_est.get('midpoint')} (rounded bounds, an estimate). "
                 "Widening reach is bounded by the ad set's unused daily budget."
             ),
-        ).with_inverse({"previous": {"targeting": current}})
-
-    def inverse(self, ctx, entry):
-        return super().inverse(ctx, entry)
+        ).with_inverse({
+            # Only the dimensions this edit changed: the revert puts THOSE back
+            # onto whatever the spec is then, and refuses if they moved.
+            "touched": touched,
+            "previous": {"targeting": {k: current[k] for k in touched if k in current}},
+            "sent": sent,
+        })

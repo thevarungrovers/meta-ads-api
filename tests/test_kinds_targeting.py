@@ -155,3 +155,67 @@ def test_the_fingerprint_ignores_keys_meta_adds_on_read():
     read_back = {**BASE, "geo_locations": {"countries": ["CA"], "location_types": ["home"]},
                  "brand_safety_content_filter_levels": ["FACEBOOK_STANDARD"]}
     assert fingerprint(read_back) == fingerprint(BASE)
+
+
+# --- placements and other targeting the edit did not touch -------------------
+
+
+def _targeting(s):
+    from metaads_mcp.changes.common import as_obj
+
+    return as_obj(s.objects[ADSET_ID]["targeting"])
+
+
+def test_a_placement_change_made_after_the_preview_is_not_overwritten(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "ad_set_targeting", s, ad_set_id=ADSET_ID, audiences_include=["A"])
+    s.objects[ADSET_ID]["targeting"] = {**BASE, "publisher_platforms": ["facebook"],
+                                        "facebook_positions": ["feed"]}
+    try:
+        tools["apply_ad_set_targeting"](preview_token=preview.preview_token)
+    except Exception as exc:  # noqa: BLE001 - refusing is one right answer
+        assert "has changed since the preview" in str(exc)
+    after = _targeting(s)
+    assert after.get("publisher_platforms") == ["facebook"], "placements were silently undone"
+    assert after.get("facebook_positions") == ["feed"]
+
+
+def test_a_revert_keeps_a_placement_change_made_since(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "ad_set_targeting", s, ad_set_id=ADSET_ID, audiences_include=["A"])
+    result = tools["apply_ad_set_targeting"](preview_token=preview.preview_token)
+    s.objects[ADSET_ID]["targeting"] = {**_targeting(s), "publisher_platforms": ["instagram"]}
+
+    tools["revert_change"](entry_id=result.entry_id)
+    after = _targeting(s)
+    assert "custom_audiences" not in after, "the attach was undone"
+    assert after.get("publisher_platforms") == ["instagram"], "the placement change survived"
+
+
+def test_a_revert_keeps_an_untouched_dimension_moved_since(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "ad_set_targeting", s, ad_set_id=ADSET_ID, audiences_include=["A"])
+    result = tools["apply_ad_set_targeting"](preview_token=preview.preview_token)
+    s.objects[ADSET_ID]["targeting"] = {**_targeting(s), "age_max": 60}
+
+    tools["revert_change"](entry_id=result.entry_id)
+    after = _targeting(s)
+    assert "custom_audiences" not in after and after["age_max"] == 60
+
+
+def test_a_revert_refuses_when_the_touched_dimension_moved(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "ad_set_targeting", s, ad_set_id=ADSET_ID, audiences_include=["A"])
+    result = tools["apply_ad_set_targeting"](preview_token=preview.preview_token)
+    s.objects[ADSET_ID]["targeting"] = {**_targeting(s), "custom_audiences": [{"id": "A"}, {"id": "B"}]}
+    with pytest.raises(Exception) as caught:
+        tools["revert_change"](entry_id=result.entry_id)
+    assert "Something changed it since" in str(caught.value)
+
+
+def test_the_fingerprint_shows_placements():
+    assert fingerprint({**BASE, "publisher_platforms": ["facebook"]}) != fingerprint(BASE)

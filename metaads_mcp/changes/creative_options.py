@@ -23,7 +23,7 @@ from pydantic import Field
 from metaads_mcp.changes.base import APPLY_SPENDS, Proposal
 from metaads_mcp.changes.common import NodeFieldKind, as_obj, canonical
 from metaads_mcp.changes.creative import UpdateAdCopy, creative_id_of, describe
-from metaads_mcp.changes.targeting import fingerprint
+from metaads_mcp.changes.targeting import fingerprint, with_dimensions
 from metaads_mcp.guardrails import Check
 from metaads_reporting.write import ads, creatives
 from metaads_reporting.write.plan import FieldChange, PlannedChange
@@ -183,6 +183,18 @@ class AdSetPlacements(NodeFieldKind):
 
     def current_for_entry(self, ctx, entry):
         return self.render(ctx, self.read_row(ctx, entry["entity_id"])).split(" || ")[0]
+
+    def inverse(self, ctx, entry):
+        # Only the placement keys go back, onto the spec as it is NOW: the
+        # revert's staleness check compares the placements alone, so sending
+        # the whole previous spec would undo any targeting edit made since.
+        previous = as_obj(((entry.get("inverse") or {}).get("previous") or {}).get("targeting"))
+        if previous is None:
+            return super().inverse(ctx, entry)
+        now = as_obj(self.read_row(ctx, entry["entity_id"]).get("targeting")) or {}
+        spec = with_dimensions(now, PLACEMENT_KEYS, _placements(previous))
+        return self._plan(entry["entity_id"], entry.get("entity_name") or "",
+                          {"targeting": spec}, entry["after"], entry["before"])
 
 
 # ---------------------------------------------------------------------------
