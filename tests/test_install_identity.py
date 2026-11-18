@@ -114,3 +114,43 @@ def test_a_malformed_value_is_not_echoed(tmp_path, owner, agent, key):
     message = str(caught.value)
     assert key in message
     assert (owner or agent) not in message, message
+
+
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o200, 0o400])
+def test_no_existing_mode_stricter_than_0600_is_widened(tmp_path, mode):
+    import stat
+
+    env = tmp_path / ".env"
+    env.write_text("META_ACCESS_TOKEN=x\n")
+    env.chmod(mode)
+    try:
+        install._replace_private(env, "META_ACCESS_TOKEN=y\n")
+        # Owner read/write at most: never a bit the file did not have.
+        assert stat.S_IMODE(env.stat().st_mode) == mode & 0o600
+    finally:
+        env.chmod(0o600)
+
+
+def test_a_symlinked_env_is_written_through_to_its_target(tmp_path):
+    import stat
+
+    target = tmp_path / "secrets" / "meta.env"
+    target.parent.mkdir()
+    target.write_text("META_ACCESS_TOKEN=x\n")
+    target.chmod(0o600)
+    env = tmp_path / ".env"
+    env.symlink_to(target)
+    install.write_identity(env, "AB", "max", dry_run=False)
+    assert env.is_symlink(), "the link is kept, not replaced by a regular file"
+    assert "META_ADS_MCP_AGENT_NAME=max" in target.read_text()
+    assert "META_ACCESS_TOKEN=x" in target.read_text()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert sorted(p.name for p in target.parent.iterdir()) == ["meta.env"], "no temp left"
+
+
+def test_a_dangling_env_symlink_is_refused(tmp_path):
+    env = tmp_path / ".env"
+    env.symlink_to(tmp_path / "missing.env")
+    with pytest.raises(install.InstallError, match="symlink"):
+        install.write_identity(env, "AB", "max", dry_run=False)
+    assert env.is_symlink() and not (tmp_path / "missing.env").exists()

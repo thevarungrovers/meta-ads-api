@@ -144,8 +144,9 @@ python3 install.py --agent claude-code --owner-initials AB --agent-name max   # 
 `--owner-initials` / `--agent-name` are validated and written into `.env`, the
 only place the naming identity is read from; never into a client config. The
 file is replaced atomically (a private temp file beside it, then a rename), is
-never left looser than `600`, and a malformed value is reported by its key, not
-echoed.
+never left looser than `600` (a stricter mode, such as `400`, is kept), a
+symlinked `.env` is written through to its target rather than replaced, and a
+malformed value is reported by its key, not echoed.
 
 ## Three things about Meta that will bite you
 

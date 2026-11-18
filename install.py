@@ -648,12 +648,24 @@ def _replace_private(path: pathlib.Path, text: str) -> None:
     0o600 from the start (it holds the credentials too), then os.replace.
 
     A crash leaves either the old file or the new one, never half of each.
-    The mode is never looser than 0o600, and an existing stricter one (0o400)
-    is kept.
+    The mode is never looser than 0o600, and an existing stricter one (0o400,
+    even 0o000) is kept, never widened.
+
+    A symlinked ``.env`` is written THROUGH to its target, which is what is
+    replaced -- replacing the link would turn it into a regular file and
+    leave the real one stale. A link to nothing is refused.
     """
+    if path.is_symlink():
+        target = pathlib.Path(os.path.realpath(path))
+        if not target.is_file():
+            raise InstallError(
+                f"{path.name} is a symlink to {target}, which is not a regular file; "
+                "nothing was written. Point the link at the real file, or replace it."
+            )
+        path = target
     mode = 0o600
     if path.exists():
-        mode = stat.S_IMODE(path.stat().st_mode) & 0o600 or 0o600
+        mode = stat.S_IMODE(path.stat().st_mode) & 0o600
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
