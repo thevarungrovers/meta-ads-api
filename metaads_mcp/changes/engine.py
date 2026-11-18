@@ -279,6 +279,7 @@ class Engine:
             projected=pending.projected_delta,
             weight=kind.weight,
             payload=payload,
+            confirm=lambda: kind.landed(ctx, payload),
         )
         ctx.counters.record(pending.projected_delta, weight=kind.weight)
 
@@ -340,6 +341,7 @@ class Engine:
         reverts: list[str] | None = None,
         kind_name: str | None = None,
         account_id: str | None = None,
+        confirm: Callable[[], str | None] | None = None,
     ):
         """Ledger intents, the mutation, ledger outcomes. Raises on failure.
 
@@ -399,6 +401,13 @@ class Engine:
                     f"Meta accepted the request but did not confirm the change: "
                     f"{result.response!r}. Nothing has been recorded as applied. "
                     f"Check the object in Ads Manager before retrying."
+                )
+            problem = confirm() if confirm is not None else None
+            if problem:
+                raise MutationError(
+                    f"Meta answered success, but a re-read shows the change did not "
+                    f"land: {problem}. Recorded as NOT applied. Check the object in "
+                    f"Ads Manager."
                 )
         except Exception as exc:
             for entry_id in entry_ids:
@@ -480,6 +489,7 @@ class Engine:
             reverts=[entry_id],
             kind_name=prepared["kind"].name,
             account_id=entry.get("account_id"),
+            confirm=lambda: prepared["kind"].revert_landed(ctx, entry),
         )
         ctx.counters.record(prepared["projected"])
         result = self._revert_result(entry, entry_ids[0])

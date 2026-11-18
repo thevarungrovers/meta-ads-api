@@ -269,6 +269,19 @@ class ChangeKind:
         """
         return plan
 
+    def landed(self, ctx, payload: dict[str, Any]) -> str | None:
+        """After Meta confirmed the write: why it did NOT do what was approved.
+
+        None (the default) trusts ``result.success``. A kind whose write Meta
+        can accept without making the change re-reads and says what is wrong;
+        the engine then records the entry as failed, not applied.
+        """
+        return None
+
+    def revert_landed(self, ctx, entry: dict[str, Any]) -> str | None:
+        """The same, for a revert of ``entry``."""
+        return None
+
     def inverse_for(self, payload: dict[str, Any], result, created: list[str]) -> dict[str, Any]:
         """Extra inverse data known only after the apply (a created id)."""
         return {}

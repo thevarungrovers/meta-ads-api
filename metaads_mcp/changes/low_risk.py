@@ -100,6 +100,37 @@ class LowRiskChange(NodeFieldKind):
     def revert_projection(self, ctx, entry):
         return Decimal("0"), False
 
+    # Meta documents label REMOVAL as DELETE /{object}/adlabels, and the write
+    # client has no DELETE (nothing here deletes). A detach -- and the revert
+    # of an attach -- POSTs the remaining set instead, on the reading that Meta
+    # replaces it. Rather than add a DELETE path, every label write re-reads
+    # the labels and fails when the set is not exactly the one approved: a
+    # label still attached is reported, never recorded as detached.
+
+    def _labels_landed(self, ctx, entity_id: str, expected: str) -> str | None:
+        live = _labels(self.read_row(ctx, entity_id))
+        if canonical(live) == expected:
+            return None
+        wanted = {l["id"] for l in as_obj(expected) or []}
+        still = sorted(l["id"] for l in live if l["id"] not in wanted)
+        missing = sorted(wanted - {l["id"] for l in live})
+        parts = []
+        if still:
+            parts.append(f"label(s) {', '.join(still)} still attached")
+        if missing:
+            parts.append(f"label(s) {', '.join(missing)} not attached")
+        return "; ".join(parts) or f"labels are {canonical(live)}, not {expected}"
+
+    def landed(self, ctx, payload):
+        if payload.get("graph_field") != "adlabels":
+            return None
+        return self._labels_landed(ctx, payload["entity_id"], payload["after"])
+
+    def revert_landed(self, ctx, entry):
+        if (entry.get("inverse") or {}).get("graph_field") != "adlabels":
+            return None
+        return self._labels_landed(ctx, entry["entity_id"], entry["before"])
+
     def propose(
         self,
         ctx,

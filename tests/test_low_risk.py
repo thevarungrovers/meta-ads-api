@@ -62,3 +62,73 @@ def test_a_pair_off_the_allowlist_is_refused(monkeypatch, entity_type, field):
     with pytest.raises(Exception) as caught:
         tools["preview_low_risk_change"](entity_type=entity_type, entity_id=AD_ID, field=field, value="x")
     assert "allowlist" in str(caught.value)
+
+
+# --- a label write that does not replace the set -------------------------------
+
+
+def _append_only_labels(s):
+    """Meta as the review feared: POST adlabels ADDS, it never removes."""
+    original = s._post
+
+    def post(segments, body):
+        node = segments[0]
+        before = s.objects.get(node, {}).get("adlabels")
+        answer = original(segments, body)
+        if "adlabels" in body and node in s.objects and before is not None:
+            def parse(v):
+                return v if isinstance(v, list) else json.loads(v)
+
+            old, new = parse(before), parse(s.objects[node]["adlabels"])
+            merged = {l["id"]: l for l in old + new}
+            s.objects[node]["adlabels"] = json.dumps(sorted(merged.values(), key=lambda l: l["id"]))
+        return answer
+
+    s._post = post
+
+
+def test_a_detach_that_did_not_remove_the_label_is_not_recorded_as_applied(monkeypatch):
+    from metaads_mcp import ledger
+
+    s = make_sim()
+    s.objects["L1"] = {"id": "L1", "name": "spring"}
+    s.objects["L2"] = {"id": "L2", "name": "summer"}
+    s.objects[CAMPAIGN_ID]["adlabels"] = [{"id": "L1"}, {"id": "L2"}]
+    _append_only_labels(s)
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "low_risk_change", s, entity_type="campaign", entity_id=CAMPAIGN_ID,
+                         field="label_detach", value="L2")
+    with pytest.raises(Exception) as caught:
+        tools["apply_low_risk_change"](preview_token=preview.preview_token)
+    assert "still" in str(caught.value) and "L2" in str(caught.value)
+    entry = ledger.entries()[-1]
+    assert not entry["applied"] and entry["error"]
+
+
+def test_a_revert_of_an_attach_that_did_not_remove_the_label_fails(monkeypatch):
+    from metaads_mcp import ledger
+
+    s = make_sim()
+    s.objects["L1"] = {"id": "L1", "name": "spring"}
+    s.objects[CAMPAIGN_ID]["adlabels"] = []
+    tools, _ = rig(monkeypatch, s)
+    attach = preview_ok(tools, "low_risk_change", s, entity_type="campaign", entity_id=CAMPAIGN_ID,
+                        field="label_attach", value="L1")
+    result = tools["apply_low_risk_change"](preview_token=attach.preview_token)
+    _append_only_labels(s)
+    with pytest.raises(Exception) as caught:
+        tools["revert_change"](entry_id=result.entry_id)
+    assert "still" in str(caught.value)
+    assert not ledger.entries()[-1]["applied"]
+
+
+def test_a_detach_that_landed_is_applied(monkeypatch):
+    s = make_sim()
+    s.objects["L1"] = {"id": "L1", "name": "spring"}
+    s.objects["L2"] = {"id": "L2", "name": "summer"}
+    s.objects[CAMPAIGN_ID]["adlabels"] = [{"id": "L1"}, {"id": "L2"}]
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "low_risk_change", s, entity_type="campaign", entity_id=CAMPAIGN_ID,
+                         field="label_detach", value="L2")
+    assert tools["apply_low_risk_change"](preview_token=preview.preview_token).applied
+    assert json.loads(s.objects[CAMPAIGN_ID]["adlabels"]) == [{"id": "L1"}]
