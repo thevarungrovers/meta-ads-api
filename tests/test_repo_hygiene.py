@@ -376,3 +376,23 @@ def test_instructions_do_not_disclaim_a_registered_tool():
                 if phrase in text:
                     offenders.append(f"{where} lists {phrase!r} as impossible, but {tool} exists")
     assert not offenders, offenders
+
+
+# --- stray scripts -----------------------------------------------------------
+
+
+#: The only Python file allowed at the repository root. Anything else there is
+#: a scratch script -- the kind that once drove a real budget change in-process,
+#: bypassing the approval prompt, with a real campaign id hard-coded. Scripts
+#: belong in scripts/, where they are reviewed like everything else.
+ROOT_PYTHON_ALLOWED = {"install.py"}
+
+
+def test_no_stray_script_is_tracked_at_the_root():
+    """Untracked files are not shipped and are not this test's business."""
+    stray = sorted(
+        p.name
+        for p in tracked_files()
+        if p.parent == REPO_ROOT and p.suffix == ".py" and p.name not in ROOT_PYTHON_ALLOWED
+    )
+    assert not stray, f"tracked root-level scripts: {stray}. Move them to scripts/."
