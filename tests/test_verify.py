@@ -425,3 +425,83 @@ def test_a_pinned_request_really_connects_to_the_pinned_address():
         assert seen["host"] == f"unresolvable.invalid:{port}"
     finally:
         server.server_close()
+
+
+# --- dual-stack hosts and IDN hosts ---------------------------------------------
+
+
+class FailingFor(Recording):
+    """Refuses to connect to some addresses, like a host whose IPv6 is broken."""
+
+    def __init__(self, answers, dead):
+        super().__init__(answers)
+        self.dead = set(dead)
+
+    def request(self, method, url, **kw):
+        import requests
+
+        host = url.split("//", 1)[1].split("/", 1)[0]
+        if any(d in host for d in self.dead):
+            self.seen.append((method, url))
+            raise requests.exceptions.ConnectionError(f"cannot connect to {host}")
+        return super().request(method, url, **kw)
+
+
+def test_a_dual_stack_host_is_tried_ipv4_first():
+    session = Recording([(200, None)])
+    result = linkcheck.check_link(
+        "https://example.com/a", session=session,
+        resolver=lambda h: ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"])
+    assert result.ok
+    assert session.seen[0][1] == "https://93.184.216.34/a", session.seen
+
+
+def test_a_connect_failure_falls_back_to_the_next_vetted_address():
+    session = FailingFor([(200, None)], dead=["93.184.216.34"])
+    result = linkcheck.check_link(
+        "https://example.com/a", session=session,
+        resolver=lambda h: ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"])
+    assert result.ok, result.describe()
+    assert [u for _, u in session.seen] == [
+        "https://93.184.216.34/a", "https://[2606:2800:220:1:248:1893:25c8:1946]/a"]
+
+
+def test_every_address_still_has_to_be_public_before_any_is_tried():
+    session = Scripted([])
+    result = linkcheck.check_link("https://example.com/a", session=session,
+                                  resolver=lambda h: ["93.184.216.34", "::1"])
+    assert result.refused and session.seen == []
+
+
+def test_every_address_failing_is_reported_as_an_error():
+    session = FailingFor([], dead=["93.184.216.34", "93.184.216.35"])
+    result = linkcheck.check_link("https://example.com/a", session=session,
+                                  resolver=lambda h: ["93.184.216.35", "93.184.216.34"])
+    assert result.error and not result.ok
+    assert len(session.seen) == 2
+
+
+def test_an_idn_host_is_sent_in_its_punycode_form():
+    session = Recording([(200, None)])
+    seen_hosts = []
+
+    def resolver(host):
+        seen_hosts.append(host)
+        return ["93.184.216.34"]
+
+    result = linkcheck.check_link("https://bücher.example/a", session=session, resolver=resolver)
+    assert result.ok
+    assert session.headers[0]["Host"] == "xn--bcher-kva.example"
+    assert seen_hosts == ["xn--bcher-kva.example"]
+
+
+def test_the_tls_adapter_gets_the_punycode_name(monkeypatch):
+    names = []
+    monkeypatch.setattr(linkcheck, "_PinnedTLSAdapter", lambda name: names.append(name) or object())
+
+    class Mounting(Recording):
+        def mount(self, prefix, adapter):
+            pass
+
+    linkcheck.check_link("https://bücher.example/a", session=Mounting([(200, None)]), resolver=PUBLIC)
+    assert names == ["xn--bcher-kva.example"]

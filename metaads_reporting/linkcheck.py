@@ -13,7 +13,11 @@ or documentation range, and no IPv6 wrapper (mapped, 6to4, Teredo, NAT64)
 around one. The request then CONNECTS TO THAT CHECKED ADDRESS, with the host
 name sent as the Host header and, for https, as SNI and the name the
 certificate is verified against -- so a DNS answer that changes between the
-check and the connection (rebinding) cannot redirect it. Every redirect hop is
+check and the connection (rebinding) cannot redirect it. A host with several
+addresses has EVERY one checked, then they are tried in a stable order, IPv4
+first, moving to the next only when the connection itself fails -- each still
+pinned. An internationalised host is sent (Host, SNI, certificate name) in its
+ASCII punycode form. Every redirect hop is
 resolved, checked and pinned the same way before it is followed. No
 credentials, cookies or proxies from the environment are sent, and each
 request times out after 5 seconds.
@@ -62,7 +66,42 @@ class LinkResult:
 
 
 def _resolve(host: str) -> list[str]:
-    return sorted({info[4][0] for info in socket.getaddrinfo(host, None)})
+    seen: list[str] = []
+    for info in socket.getaddrinfo(host, None):
+        if info[4][0] not in seen:
+            seen.append(info[4][0])
+    return seen
+
+
+def ascii_host(host: str) -> str:
+    """The host in the ASCII (punycode) form DNS, the Host header and TLS use.
+
+    >>> ascii_host("bücher.example")
+    'xn--bcher-kva.example'
+    >>> ascii_host("example.com")
+    'example.com'
+    """
+    try:
+        host.encode("ascii")
+        return host
+    except UnicodeEncodeError:
+        pass
+    try:
+        import idna  # the IDNA 2008 codec, when installed
+
+        return idna.encode(host, uts46=True).decode("ascii")
+    except ImportError:
+        return host.encode("idna").decode("ascii")
+
+
+def connect_order(addresses) -> list[str]:
+    """IPv4 first, then IPv6, each in the order given, without duplicates.
+
+    >>> connect_order(["2001:db8::1", "93.184.216.34", "93.184.216.34"])
+    ['93.184.216.34', '2001:db8::1']
+    """
+    unique = list(dict.fromkeys(addresses))
+    return ([a for a in unique if ":" not in a] + [a for a in unique if ":" in a])
 
 
 def _new_session():
@@ -101,7 +140,7 @@ def _pinned_url(url: str, address: str) -> tuple[str, str]:
     parsed = urlparse(url)
     literal = f"[{address}]" if ":" in address else address
     netloc = f"{literal}:{parsed.port}" if parsed.port else literal
-    host = parsed.hostname or ""
+    host = ascii_host(parsed.hostname or "")
     host_header = f"[{host}]" if ":" in host else host
     if parsed.port:
         host_header = f"{host_header}:{parsed.port}"
@@ -119,7 +158,7 @@ def _request_pinned(session, method: str, url: str, address: str, **kwargs):
     parsed = urlparse(url)
     if parsed.scheme == "https" and hasattr(session, "mount"):
         prefix = f"https://{urlparse(pinned).netloc}/"
-        session.mount(prefix, _PinnedTLSAdapter(parsed.hostname or ""))
+        session.mount(prefix, _PinnedTLSAdapter(ascii_host(parsed.hostname or "")))
     headers = {**(kwargs.pop("headers", None) or {}), "Host": host_header}
     return session.request(method, pinned, headers=headers, allow_redirects=False,
                            timeout=TIMEOUT_SECONDS, **kwargs)
@@ -166,35 +205,67 @@ def _embedded_v4(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
     return out
 
 
-def _vet(url: str, resolver) -> tuple[str | None, str | None]:
-    """(the checked address to connect to, or None; the refusal, or None).
+def _vet(url: str, resolver) -> tuple[list[str], str | None]:
+    """(the checked addresses to connect to, in order; the refusal, or None).
 
-    The host is resolved exactly once here, and the address returned is the
-    one the request connects to.
+    The host is resolved exactly once here, EVERY address it resolves to must
+    be public, and the ones returned (IPv4 first) are the only ones the
+    request may connect to.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return None, f"only http(s) links are checked, not {parsed.scheme or 'no scheme'}"
+        return [], f"only http(s) links are checked, not {parsed.scheme or 'no scheme'}"
     host = parsed.hostname
     if not host:
-        return None, "the link has no host"
+        return [], "the link has no host"
     if parsed.username or parsed.password:
-        return None, "the link carries credentials"
+        return [], "the link carries credentials"
+    try:
+        host = ascii_host(host)
+    except UnicodeError as exc:
+        return [], f"{host} is not a valid host name ({exc})"
     try:
         addresses = list(resolver(host))
     except OSError as exc:
-        return None, f"{host} does not resolve ({exc})"
+        return [], f"{host} does not resolve ({exc})"
     except ValueError as exc:
-        return None, f"{host} does not resolve ({exc})"
+        return [], f"{host} does not resolve ({exc})"
     if not addresses:
-        return None, f"{host} does not resolve"
+        return [], f"{host} does not resolve"
     try:
         private = [a for a in addresses if not public_address(a)]
     except ValueError:
-        return None, f"{host} resolves to something that is not an IP address"
+        return [], f"{host} resolves to something that is not an IP address"
     if private:
-        return None, f"{host} resolves to a non-public address ({', '.join(private)})"
-    return addresses[0], None
+        return [], f"{host} resolves to a non-public address ({', '.join(private)})"
+    return connect_order(addresses), None
+
+
+def _connect_failed(exc: Exception) -> bool:
+    """A failure to REACH the address (try the next one), not an answer."""
+    try:
+        import requests
+
+        if isinstance(exc, requests.exceptions.ConnectionError) and not isinstance(
+                exc, requests.exceptions.ReadTimeout):
+            return True
+    except ImportError:  # pragma: no cover - requests is a dependency
+        pass
+    return isinstance(exc, ConnectionError)
+
+
+def _request_any(session, method: str, url: str, addresses: list[str], **kwargs):
+    """``method`` to the first vetted address that accepts a connection."""
+    last: Exception | None = None
+    for address in addresses:
+        try:
+            return _request_pinned(session, method, url, address, **dict(kwargs))
+        except Exception as exc:  # noqa: BLE001 - classified below
+            if not _connect_failed(exc):
+                raise
+            last = exc
+    assert last is not None
+    raise last
 
 
 def with_url_tags(link: str, url_tags: str | None) -> str:
@@ -219,15 +290,15 @@ def check_link(url: str, *, session=None, resolver=None) -> LinkResult:
     session = session or _new_session()
     try:
         for _ in range(MAX_REDIRECTS + 1):
-            address, refused = _vet(current, resolver)
+            addresses, refused = _vet(current, resolver)
             if refused:
                 result.refused = refused
                 result.final_url = current
                 return result
             try:
-                response = _request_pinned(session, "HEAD", current, address)
+                response = _request_any(session, "HEAD", current, addresses)
                 if response.status_code in (405, 501):
-                    response = _request_pinned(session, "GET", current, address, stream=True)
+                    response = _request_any(session, "GET", current, addresses, stream=True)
                     close = getattr(response, "close", None)
                     if callable(close):
                         close()
