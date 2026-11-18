@@ -100,10 +100,14 @@ NAMING. Everything you create is named <OWNER>-<agent>-<base>, from the repo's
 .env (each part only when set; neither set: the name as given). Pass the BASE
 name only: the prefix is added, and another agent's or the CLI's prefix is
 refused. The preview's `naming` block is the exact final name. Only a
-creative's internal name is stamped, never its headline. Copies take your
-prefix on the source's base. You may rename ONLY your own entities (your
-prefix, or the ledger shows you made it): a manual entity or another agent's
-is refused, and renames keep the prefix. Names over 400 characters are
+creative's internal name is stamped, never its headline. With initials only,
+a base like spring-promo is refused (it would read as agent "spring"): use _
+or a space. Copies take your prefix on the source's base, any other prefix
+stripped; if a copy's follow-up rename fails, the result's `warnings` and
+`follow_ups[].live_name` give the real name: report that. You may rename ONLY
+your own entities (your prefix, or the ledger shows you made it and the name
+carries no other prefix): a manual entity or another agent's is refused, and
+renames keep the prefix. Names over 400 characters are
 refused, never truncated. find_* (and list_audiences, list_labels) filter by
 origin / agent_name / owner / mine; get_guardrails shows the identity; a
 malformed identity refuses creating until .env is fixed.

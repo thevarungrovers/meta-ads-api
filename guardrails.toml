@@ -74,7 +74,9 @@ allowed_currencies = ["CAD"]
 # The per-change, session and daily totals above are counted in ONE currency:
 # cap_currency if set (it must be in allowed_currencies), otherwise the first
 # entry of allowed_currencies. A change to an entity in any other currency is
-# REFUSED at preview unless a rate below converts it -- none is ever guessed.
+# REFUSED at preview unless a rate below converts it -- none is ever guessed --
+# or it can only lower spend (a pause, a cut; counted as 0). A rate must name a
+# currency that is in allowed_currencies, or the file is refused at load.
 # cap_currency = "CAD"
 #
 # [scope.currency_rates]   # 1 unit of the key = this many cap-currency units

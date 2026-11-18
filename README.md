@@ -142,7 +142,10 @@ python3 install.py --agent claude-code --owner-initials AB --agent-name max   # 
 ```
 
 `--owner-initials` / `--agent-name` are validated and written into `.env`, the
-only place the naming identity is read from; never into a client config.
+only place the naming identity is read from; never into a client config. The
+file is replaced atomically (a private temp file beside it, then a rename), is
+never left looser than `600`, and a malformed value is reported by its key, not
+echoed.
 
 ## Three things about Meta that will bite you
 
@@ -314,6 +317,10 @@ block) is **ignored**, with a startup warning when it disagrees, so there is
 A value that is set but malformed (`a1`, `max-1`) refuses every create and
 rename at preview, naming the `.env` key to fix.
 
+With **initials only**, a base that starts like an agent name followed by `-`
+(`spring-promo`) is refused: `AB-spring-promo` would read as agent `spring`.
+Join the first word with `_` or a space instead (`spring_promo`, `spring promo`).
+
 **What is prefixed.** Every name the agent creates: campaigns, ad sets, ads,
 creatives (the top-level, internal `name` only -- never the headline viewers
 see, `link_data.name`), audiences, A/B tests (not their cell names) and labels.
@@ -321,7 +328,14 @@ Images and videos have no name here and are not stamped. A copy or duplicate
 (`duplicate_ad`, `duplicate_ad_set`, `duplicate_campaign`) gets our prefix on the
 source's base, any other prefix stripped; `/copies` takes no name, so each
 object it creates is renamed right after, one ledger entry each, within
-`max_entities_per_call`. With no identity, Meta's copy naming is kept. A
+`max_entities_per_call`. An object Meta copies that the preview did not list
+(added in between) is counted too: the apply is refused, copying nothing, when
+the copy would now go over the limit, and a name refused for it is skipped and
+reported, never sent. When a rename after the copy fails, the apply result
+reports each object's live name (`follow_ups[].live_name`, and the copy's own
+`entity_name`) and a top-level `warnings` line. With no identity, Meta's copy
+naming is kept for `/copies`; `duplicate_ad` still strips another agent's or the
+CLI's prefix from the copy's name (`CD-bot-launch` -> `launch (copy)`). A
 creative made by a copy edit is named from the ad's base; the ad keeps its name.
 
 **Limits.** A name is at most **400 characters, prefix included**, for every
@@ -335,6 +349,9 @@ are refused. `url_tags` that use `{{campaign.name}}`, `{{adset.name}}` or
 **Renames.** The agent may rename **only its own entities**: the live name
 carries its prefix, or the ledger shows this server created it. A manual entity
 or another agent's (the same owner's included) is refused; there is no override.
+A live name carrying a *different* full `OWNER-agent-` prefix is refused even
+when the ledger shows this checkout created it (say `.env` changed from
+`AB-max` to `AB-bot`): the name's attribution wins.
 The prefix is kept (restored, on a ledger-owned entity whose prefix was removed
 in Ads Manager); a revert puts the old name back exactly.
 
@@ -564,8 +581,10 @@ limits and totals are counted in the *cap currency*: `cap_currency` under
 `[scope]` if set, otherwise the first entry of `allowed_currencies`. A change to
 an entity whose account is in another currency is **refused at preview**
 (`FAIL cap_currency`), because adding JPY amounts to CAD ones makes every total
-meaningless. The one exception is a conversion you configure yourself; no rate is
-ever looked up or guessed:
+meaningless -- unless it can only **lower** spend (a pause, a cut), which is
+let through and counted as 0. The one exception is a conversion you configure
+yourself; no rate is ever looked up or guessed, and a rate for a currency that
+is not in `allowed_currencies` is refused when the file loads:
 
 ```toml
 [scope]
@@ -578,9 +597,12 @@ JPY = "0.0091"
 
 With a rate, the preview still shows the projection in the entity's currency, and
 a warning says what it is counted as; the token, the counters and the ledger
-carry the converted amount. Anything that can restore spend -- an activation, a
-targeting widening, a schedule extension, a revert that lifts a restriction --
-also checks the entity's currency is in `allowed_currencies`.
+carry the converted amount, rounded up for an increase and down for a cut, never
+to the nearest. The ledger also keeps the entity-currency figure, and a revert
+works from that one, so it is converted exactly once. Anything that adds or
+restores spend -- an activation, an increase, a targeting widening, a schedule
+extension, a revert that lifts a restriction -- also checks the entity's
+currency is in `allowed_currencies`.
 
 ### 4. The stop button
 
@@ -659,7 +681,12 @@ after you did, and reverting would discard *their* change while the ledger
 recorded it as a tidy undo of yours.
 
 A revert is itself a change and is itself recorded, so the ledger stays a
-history rather than a list of things that are still true.
+history rather than a list of things that are still true. Reverting a revert
+re-applies the original change, and costs what it projected. Undoing a change
+that **tightened** delivery (a cap, a floor, narrowed targeting) projects the
+entity's unused budget headroom, and so does every later step of that revert
+chain that lifts the restriction again, however deep: the headroom is re-read
+at that moment, never taken from an older step.
 
 ## How reading and writing are kept apart
 

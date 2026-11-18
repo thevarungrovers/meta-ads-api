@@ -317,10 +317,17 @@ neither set the name is used as given. `get_guardrails` shows the identity.
 - The preview's `naming` block shows the EXACT final name; read it to the human.
 - A creative's top-level name is stamped; the headline (`link_data.name`) is
   your text, never touched.
-- Copies and duplicates take your prefix on the source's base; `/copies` are
-  renamed right after, one ledger entry each.
+- With initials only (no agent name), a base like `spring-promo` is refused
+  (it would read as agent `spring`): use `spring_promo` or `spring promo`.
+- Copies and duplicates take your prefix on the source's base, with any other
+  prefix stripped (identity or not); `/copies` are renamed right after, one
+  ledger entry each. If one of those renames fails or is skipped, the apply
+  result has a `warnings` line and each object's `live_name` in `follow_ups`:
+  tell the human the real name.
 - Renames: only your own entities (your prefix, or the ledger shows you made
   it). A manual entity or another agent's is refused -- say so and leave it.
+  A name carrying a different full prefix is refused even when the ledger
+  shows you made it.
 - Over 400 characters (prefix included) is refused, never truncated: shorten.
 - `find_*(mine=True)` finds yours; `reconcile_ledger` reports lost prefixes.
 
@@ -401,6 +408,13 @@ reverts the whole batch. It refuses if the entry was never applied, if it has
 already been reverted, or if **the value has moved since** — in that last case somebody edited it in Ads
 Manager after your change, and reverting would discard their edit rather than
 undo yours.
+
+A revert that restores spend counts against the caps like the change it
+undoes, in the cap currency (converted once, from the entity's currency).
+Undoing a change that tightened delivery -- and every later revert in that
+chain that lifts it again -- projects the live unused budget headroom. A
+pause or a cut in a currency with no configured rate is let through (counted
+as 0); anything that adds spend needs the currency in `allowed_currencies`.
 
 An entry showing `applied: false` **with no error** is the one to look at
 carefully: the write left the process and nothing recorded how it ended, so it
