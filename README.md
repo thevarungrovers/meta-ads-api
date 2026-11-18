@@ -343,7 +343,12 @@ type above. An over-long name is **refused, never truncated**; the preview says
 how long the base may be. The preview always shows the exact final name (the
 `naming` block). A duplicate name only warns -- Meta allows them. Control and
 invisible characters, a doubled prefix, and another agent's or the CLI's prefix
-are refused. `url_tags` that use `{{campaign.name}}`, `{{adset.name}}` or
+are refused -- including one spelt with look-alike characters: the first two
+dash-separated segments are folded (NFKC, any dash to `-`, Cyrillic and Greek
+letters to the Latin ones they resemble), and a name that then reads as a
+prefix it does not literally carry is refused, in the preview, the engine's
+backstop and the write client alike. Accented letters and typographic dashes
+in an ordinary name (`Summer – Sale`, `Café-Paris`) are fine. `url_tags` that use `{{campaign.name}}`, `{{adset.name}}` or
 `{{ad.name}}` warn that UTM values will carry the prefix.
 
 **Renames.** The agent may rename **only its own entities**: the live name

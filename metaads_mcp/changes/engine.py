@@ -353,11 +353,17 @@ class Engine:
                           "sends no name to check")]
         if not sent:
             return []
+        from metaads_reporting.naming import sent_name_problem
+
         bad = [repr(n) for n in sent if not identity.owns(n)]
+        disguised = [p for p in (sent_name_problem(n, identity.prefix) for n in sent) if p]
+        detail = "; ".join(
+            ([f"would send names without {identity.prefix!r}: {', '.join(bad)}"] if bad else [])
+            + disguised
+        )
         return [Check(
-            "name_prefix", not bad,
-            (f"would send names without {identity.prefix!r}: {', '.join(bad)}" if bad
-             else f"every name sent carries {identity.prefix!r}"),
+            "name_prefix", not detail,
+            detail or f"every name sent carries {identity.prefix!r}",
         )]
 
     @staticmethod

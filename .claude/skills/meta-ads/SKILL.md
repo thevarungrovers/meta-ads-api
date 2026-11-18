@@ -313,7 +313,9 @@ placeholders), from the repo's `.env`; each part only when it is set, and with
 neither set the name is used as given. `get_guardrails` shows the identity.
 
 - **Pass the base name only.** The prefix is added; passing it already is fine,
-  passing another agent's (`CD-bot-...`) or the CLI's (`AB-cli-...`) is refused.
+  passing another agent's (`CD-bot-...`) or the CLI's (`AB-cli-...`) is refused,
+  and so is one spelt with look-alike characters (a Cyrillic letter, a
+  non-ASCII dash, a fullwidth form): use plain ASCII at the start of a name.
 - The preview's `naming` block shows the EXACT final name; read it to the human.
 - A creative's top-level name is stamped; the headline (`link_data.name`) is
   your text, never touched.

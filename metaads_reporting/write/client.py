@@ -157,6 +157,13 @@ def check_name_prefix(prefix: str, name: Any, what: str) -> None:
             f"Refusing {what} named {str(name or '')!r}: everything this server names "
             f"starts with {prefix!r} (the owner/agent prefix from .env). Nothing was sent."
         )
+    # Whether or not a prefix is configured: a name that only LOOKS like one
+    # ("\u0421D-bot-x", "AB-max-CD\u2011bot-x") would misattribute the entity.
+    from metaads_reporting.naming import sent_name_problem
+
+    problem = sent_name_problem(name, prefix)
+    if problem:
+        raise MutationError(f"Refusing {what}: {problem}. Nothing was sent.")
 
 
 #: Budget above which a write is refused unless explicitly overridden. Not a

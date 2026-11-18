@@ -52,6 +52,79 @@ RESERVED_AGENTS = frozenset({"cli", "manual"})
 _FULL = re.compile(r"^([A-Z]{2,4})-([a-z][a-z0-9_]{1,23})-(.*)$", re.S)
 #: A base that, after an owner-only ``AB-``, would read as an agent name.
 _AGENT_LEAD = re.compile(r"^[a-z][a-z0-9_]{1,23}-")
+#: The head of the full form, matched against a name's SKELETON.
+_FULL_HEAD = re.compile(r"[A-Z]{2,4}-[a-z][a-z0-9_]{1,23}-")
+
+#: Dash-like characters that are not all category Pd (minus sign, hyphen
+#: bullet, modifier minus, heavy minus). Every Pd character folds to "-" too.
+_DASHES = frozenset("\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"
+                    "\u2043\u02d7\u2796")
+#: Cyrillic and Greek letters that read as Latin ones. A small explicit table:
+#: it only has to cover what a prefix is made of (A-Z, a-z, 0-9, _).
+_CONFUSABLES = str.maketrans({
+    "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c",
+    "\u0445": "x", "\u0443": "y", "\u0456": "i", "\u0458": "j", "\u0455": "s",
+    "\u0410": "A", "\u0412": "B", "\u0414": "D", "\u0415": "E", "\u041a": "K",
+    "\u041c": "M", "\u041d": "H", "\u041e": "O", "\u0420": "P", "\u0421": "C",
+    "\u0422": "T", "\u0425": "X",
+    "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H",
+    "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
+    "\u03a1": "P", "\u03a4": "T", "\u03a7": "X", "\u03a5": "Y",
+})
+
+
+def _fold(char: str) -> str:
+    """One character as the ASCII it reads as, where it reads as one."""
+    import unicodedata
+
+    folded = unicodedata.normalize("NFKC", char)
+    if len(folded) == 1 and (folded in _DASHES or unicodedata.category(folded) == "Pd"):
+        return "-"
+    return folded.translate(_CONFUSABLES)
+
+
+def look_alike_prefix(text: str, prefix: str = "") -> str | None:
+    """The prefix ``text`` would READ as through look-alike characters, or None.
+
+    ``text`` is folded to a skeleton (NFKC, dashes to "-", Cyrillic/Greek
+    look-alikes to Latin). If the skeleton starts with a full ``OWNER-agent-``
+    prefix -- or with ``prefix``, this checkout's own -- and the original
+    differs from the skeleton in exactly that head, the name is a disguised
+    prefix. Only the head is compared, so non-ASCII in the base after it is
+    untouched, and a plain name ("Summer \u2013 Sale", "Caf\u00e9-Paris")
+    never matches.
+
+    >>> look_alike_prefix("\u0421D-bot-launch")
+    'CD-bot-'
+    >>> look_alike_prefix("CD-bot-launch") is None
+    True
+    """
+    skeleton, ends = "", []
+    for index, char in enumerate(text or ""):
+        skeleton += _fold(char)
+        ends.append((len(skeleton), index + 1))
+    found = _FULL_HEAD.match(skeleton)
+    head = found.group(0) if found else (prefix if prefix and skeleton.startswith(prefix) else "")
+    if not head:
+        return None
+    original = next((text[:i] for length, i in ends if length >= len(head)), text)
+    return None if original == head else head
+
+
+def sent_name_problem(name: str | None, prefix: str = "") -> str | None:
+    """Why a name about to be SENT carries a disguised prefix, or None.
+
+    The backstop for the engine and the write client: the head of the name,
+    and -- after our own prefix -- the head of what follows it.
+    """
+    text = str(name or "")
+    hit = look_alike_prefix(text, prefix)
+    if hit is None and prefix and text.startswith(prefix):
+        hit = look_alike_prefix(text[len(prefix):], prefix)
+    if hit is None:
+        return None
+    return (f"{text!r} reads as the prefix {hit!r} through look-alike characters "
+            "(Cyrillic or Greek letters, a non-ASCII dash or a fullwidth form)")
 
 #: Every entity type a name is stamped on, and its limit.
 NAME_LIMIT = 400
@@ -167,6 +240,10 @@ class Identity:
         another agent's.
         """
         if not self.configured or not name:
+            return False
+        if look_alike_prefix(name, self.prefix) is not None:
+            # "\u0410B-max-x" or, owner-only, "AB-max\u2011x": it READS as a
+            # prefix it does not carry.
             return False
         parsed = parse(name)
         if parsed is not None:
@@ -342,6 +419,14 @@ def _check_base(base: str, identity: Identity, entity_type: str) -> None:
             f"first word with _ or a space instead of - (for example "
             f"{lead}_{base.split('-', 1)[1]!s})"
         )
+    for text in (base, identity.prefix + base):
+        disguised = look_alike_prefix(text, identity.prefix)
+        if disguised is not None:
+            raise NameRefused(
+                f"the {entity_type} name {text!r} reads as {disguised} -- a prefix -- through "
+                "look-alike characters (Cyrillic or Greek letters, a non-ASCII dash or a "
+                "fullwidth form); use plain ASCII there, or reorder the base"
+            )
     bad = invisible_characters(base)
     if bad:
         raise NameRefused(f"the {entity_type} name contains control or invisible characters "
@@ -377,6 +462,13 @@ def stamp(identity: Identity, requested: str, *, entity_type: str) -> Stamped:
     text = (requested or "").strip()
     if not text:
         raise NameRefused(f"the {entity_type} needs a name")
+    disguised = look_alike_prefix(text, identity.prefix)
+    if disguised is not None:
+        raise NameRefused(
+            f"the {entity_type} name {text!r} reads as {disguised} -- a prefix -- through "
+            "look-alike characters (Cyrillic or Greek letters, a non-ASCII dash or a "
+            "fullwidth form); pass the base name only, in plain ASCII there"
+        )
     base, rule = _base_of(identity, text, entity_type)
     _check_base(base, identity, entity_type)
     return Stamped(final=f"{identity.prefix}{base}", base=base, requested=requested or "",
@@ -451,6 +543,14 @@ def rename(identity: Identity, current: str, requested: str, *, entity_type: str
     # the CLI's, or this checkout's before .env changed AB-sam -> AB-max):
     # renaming it would rewrite someone else's attribution.
     foreign = parsed is not None and (parsed.owner, parsed.agent) != (identity.owner, identity.agent)
+    # A live name that only LOOKS like a prefix ("\u0421D-bot-x") is foreign too,
+    # unless what it reads as is this checkout's own prefix.
+    disguised = look_alike_prefix(current or "", identity.prefix)
+    if disguised is not None and disguised != identity.prefix:
+        raise NameRefused(
+            f"this {entity_type} is named {current!r}, which reads as {disguised} through "
+            "look-alike characters; the agent may rename only its own entities"
+        )
     ours = identity.owns(current) or (ledger_owned and not foreign)
     if not ours:
         if parsed is not None:
