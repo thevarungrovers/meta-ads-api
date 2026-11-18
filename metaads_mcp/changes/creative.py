@@ -194,6 +194,10 @@ class DuplicateAd(_CreativeKind):
     def revert_projection(self, ctx, entry):
         return Decimal("0"), False
 
+    def revert_reduces_spend(self, ctx, entry):
+        # The undo pauses (or ends) what was created: it can only lower spend.
+        return True
+
     def inverse(self, ctx, entry: dict[str, Any]):
         created = (entry.get("inverse") or {}).get("created_ad_id")
         if not created:

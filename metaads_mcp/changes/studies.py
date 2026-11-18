@@ -148,6 +148,10 @@ class CreateAbTest(ChangeKind):
     def revert_projection(self, ctx, entry):
         return Decimal("0"), False
 
+    def revert_reduces_spend(self, ctx, entry):
+        # The undo pauses (or ends) what was created: it can only lower spend.
+        return True
+
     def inverse(self, ctx, entry):
         study = (entry.get("inverse") or {}).get("created_id") or entry.get("entity_id")
         now = int(dt.datetime.now(dt.timezone.utc).timestamp()) + 60

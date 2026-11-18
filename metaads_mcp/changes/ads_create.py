@@ -101,6 +101,10 @@ class CreateAd(ChangeKind):
     def revert_projection(self, ctx, entry):
         return Decimal("0"), False
 
+    def revert_reduces_spend(self, ctx, entry):
+        # The undo pauses the created ad: it can only lower spend.
+        return True
+
     def inverse(self, ctx, entry):
         created = (entry.get("inverse") or {}).get("created_ad_id") or entry.get("entity_id")
         return ads.plan_set_status(ctx.client, ad_id=str(created), status="PAUSED")

@@ -308,6 +308,19 @@ class ChangeKind:
         restored = max(-original, Decimal("0"))
         return restored, restored > 0
 
+    def revert_reduces_spend(self, ctx, entry: dict[str, Any]) -> bool:
+        """Whether undoing ``entry`` can only LOWER spend.
+
+        Such a revert is never refused by the apply-count caps (the kill
+        switch still applies). By default: the original projected added
+        spend, so undoing it takes that spend away. Kinds whose undo is a
+        pause say so themselves.
+        """
+        try:
+            return Decimal(str(entry.get("projected_daily_spend_delta") or "0")) > 0
+        except (InvalidOperation, ValueError):
+            return False
+
     def revert_row_inverse(self, ctx, entry: dict[str, Any]) -> dict[str, Any] | None:
         """What the row a revert of ``entry`` writes keeps as ITS inverse.
 

@@ -454,14 +454,10 @@ class Engine:
 
     def revert(self, entry_id: str) -> ApplyResult:
         ctx = self.ctx
-        # A revert is a real write, so it answers to the same gates every
-        # apply_* does: the kill switch, and the caps. The APPLIES half first,
-        # before any lookup: a revert loop must stop even on entries that turn
-        # out not to exist -- find_entry reaches back over the whole ledger,
-        # including earlier sessions this process never saw.
+        # A revert is a real write, so it answers to the kill switch always,
+        # and to the caps unless it can only LOWER spend (see _revert_caps).
         require_writes_enabled()
         self._require_live_token()
-        self._refuse_if_over_caps(Decimal("0"), 1)
 
         entry = ledger.find_entry(entry_id)
         if entry is None:
@@ -469,6 +465,27 @@ class Engine:
             if batch:
                 return self._revert_batch(entry_id, batch)
             raise ValueError(f"No ledger entry {entry_id!r}. See list_my_changes.")
+        prepared = self._prepare_revert(entry)
+        self._revert_caps([prepared])
+        _, _, entry_ids, _, _ = self._send_recorded(
+            None,
+            prepared["plan"],
+            [prepared["item"]],
+            tool="revert_change",
+            projected=prepared["projected"],
+            weight=1,
+            reverts=[entry_id],
+            kind_name=prepared["kind"].name,
+            account_id=entry.get("account_id"),
+        )
+        ctx.counters.record(prepared["projected"])
+        result = self._revert_result(entry, entry_ids[0])
+        result.projected_daily_spend_delta = f"{prepared['projected']:.2f}"
+        return result
+
+    def _prepare_revert(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Everything a revert of ``entry`` needs, checked, with nothing sent."""
+        ctx = self.ctx
         self._revertible(entry)
         kind = self.kind_for_entry(entry)
         if not kind.revertible:
@@ -478,34 +495,50 @@ class Engine:
         # What the revert REPLACES, read before it is sent: the revert row's
         # own inverse, so reverting the revert re-applies this entry.
         row_inverse = kind.revert_row_inverse(ctx, entry)
-        # Then the SPEND half, now that we know what undoing this restores.
         projected, _ = kind.revert_projection(ctx, entry)
-        self._refuse_if_over_caps(projected, 1)
-        plan = kind.inverse(ctx, entry)
+        projected = max(projected, Decimal("0"))
+        return {
+            "entry": entry,
+            "kind": kind,
+            "projected": projected,
+            "reduces": projected == 0 and kind.revert_reduces_spend(ctx, entry),
+            "plan": kind.inverse(ctx, entry),
+            "item": self._inverse_item(entry, row_inverse),
+        }
 
-        _, _, entry_ids, _, _ = self._send_recorded(
-            None,
-            plan,
-            [self._inverse_item(entry, row_inverse)],
-            tool="revert_change",
-            projected=projected,
-            weight=1,
-            reverts=[entry_id],
-            kind_name=kind.name,
-            account_id=entry.get("account_id"),
-        )
-        ctx.counters.record(projected)
-        result = self._revert_result(entry, entry_ids[0])
-        result.projected_daily_spend_delta = f"{projected:.2f}"
-        return result
+    def _revert_caps(self, prepared: list[dict[str, Any]]) -> None:
+        """The caps for one revert -- or one whole batch, checked ONCE, up front.
+
+        A revert that can only LOWER spend (pausing what a change activated,
+        putting back a cap a change lifted) is never refused by the apply-count
+        caps: they bound how much an agent can change, and refusing the undo of
+        a spend increase is the one way those caps could cost money. The kill
+        switch still stops it (checked before this). Anything else costs one
+        apply, like the change it undoes, and its projected spend.
+        """
+        if all(p["reduces"] for p in prepared):
+            return
+        self._refuse_if_over_caps(self._batch_projection(prepared), 1)
+
+    @staticmethod
+    def _batch_projection(prepared: list[dict[str, Any]]) -> Decimal:
+        """A batch's projected spend: the largest element's, not the sum.
+
+        A batch's rows each carry the WHOLE batch's projected delta, and its
+        elements share one budget (one ad set's ads): summing would count the
+        same budget once per element.
+        """
+        return max((p["projected"] for p in prepared), default=Decimal("0"))
 
     def _revert_batch(self, batch_id: str, batch: list[dict[str, Any]]) -> ApplyResult:
-        """Undo every still-applied row of one batch, one entry after another.
+        """Undo every still-applied row of one batch, at the cost of ONE apply.
 
-        Meta's batch endpoint is not atomic, so neither is this: each element
-        is its own write and its own ledger row. A failure stops the loop and
-        says which entries were reverted before it.
+        Every element is prepared -- revertible, not stale, its inverse built
+        -- and the caps checked once, BEFORE anything is sent, so the counters
+        cannot strand a batch halfway. Meta's batch endpoint is still not
+        atomic: a write that fails stops the loop and says which landed.
         """
+        ctx = self.ctx
         reverted = ledger.reverted_entry_ids()
         live = [e for e in batch if e.get("applied") and e["entry_id"] not in reverted]
         if not live:
@@ -513,20 +546,28 @@ class Engine:
                 f"Batch {batch_id} has nothing left to revert: every entry in it "
                 "was never applied or has already been reverted."
             )
-        done: list[str] = []
-        last = None
-        for entry in live:
-            try:
-                last = self.revert(entry["entry_id"])
-            except Exception as exc:
-                raise type(exc)(
-                    f"{exc}\n\nReverted before this failed: {done or 'none'}."
-                ) from exc
-            done.append(last.entry_id)
-        last.batch_id = batch_id
-        last.entry_ids = done
-        last.entity_name = f"{len(done)} entries of batch {batch_id}"
-        return last
+        prepared = [self._prepare_revert(entry) for entry in live]
+        self._revert_caps(prepared)
+        projected = self._batch_projection(prepared)
+        first = live[0]
+        _, _, entry_ids, new_batch, _ = self._send_recorded(
+            None,
+            [p["plan"] for p in prepared] if len(prepared) > 1 else prepared[0]["plan"],
+            [p["item"] for p in prepared],
+            tool="revert_change",
+            projected=projected,
+            weight=1,
+            reverts=[e["entry_id"] for e in live],
+            kind_name=prepared[0]["kind"].name,
+            account_id=first.get("account_id"),
+        )
+        ctx.counters.record(projected)
+        result = self._revert_result(live[-1], entry_ids[-1])
+        result.projected_daily_spend_delta = f"{projected:.2f}"
+        result.batch_id = batch_id
+        result.entry_ids = entry_ids
+        result.entity_name = f"{len(entry_ids)} entries of batch {batch_id}"
+        return result
 
     @staticmethod
     def _revertible(entry: dict[str, Any]) -> None:

@@ -99,6 +99,10 @@ class StatusKind(ChangeKind):
         # A status revert is fully described by its before/after strings.
         return {}
 
+    def revert_reduces_spend(self, ctx, entry: dict[str, Any]) -> bool:
+        # Undoing an activation is a pause.
+        return entry.get("before") == "PAUSED" and entry.get("after") == "ACTIVE"
+
     def activation_bound(self, ctx, row: dict[str, Any], currency: str):  # pragma: no cover
         raise NotImplementedError
 
