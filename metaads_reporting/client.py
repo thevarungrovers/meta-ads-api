@@ -273,6 +273,15 @@ class ReadOnlyMetaAdsClient:
             )
         )
 
+    def get(self, path: str, **params: Any) -> dict[str, Any]:
+        """One GET on any Graph path, for edges that are not lists of objects.
+
+        ``/{creative_id}/previews``, ``act_/generatepreviews``,
+        ``act_/delivery_estimate`` and ``/search`` answer with a shape of their
+        own. Still a GET, through the same guarded path as everything else.
+        """
+        return self._get(str(path), **params)
+
     # -- insights ---------------------------------------------------------
 
     def insights(

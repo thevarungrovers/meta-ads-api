@@ -54,7 +54,9 @@ def creative_id_of(row: dict[str, Any]) -> str | None:
 class _CreativeKind(ChangeKind):
     """Shared: the plan is rebuilt at apply time and compared, field by field."""
 
-    verifies_ad = False
+    #: Every creative change is verified: previews and checks before, a field
+    #: diff and the review state after. Declared here, enforced by the engine.
+    verifies_ad = True
 
     def _plan(self, ctx, payload: dict[str, Any]):  # pragma: no cover
         raise NotImplementedError

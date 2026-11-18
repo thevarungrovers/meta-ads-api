@@ -37,6 +37,8 @@ DEFAULTS: dict[str, object] = {
     "max_projected_delta_per_day": Decimal("200.00"),
     "max_applies_per_session": 20,
     "max_projected_session_delta": Decimal("500.00"),
+    # how many placements an ad change previews (most-spent first)
+    "max_preview_formats": 5,
 }
 
 _DECIMAL_KEYS = {
@@ -46,7 +48,7 @@ _DECIMAL_KEYS = {
     "max_projected_session_delta",
 }
 _FLOAT_KEYS = {"max_budget_change_pct", "max_bid_increase_pct"}
-_INT_KEYS = {"max_entities_per_call", "max_applies_per_session"}
+_INT_KEYS = {"max_entities_per_call", "max_applies_per_session", "max_preview_formats"}
 
 
 class WritesDisabled(RuntimeError):
@@ -71,6 +73,7 @@ class Limits:
     max_projected_delta_per_day: Decimal
     max_applies_per_session: int
     max_projected_session_delta: Decimal
+    max_preview_formats: int = 5
     allowed_account_ids: tuple[str, ...] = ()
     allowed_campaign_ids: tuple[str, ...] = ()
     allowed_currencies: tuple[str, ...] = ("CAD",)
@@ -85,6 +88,7 @@ class Limits:
             "max_projected_delta_per_day": str(self.max_projected_delta_per_day),
             "max_applies_per_session": self.max_applies_per_session,
             "max_projected_session_delta": str(self.max_projected_session_delta),
+            "max_preview_formats": self.max_preview_formats,
             "allowed_account_ids": list(self.allowed_account_ids)
             or ["(only META_ADS_ACCOUNT_ID)"],
             "allowed_campaign_ids": list(self.allowed_campaign_ids) or ["(all)"],

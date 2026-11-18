@@ -100,3 +100,28 @@ def _no_real_backoff_sleeps(monkeypatch):
     monkeypatch.setattr(
         "metaads_reporting.graph._sleep_backoff", lambda *args, **kwargs: None
     )
+
+
+class _OfflineLinkSession:
+    """Answers every link check 200, so no test ever reaches a real website."""
+
+    def request(self, method, url, **kwargs):
+        from tests.fakes import FakeResponse
+
+        return FakeResponse({}, status=200)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_link_checks(monkeypatch):
+    """The ad verification follows destination links over plain HTTP, outside
+    the Graph transport. Offline here: a fake resolver with a public address,
+    and a session that answers 200. Tests of the checker pass their own."""
+    monkeypatch.setattr(
+        "metaads_reporting.linkcheck._resolve", lambda host: ["93.184.216.34"]
+    )
+    monkeypatch.setattr(
+        "metaads_reporting.linkcheck._new_session", lambda: _OfflineLinkSession()
+    )

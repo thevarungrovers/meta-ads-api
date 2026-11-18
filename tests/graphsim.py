@@ -49,6 +49,8 @@ class GraphSim:
         #: Creates that really happened, and the multipart fields of the last call.
         self.created: list[dict[str, Any]] = []
         self.last_files: dict[str, Any] = {}
+        #: ad_formats the previews edges refuse.
+        self.refuse_formats: set[str] = set()
         #: Set to a FakeResponse to make the NEXT request fail.
         self.next_failure: FakeResponse | None = None
 
@@ -86,6 +88,22 @@ class GraphSim:
 
         if edge == "insights":
             return FakeResponse({"data": list(self.insights)})
+
+        # Ad previews: an iframe whose src is a signed link, as Meta sends it.
+        # `refuse_formats` makes a format fail the way Meta refuses one.
+        if edge in ("previews", "generatepreviews"):
+            ad_format = params.get("ad_format", "")
+            if ad_format in self.refuse_formats:
+                return FakeResponse(
+                    {"error": {"message": f"format {ad_format} not supported", "code": 100}},
+                    status=400,
+                )
+            body = (
+                f'<iframe src="https://business.facebook.com/ads/api/preview_iframe.php'
+                f'?d={node}&amp;f={ad_format}&amp;t=SIGNED" width="540" height="690">'
+                f"</iframe>"
+            )
+            return FakeResponse({"data": [{"body": body}]})
 
         # The accounts a System User token has been ASSIGNED, which is what
         # /me/adaccounts actually answers -- usually far fewer than the business
