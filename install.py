@@ -638,6 +638,48 @@ def next_steps(agent: str, read_only: bool) -> list[str]:
     return steps
 
 
+IDENTITY_KEYS = ("META_ADS_MCP_OWNER_INITIALS", "META_ADS_MCP_AGENT_NAME")
+
+
+def write_identity(env_path: pathlib.Path, owner: str | None, agent: str | None,
+                   dry_run: bool) -> list[str]:
+    """Put the naming identity into .env -- the ONLY place it is read from.
+
+    Never into an MCP client config (the server ignores a process value) and
+    never into a tracked file. Only the two keys are touched: an existing line
+    is replaced, a missing one appended. ``None`` leaves a key as it is.
+    """
+    if env_path.name != ".env":
+        raise InstallError(f"the identity goes only into .env, not {env_path}")
+    sys.path.insert(0, str(REPO_ROOT))
+    from metaads_reporting.naming import Identity
+
+    wanted = {k: v.strip() for k, v in zip(IDENTITY_KEYS, (owner, agent)) if v is not None}
+    if not wanted:
+        return []
+    check = Identity.from_values(wanted.get(IDENTITY_KEYS[0]), wanted.get(IDENTITY_KEYS[1]))
+    if check.problem:
+        raise InstallError(check.problem)
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    out, seen = [], set()
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key in wanted:
+            out.append(f"{key}={wanted[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    out.extend(f"{k}={v}" for k, v in wanted.items() if k not in seen)
+    if dry_run:
+        return [f"would set {', '.join(wanted)} in {env_path.name}"]
+    env_path.write_text("\n".join(out) + "\n")
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
+    return [f"set {', '.join(wanted)} in {env_path.name} (the agent's name prefix)"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Add the meta-ads MCP server to an AI agent.",
@@ -667,6 +709,16 @@ def main() -> int:
         "--yes",
         action="store_true",
         help="do not ask for confirmation before writing (needs --agent)",
+    )
+    parser.add_argument(
+        "--owner-initials",
+        help="2-4 uppercase initials for the name prefix, written to .env only "
+             "(empty string to clear)",
+    )
+    parser.add_argument(
+        "--agent-name",
+        help="lowercase agent slug for the name prefix, written to .env only "
+             "(empty string to clear)",
     )
     args = parser.parse_args()
 
@@ -698,6 +750,9 @@ def main() -> int:
         print()
 
     for note in install(agent, read_only, args.dry_run):
+        print(f"  {note}")
+    for note in write_identity(REPO_ROOT / ".env", args.owner_initials, args.agent_name,
+                               args.dry_run):
         print(f"  {note}")
 
     print()

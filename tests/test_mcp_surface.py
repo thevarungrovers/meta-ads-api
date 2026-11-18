@@ -304,3 +304,18 @@ def test_the_installers_safe_tool_list_matches_the_server(tools):
     assert set(install.SAFE_TOOLS) == READ_TOOLS | PREVIEW_TOOLS
     assert set(install.WRITE_TOOLS) == APPLY_TOOLS
     assert not set(install.SAFE_TOOLS) & set(install.WRITE_TOOLS)
+
+
+def test_every_creating_kind_declares_creates_named():
+    """A kind that creates something named must declare it, so the engine's
+    backstop checks the names it sends."""
+    from metaads_mcp.changes import all_kinds
+
+    creating = {"create_campaign", "create_ad_set", "create_ad", "create_creative",
+                "create_audience", "create_ab_test", "duplicate_ad", "duplicate_ad_set",
+                "duplicate_campaign", "update_ad_copy", "url_tags",
+                "advantage_creative_options", "attach_lead_form"}
+    kinds = {k.name: k for k in all_kinds()}
+    for name in creating:
+        assert kinds[name].creates_named, name
+    assert {n for n, k in kinds.items() if k.creates_named} == creating
