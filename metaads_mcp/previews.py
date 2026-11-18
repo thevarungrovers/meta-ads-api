@@ -67,6 +67,20 @@ class ChangePreview(BaseModel):
     blocked: bool = Field(description="True when a check failed; apply would refuse")
     warnings: list[str] = []
     note: str | None = None
+    items: list[dict[str, Any]] | None = Field(
+        default=None, description="One per entity, for a batch change"
+    )
+    apply_weight: int = Field(
+        default=1, description="How many applies this costs against the caps"
+    )
+    previews: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Ad previews per placement: {placement, ad_format, iframe_url, width, "
+            "height} or {unavailable}. Signed, short-lived links -- open them, "
+            "do not store them."
+        ),
+    )
 
 
 class ApplyResult(BaseModel):
@@ -81,6 +95,23 @@ class ApplyResult(BaseModel):
     before: str
     after: str
     session: dict[str, Any] = Field(description="Session budget left after this")
+    daily: dict[str, Any] | None = Field(
+        default=None, description="Today's budget left after this (local day)"
+    )
+    resource_name: str | None = Field(
+        default=None, description="The id Meta returned for what was created"
+    )
+    batch_id: str | None = None
+    entry_ids: list[str] = []
+    projected_daily_spend_delta: str | None = None
+    verification: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "For an ad change: the live ad and creative re-read and diffed "
+            "against what was approved, its review state, and fresh preview "
+            "links. passed=false says what differs; nothing is auto-reverted."
+        ),
+    )
 
 
 class PreviewExpired(RuntimeError):

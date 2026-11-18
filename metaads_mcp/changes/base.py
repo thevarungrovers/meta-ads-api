@@ -1,0 +1,309 @@
+"""The shapes every change kind speaks in.
+
+A *kind* is one sort of change -- a campaign's status, an ad set's budget, a
+new lookalike. It knows four things and nothing else:
+
+  * how to read the entity and turn the agent's arguments into a
+    :class:`Proposal` (before, after, the bounds it has to clear, the projected
+    spend, and a JSON-able ``payload`` the apply will need);
+  * how to read the CURRENT value again at apply time, so a change somebody
+    made in Ads Manager in between is caught rather than overwritten;
+  * how to build the :class:`~metaads_reporting.write.plan.PlannedChange`;
+  * how to build the change that undoes one ledger entry.
+
+Everything else -- the token, the kill switch, the session and daily caps, the
+ledger's two phases, the ``validate_only`` round trip, the ad verification, the
+ToolError mapping -- lives once, in :mod:`metaads_mcp.changes.engine`. Before
+it, each of the nine original pairs hand-rolled its own copy of the apply
+sequence, and the copies had drifted: the creative and audience paths skipped
+the staleness check, and the audience path ignored ``result.success``. A new
+kind cannot forget a gate it never implements.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from mcp.types import ToolAnnotations
+
+from metaads_mcp.guardrails import Check
+
+# All four hints, always -- see the note in tools_read.py for why an omitted
+# hint is worse than a wrong one.
+#
+# A preview reads the account, mints a token in memory and writes nothing, so it
+# is safe to allowlist. Calling one twice just produces a second token. The
+# validate_only round trip it makes is a server-side CHECK, not a write: Meta
+# evaluates the request and discards it.
+PREVIEW_SAFE = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+
+#: destructive_hint is set only where the change moves money, stops delivery,
+#: changes targeting or creates something. Marking a reversible pause
+#: destructive would train someone to click through the loud prompts, which is
+#: how loud prompts stop working.
+APPLY_SPENDS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
+
+#: Pausing one ad, a rename, and reverting: writes, but not new risk.
+APPLY_REVERSIBLE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
+
+SETTABLE_STATUSES = ("ACTIVE", "PAUSED")
+
+#: What "before" reads as for something that does not exist yet.
+NOTHING = "(does not exist)"
+
+
+def parse_money(raw: str, name: str) -> Decimal:
+    """Money arrives as a decimal string in MAJOR units, never minor ones.
+
+    The argument is rendered verbatim in the prompt a human approves, so "25.00"
+    has to mean twenty-five. Accepting a float here would also let 0.1 + 0.2
+    arrive as 0.30000000000000004 in the approval text.
+
+    The upper bound is the point: ``2500`` is what you get typing ``25.00`` as
+    the integer Meta actually wants. It is a valid Decimal and a catastrophic
+    budget, so it is caught before the ceiling check, where the message can say
+    what went wrong rather than just "too big".
+    """
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, AttributeError) as exc:
+        raise ValueError(
+            f"{name} must be a decimal string in the account's currency, "
+            f'e.g. "25.00" -- got {raw!r}. Never pass minor units.'
+        ) from exc
+    if not value.is_finite():
+        raise ValueError(f"{name} must be a finite number, got {raw!r}.")
+    if value < 0:
+        raise ValueError(f"{name} cannot be negative, got {value}.")
+    if value > Decimal("100000"):
+        raise ValueError(
+            f"{name} of {value} looks like minor units, not currency. Meta "
+            f"stores budgets as an integer in the currency's minor unit, but "
+            f"this tool takes the major-unit amount and converts it. If you "
+            f"meant {value / 100}, pass that."
+        )
+    return value
+
+
+def amount_from_stored(stored: str) -> Decimal:
+    """Pull the number back out of a stored ``"50.00 CAD"`` string.
+
+    The ledger keeps money WITH its currency code, because a bare "50.00" in an
+    audit trail does not say 50 of what. Only legacy rows need this: new rows
+    carry the amount in ``inverse_json``.
+    """
+    text = (stored or "").strip()
+    if not text or text == "(not set)":
+        raise ValueError(
+            f"That entry's previous value was {stored!r}, which is not an "
+            f"amount this can put back. Set it explicitly instead."
+        )
+    try:
+        return Decimal(text.split()[0])
+    except InvalidOperation as exc:
+        raise ValueError(
+            f"Could not read an amount out of the stored value {stored!r}."
+        ) from exc
+
+
+@dataclass
+class LedgerItem:
+    """One row in the ledger: one entity, one field, one before/after.
+
+    A batch writes one of these per entity, all sharing a ``batch_id``, so any
+    single element can be reverted on its own and the batch as one.
+
+    ``inverse`` is whatever undoing it needs beyond before/after -- the
+    previous creative id, the full previous targeting spec. It lands in the
+    row's ``inverse_json`` alongside the kind's name.
+    """
+
+    entity_type: str
+    entity_id: str
+    entity_name: str
+    field_name: str
+    before: str
+    after: str
+    inverse: dict[str, Any] | None = None
+
+
+@dataclass
+class Proposal:
+    """What a kind wants to do, before the engine checks and tokenises it."""
+
+    entity_type: str
+    entity_id: str
+    entity_name: str
+    path: str
+    field_name: str
+    before: str
+    after: str
+    checks: list[Check]
+    projected: Decimal
+    #: Everything the apply needs, carried in the token. JSON-able values only.
+    payload: dict[str, Any]
+    status: str | None = None
+    effective_status: str | None = None
+    metrics: dict[str, Any] | None = None
+    warnings: list[str] = field(default_factory=list)
+    note: str | None = None
+    #: One per ledger row. Empty means "one row, described by the fields above".
+    items: list[LedgerItem] = field(default_factory=list)
+    #: The campaign this touches, for the campaign scope check. None when the
+    #: change is account-level (an audience, a label).
+    campaign_id: str | None = None
+    #: The ad account the ENTITY belongs to, for the account scope check. None
+    #: for something that does not exist yet (it is created in the default
+    #: account, which is what the check then compares).
+    account_id: str | None = None
+    #: A batch: the engine adds the entities_per_call check.
+    batch: bool = False
+    #: An ACTIVATION -- resuming delivery of something paused. Its projection
+    #: is the whole budget it can resume, which on any real campaign exceeds
+    #: the per-change max_projected_delta_per_day; if that limit applied, a
+    #: campaign with a budget over it could never be re-activated. So an
+    #: activation is exempt from the per-change limit and counted, in full,
+    #: against the DAILY total and the session total instead. Budget and bid
+    #: increases are not activations and must pass both.
+    is_activation: bool = False
+    #: For a kind with ``verifies_ad``: what the preview checks and fetches
+    #: previews for. See :mod:`metaads_mcp.verify`.
+    verify: dict[str, Any] | None = None
+    #: What revert_change needs beyond before/after, for the single-row case.
+    inverse: dict[str, Any] | None = None
+
+    def with_inverse(self, inverse: dict[str, Any]) -> "Proposal":
+        self.inverse = inverse
+        return self
+
+    def ledger_items(self) -> list[LedgerItem]:
+        if self.items:
+            return self.items
+        return [
+            LedgerItem(
+                entity_type=self.entity_type,
+                entity_id=str(self.entity_id),
+                entity_name=self.entity_name,
+                field_name=self.field_name,
+                before=self.before,
+                after=self.after,
+                inverse=self.inverse,
+            )
+        ]
+
+
+class ChangeKind:
+    """One sort of change. Subclass, fill in the methods, register it.
+
+    ``propose`` is also the TOOL SIGNATURE: the engine publishes
+    ``preview_<name>`` with exactly ``propose``'s parameters (minus ``ctx``)
+    and its docstring as the description. So annotate every parameter with
+    ``Annotated[..., Field(description=...)]`` the way a hand-written tool
+    would, and write the docstring for the agent that will read it.
+    """
+
+    #: preview_<name> / apply_<name>.
+    name: str = ""
+    preview_title: str = ""
+    apply_title: str = ""
+    apply_annotations: ToolAnnotations = APPLY_SPENDS
+    #: How many applies one of these costs against the session and daily caps.
+    #: A creation costs 3, so an agent cannot build out an account in a loop.
+    weight: int = 1
+    #: (entity_type, field) pairs this kind's rows use. How revert_change finds
+    #: the kind for a LEGACY row, one written before inverse_json named it.
+    ledger_keys: tuple[tuple[str, str], ...] = ()
+    #: False for a kind whose entries cannot be undone here at all (an audience
+    #: is never deleted): revert_change gives the kind's reason first.
+    revertible: bool = True
+    #: Whether the preview also sends the change with validate_only, so it
+    #: reports whether META accepts it and not only whether our bounds pass.
+    validate_in_preview: bool = True
+    #: A kind that creates or changes an ad or creative. The engine then runs
+    #: the ad verification (previews and checks before, field diff and review
+    #: after) and no kind can opt out of it -- see metaads_mcp.verify.
+    verifies_ad: bool = False
+
+    def validates(self, payload: dict[str, Any]) -> bool:
+        return self.validate_in_preview
+
+    def propose(self, ctx, **kwargs) -> Proposal:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def current(self, ctx, payload: dict[str, Any]) -> str:  # pragma: no cover
+        """Today's value, spelled exactly as the proposal spelled ``before``."""
+        raise NotImplementedError
+
+    def build(self, ctx, payload: dict[str, Any]):  # pragma: no cover
+        """The PlannedChange to send (validate_only in the preview, for real at apply)."""
+        raise NotImplementedError
+
+    def prepare_apply(self, ctx, plan, payload: dict[str, Any]):
+        """Writes that must happen at APPLY time before the plan (an image upload).
+
+        Runs after the ledger intent, so a failure here is recorded.
+        """
+        return plan
+
+    def inverse_for(self, payload: dict[str, Any], result, created: list[str]) -> dict[str, Any]:
+        """Extra inverse data known only after the apply (a created id)."""
+        return {}
+
+    def approved_for(self, ctx, payload: dict[str, Any], plan) -> dict[str, Any]:
+        """For ``verifies_ad``: what was approved, to diff the live ad against."""
+        return {}
+
+    def verify_target(self, payload: dict[str, Any], result, created: list[str]) -> str | None:
+        """For ``verifies_ad``: the ad id to re-read after apply."""
+        return None
+
+    # -- revert ----------------------------------------------------------
+
+    def revert_projection(self, ctx, entry: dict[str, Any]) -> tuple[Decimal, bool]:
+        """(projected added daily spend, is_activation) for reverting ``entry``.
+
+        A revert is not free: reverting a budget CUT puts spend back. The
+        default is the inverse of what the original change projected -- a cut
+        of 10 reverts as +10 -- counted like an activation, since it restores a
+        state the account already had. Kinds whose original projected 0 but
+        whose revert resumes delivery (undoing a pause) override this.
+        """
+        try:
+            original = Decimal(str(entry.get("projected_daily_spend_delta") or "0"))
+        except (InvalidOperation, ValueError):
+            original = Decimal("0")
+        restored = max(-original, Decimal("0"))
+        return restored, restored > 0
+
+    def current_for_entry(self, ctx, entry: dict[str, Any]) -> str | None:
+        """Today's value for a ledger entry's field, as the entry stored it.
+
+        None means "cannot read it", and the revert skips the staleness check
+        rather than refusing every revert of a field nobody taught it about.
+        """
+        return None
+
+    def inverse(self, ctx, entry: dict[str, Any]):  # pragma: no cover
+        """The PlannedChange that puts ``entry['before']`` back."""
+        raise ValueError(
+            f"{entry.get('field')!r} on {entry.get('entity_type')} cannot be "
+            "reverted automatically. Change it back with the matching preview_* "
+            "tool instead."
+        )

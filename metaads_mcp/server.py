@@ -133,6 +133,7 @@ class ServerState:
     previews: PreviewStore
     read_client: Any = None
     write_client: Any = None
+    engine: Any = None
     default_account_id: str = ""
 
 

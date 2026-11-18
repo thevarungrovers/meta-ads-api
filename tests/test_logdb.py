@@ -236,3 +236,36 @@ def test_entry_ids_are_unique():
 
 def test_correlation_ids_are_unique():
     assert len({logdb.new_correlation_id() for _ in range(200)}) == 200
+
+
+def test_a_version_1_database_gains_the_two_new_columns(tmp_path):
+    """CREATE TABLE IF NOT EXISTS never alters an existing table, so an
+    operator's existing logs/meta-ads.db must be migrated, not recreated."""
+    import sqlite3
+
+    path = tmp_path / "old" / "meta-ads.db"
+    path.parent.mkdir()
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE changes (entry_id TEXT PRIMARY KEY, tool_call_id INTEGER, "
+        "at TEXT NOT NULL, pid INTEGER, tool TEXT NOT NULL, account_id TEXT, "
+        "entity_type TEXT, entity_id TEXT, entity_name TEXT, field TEXT, "
+        "before TEXT, after TEXT, projected_daily_spend_delta TEXT, ok INTEGER, "
+        "outcome_at TEXT, resource_name TEXT, error TEXT, reverts TEXT)"
+    )
+    old.execute(
+        "INSERT INTO changes(entry_id, at, tool, field, before, after, ok) "
+        "VALUES('legacy1', '2026-10-13T20:37:25+00:00', 'apply_x', 'status', 'A', 'B', 1)"
+    )
+    old.commit()
+    old.close()
+
+    logdb.reset_for_tests(path)
+    columns = {r[1] for r in logdb.connect().execute("PRAGMA table_info(changes)")}
+    assert {"inverse_json", "verification_json"} <= columns
+    entry = logdb.find_change("legacy1")
+    assert entry["inverse"] is None and entry["before"] == "A"
+    version = logdb.connect().execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()[0]
+    assert version == str(logdb.SCHEMA_VERSION) == "2"

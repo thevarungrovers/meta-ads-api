@@ -173,8 +173,18 @@ class Check:
     name: str
     ok: bool
     detail: str
+    #: Deliberately not applied to this change (it still passes). Rendered as
+    #: SKIP so a human reading the preview sees the bound was considered and
+    #: why it does not apply, rather than an OK that suggests it was checked.
+    skipped: bool = False
+    #: A finding worth reading that does not block (an ad check's WARN).
+    warn: bool = False
 
     def render(self) -> str:
+        if self.skipped:
+            return f"SKIP {self.name} ({self.detail})"
+        if self.ok and self.warn:
+            return f"WARN {self.name}: {self.detail}"
         return f"{'OK  ' if self.ok else 'FAIL'} {self.name}: {self.detail}"
 
 
@@ -190,13 +200,17 @@ class SessionCounters:
     def limits(self) -> Limits:
         return self._limits
 
-    def would_exceed(self, projected_delta: Decimal) -> str | None:
-        """Why this apply would break the session budget, or None."""
-        if self.applies + 1 > self._limits.max_applies_per_session:
+    def would_exceed(self, projected_delta: Decimal, weight: int = 1) -> str | None:
+        """Why this apply would break the session budget, or None.
+
+        ``weight`` is what the apply costs: 1 for most, 3 for a creation.
+        """
+        if self.applies + weight > self._limits.max_applies_per_session:
             return (
                 f"session apply limit reached: {self.applies} of "
-                f"{self._limits.max_applies_per_session} already used. Restart "
-                "the server deliberately if more are genuinely needed."
+                f"{self._limits.max_applies_per_session} already used"
+                + (f" and this one costs {weight}" if weight > 1 else "")
+                + ". Restart the server deliberately if more are genuinely needed."
             )
         total = self.projected_delta + max(projected_delta, Decimal("0"))
         if total > self._limits.max_projected_session_delta:
@@ -207,8 +221,8 @@ class SessionCounters:
             )
         return None
 
-    def record(self, projected_delta: Decimal) -> None:
-        self.applies += 1
+    def record(self, projected_delta: Decimal, weight: int = 1) -> None:
+        self.applies += weight
         self.projected_delta += max(projected_delta, Decimal("0"))
 
     def snapshot(self) -> dict[str, object]:

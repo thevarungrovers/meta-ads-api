@@ -53,6 +53,14 @@ STRATEGIES_USING_BID = frozenset({"LOWEST_COST_WITH_BID_CAP", "COST_CAP"})
 #: the field for both in the API, which is why the strategy has to be read.
 STRATEGIES_USING_TARGET = frozenset({"TARGET_COST", "LOWEST_COST_WITH_MIN_ROAS"})
 
+#: Every strategy under which a ``bid_amount`` write is honoured.
+STRATEGIES_USING_BID_AMOUNT = STRATEGIES_USING_BID | STRATEGIES_USING_TARGET
+
+
+def effective_bid_strategy(client: MutatingMetaAdsClient, row: dict[str, Any]) -> str:
+    """The bid strategy this ad set actually runs under."""
+    return row.get("bid_strategy") or "(not set)"
+
 
 def find(
     client: MutatingMetaAdsClient,
