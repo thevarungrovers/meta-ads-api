@@ -24,7 +24,7 @@ import datetime as dt
 import os
 import tomllib
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -501,7 +501,11 @@ def to_cap_currency(limits: Limits, amount: Decimal, currency: str | None) -> De
     rate = dict(limits.currency_rates).get(code)
     if rate is None:
         return None
-    return (amount * rate).quantize(Decimal("0.01"))
+    # Directed, never half-even: an increase is rounded UP so it is never
+    # under-counted against the totals, and a cut is rounded down.
+    converted = amount * rate
+    return converted.quantize(Decimal("0.01"),
+                              rounding=ROUND_CEILING if converted >= 0 else ROUND_FLOOR)
 
 
 def check_cap_currency(limits: Limits, currency: str | None) -> Check:

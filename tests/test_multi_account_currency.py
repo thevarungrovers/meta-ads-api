@@ -215,3 +215,17 @@ def test_a_tightening_revert_checks_the_currency(monkeypatch):
         tools["revert_change"](entry_id=result.entry_id)
     assert "USD" in str(caught.value) and "allowed" in str(caught.value)
     assert len(sim.applied) == applied
+
+
+def test_conversion_to_the_cap_currency_ceils_increases_and_floors_cuts():
+    """An increase is never under-counted: ROUND_CEILING for amounts >= 0 and
+    ROUND_FLOOR for negatives. Half-even rounding counted 0.005 as nothing."""
+    from metaads_mcp.guardrails import to_cap_currency
+
+    limits = Limits(**{**DEFAULTS, "allowed_currencies": ("CAD", "JPY"),
+                       "currency_rates": (("JPY", Decimal("0.005")),)})
+    assert to_cap_currency(limits, Decimal("1"), "JPY") == Decimal("0.01")
+    assert to_cap_currency(limits, Decimal("5"), "JPY") == Decimal("0.03")  # 0.025
+    assert to_cap_currency(limits, Decimal("0"), "JPY") == Decimal("0.00")
+    assert to_cap_currency(limits, Decimal("-1"), "JPY") == Decimal("-0.01")
+    assert to_cap_currency(limits, Decimal("-5"), "JPY") == Decimal("-0.03")
