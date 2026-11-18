@@ -231,6 +231,7 @@ def test_an_unlisted_copy_whose_name_is_refused_is_skipped_and_reported(monkeypa
     report = next(f for f in result.follow_ups if f["entity_id"] == copied)
     assert report["ok"] is False and "would read as agent" in report["error"], report
     assert report["entry_id"] is None, "a refused name is reported, never sent or ledgered"
+    assert any("follow-up" in w for w in result.warnings), result.warnings
 
 
 def test_an_unlisted_copy_counts_against_max_entities_per_call(monkeypatch):
@@ -244,3 +245,39 @@ def test_an_unlisted_copy_counts_against_max_entities_per_call(monkeypatch):
         tools["apply_duplicate_ad_set"](preview_token=preview.preview_token)
     assert "max_entities_per_call" in str(caught.value)
     assert not [c for c in s.created if c["edge"] == "copies"], "nothing was copied"
+
+
+def test_when_the_top_copys_rename_fails_the_result_names_it_as_it_is(monkeypatch):
+    """The result used to report the prefixed name the rename never set."""
+    from tests.test_mcp_write_path import ADSET_ID
+
+    s = _copy_sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "duplicate_ad_set", s, ad_set_id=ADSET_ID)
+    original = s._post
+
+    def post(segments, body):
+        if body.get("name", "").startswith("AB-max-") and "execution_options" not in body \
+                and len(segments) == 1 and segments[0].startswith("COPY") and "_" not in segments[0]:
+            from tests.fakes import FakeResponse
+
+            return FakeResponse({"error": {"message": "rename refused", "code": 100}}, status=400)
+        return original(segments, body)
+
+    s._post = post
+    result = tools["apply_duplicate_ad_set"](preview_token=preview.preview_token)
+    assert s.objects[result.entity_id]["name"] == "Broad 25-54 - Copy"
+    assert result.entity_name == "Broad 25-54 - Copy", "the live name, not the intended one"
+    top = next(f for f in result.follow_ups if f["entity_id"] == result.entity_id)
+    assert top["ok"] is False and top["live_name"] == "Broad 25-54 - Copy"
+    assert any("follow-up" in w and "1 of 2" in w for w in result.warnings), result.warnings
+
+
+def test_a_copy_whose_renames_all_land_carries_no_follow_up_warning(monkeypatch):
+    from tests.test_mcp_write_path import ADSET_ID
+
+    s = _copy_sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "duplicate_ad_set", s, ad_set_id=ADSET_ID)
+    result = tools["apply_duplicate_ad_set"](preview_token=preview.preview_token)
+    assert result.entity_name == "AB-max-Broad 25-54" and result.warnings == []

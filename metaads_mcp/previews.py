@@ -123,8 +123,14 @@ class ApplyResult(BaseModel):
         default=None,
         description=(
             "Writes made right after the main one (a copy's renames), each its "
-            "own ledger entry: {entry_id, entity_id, name, ok, error}."
+            "own ledger entry: {entry_id, entity_id, name, live_name, ok, error}. "
+            "name is what was asked for; live_name what the object is called now."
         ),
+    )
+    warnings: list[str] = Field(
+        default=[],
+        description="Something the human should know about how the apply ended "
+                    "(a follow-up write that failed).",
     )
 
 

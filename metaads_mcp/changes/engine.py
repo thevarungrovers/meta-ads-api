@@ -421,12 +421,15 @@ class Engine:
         own = kind.verify_target(payload, result, created) or (
             created[-1] if created else None
         )
+        entity_id = str(self._result_entity_id(entity, result, created))
+        entity_name, warnings = self._follow_up_outcome(entity["entity_name"], entity_id,
+                                                        follow_ups)
         return ApplyResult(
             applied=True,
             entry_id=entry_ids[0],
             entity_type=entity["entity_type"],
-            entity_id=str(self._result_entity_id(entity, result, created)),
-            entity_name=entity["entity_name"],
+            entity_id=entity_id,
+            entity_name=entity_name,
             field_name=entity["field_name"],
             before=payload["before"],
             after=payload["after"],
@@ -438,7 +441,29 @@ class Engine:
             projected_daily_spend_delta=f"{pending.projected_delta:.2f}",
             verification=verification,
             follow_ups=follow_ups,
+            warnings=warnings,
         )
+
+    @staticmethod
+    def _follow_up_outcome(name: str, entity_id: str,
+                           follow_ups: list[dict[str, Any]] | None) -> tuple[str, list[str]]:
+        """The name to report for the entity, and a warning per failed batch.
+
+        When the rename of the entity ITSELF failed, it is still called what
+        it was called before: reporting the intended name would describe
+        something that does not exist.
+        """
+        failed = [f for f in follow_ups or [] if not f.get("ok")]
+        if not failed:
+            return name, []
+        own = next((f for f in failed if f.get("entity_id") == entity_id), None)
+        if own is not None and own.get("live_name") is not None:
+            name = own["live_name"]
+        return name, [
+            f"{len(failed)} of {len(follow_ups)} follow-up write(s) failed or were skipped "
+            "(the main write landed): see follow_ups for each object's live name and the "
+            "reason; reconcile_ledger lists the names left behind"
+        ]
 
     def _send_follow_ups(self, kind: ChangeKind, payload, result, created, *, tool: str,
                          account, follows: str) -> list[dict[str, Any]] | None:
@@ -462,7 +487,7 @@ class Engine:
             if plan is None:
                 # Refused by the kind: reported, never sent, nothing ledgered.
                 out.append({"entry_id": None, "entity_id": str(item.entity_id),
-                            "name": item.after, "ok": False,
+                            "name": item.after, "live_name": item.before, "ok": False,
                             "error": str((item.inverse or {}).get("refused") or "not sent")})
                 continue
             entry_id = ledger.new_entry_id()
@@ -481,11 +506,12 @@ class Engine:
             except Exception as exc:  # noqa: BLE001 - recorded and reported
                 ledger.write_outcome(entry_id=entry_id, ok=False, error=str(exc))
                 out.append({"entry_id": entry_id, "entity_id": str(item.entity_id),
-                            "name": item.after, "ok": False, "error": str(exc).splitlines()[0]})
+                            "name": item.after, "live_name": item.before, "ok": False,
+                            "error": str(exc).splitlines()[0]})
                 continue
             ledger.write_outcome(entry_id=entry_id, ok=True, resource_name=str(item.entity_id))
             out.append({"entry_id": entry_id, "entity_id": str(item.entity_id),
-                        "name": item.after, "ok": True, "error": None})
+                        "name": item.after, "live_name": item.after, "ok": True, "error": None})
         return out
 
     @staticmethod
