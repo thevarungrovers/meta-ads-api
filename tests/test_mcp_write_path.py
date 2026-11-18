@@ -251,11 +251,12 @@ def test_the_session_apply_cap_stops_a_loop(monkeypatch):
     assert "session apply limit reached" in str(caught.value)
 
 
-def test_a_preview_over_the_per_day_delta_ceiling_is_blocked_at_preview_time(
+def test_an_activation_skips_the_per_change_limit_and_uses_the_daily_total(
     monkeypatch,
 ):
-    """Blocked at the preview, not at the apply, so the human sees WHY before
-    being asked to approve anything."""
+    """Decided 2026-11-18: activating counts against the DAILY total, not the
+    per-change limit -- otherwise a campaign whose budget is over that limit
+    could never be re-activated. A budget increase still needs both."""
     sim = make_sim()
     sim.objects[CAMPAIGN_ID]["status"] = "PAUSED"
     tight = Limits(**{**DEFAULTS, "max_projected_delta_per_day": Decimal("10.00")})
@@ -264,9 +265,17 @@ def test_a_preview_over_the_per_day_delta_ceiling_is_blocked_at_preview_time(
     preview = registrar.tools["preview_campaign_status"](
         campaign_id=CAMPAIGN_ID, new_status="ACTIVE"
     )
-    assert preview.blocked is True
-    failed = [c for c in preview.checks if c.startswith("FAIL")]
-    assert any("projected_delta_per_day" in c for c in failed)
+    assert preview.blocked is False
+    assert any(
+        c == "SKIP projected_delta_per_day (activation: counted against the daily total)"
+        for c in preview.checks
+    )
+    assert any("uses 250.00 of today's remaining" in c for c in preview.checks)
+
+    raise_it = registrar.tools["preview_campaign_daily_budget"](
+        campaign_id=CAMPAIGN_ID, new_daily_budget="300.00"
+    )
+    assert any(c.startswith("FAIL projected_delta_per_day") for c in raise_it.checks)
 
 
 def test_revert_counts_against_the_apply_cap(monkeypatch):

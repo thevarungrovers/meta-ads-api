@@ -10,6 +10,9 @@ from pydantic import Field
 from metaads_mcp.changes.base import APPLY_REVERSIBLE, APPLY_SPENDS, ChangeKind, Proposal, parse_money
 from metaads_mcp.changes.common import (
     StatusKind,
+    ad_activation_bound,
+    ad_set_activation_bound,
+    campaign_activation_bound,
     budget_checks,
     budget_warnings,
     money,
@@ -55,12 +58,14 @@ class CampaignStatus(StatusKind):
         before = row.get("status") or ""
         metrics = ctx.metrics_7d(str(row["id"]), "campaign")
 
+        bound_note = ""
         if wanted == "PAUSED":
             projected = Decimal("0")
         else:
-            # Re-activating can resume spend up to the budget.
-            budget = money(row, "daily_budget", currency)
-            projected = budget if budget is not None else ctx.spend_7d(metrics) / 7
+            # Re-activating can resume spend up to the budget -- the budget, not
+            # past spend: a campaign that spent nothing last week (an ABO one,
+            # a lifetime one, a new one) can still spend it all tomorrow.
+            projected, bound_note = campaign_activation_bound(ctx, row, currency)
 
         warnings = []
         if before == wanted:
@@ -70,11 +75,8 @@ class CampaignStatus(StatusKind):
                 "activating resumes delivery immediately for every ACTIVE ad "
                 "set and ad underneath"
             )
-        if wanted == "ACTIVE" and campaigns.budget_level(row) == "adset":
-            warnings.append(
-                "this campaign's budgets live on its ad sets, so the projected "
-                "delta below is an estimate from past spend, not a cap"
-            )
+        if wanted == "ACTIVE" and bound_note:
+            warnings.append(f"projected delta: {bound_note}")
         return Proposal(
             entity_type="campaign",
             entity_id=str(row["id"]),
@@ -92,11 +94,16 @@ class CampaignStatus(StatusKind):
             warnings=warnings,
             campaign_id=str(row["id"]),
             account_id=row.get("account_id"),
+            is_activation=wanted == "ACTIVE" and before != "ACTIVE",
             note=(
                 "Pausing cannot increase spend, so its projected delta is 0. "
-                "Activating is bounded by the budget, not by past spend."
+                "Activating is bounded by the budget, not by past spend, and is "
+                "counted against today's total rather than the per-change limit."
             ),
         )
+
+    def activation_bound(self, ctx, row, currency):
+        return campaign_activation_bound(ctx, row, currency)
 
 
 class AdSetStatus(StatusKind):
@@ -123,15 +130,17 @@ class AdSetStatus(StatusKind):
         before = row.get("status") or ""
         metrics = ctx.metrics_7d(str(row["id"]), "adset")
 
+        bound_note = ""
         if wanted == "PAUSED":
             projected = Decimal("0")
         else:
-            budget = money(row, "daily_budget", currency)
-            projected = budget if budget is not None else ctx.spend_7d(metrics) / 7
+            projected, bound_note = ad_set_activation_bound(ctx, row, currency)
 
         warnings = []
         if before == wanted:
             warnings.append(f"already {wanted}; applying would be a no-op")
+        if bound_note:
+            warnings.append(f"projected delta: {bound_note}")
         effective = row.get("effective_status")
         if wanted == "ACTIVE" and effective == "CAMPAIGN_PAUSED":
             warnings.append(
@@ -140,11 +149,6 @@ class AdSetStatus(StatusKind):
             )
         elif wanted == "ACTIVE":
             warnings.append("activating resumes delivery immediately")
-        if money(row, "daily_budget", currency) is None:
-            warnings.append(
-                "this ad set has no budget of its own -- its campaign holds it "
-                "-- so the projected delta is an estimate from past spend"
-            )
         return Proposal(
             entity_type="ad set",
             entity_id=str(row["id"]),
@@ -162,8 +166,12 @@ class AdSetStatus(StatusKind):
             warnings=warnings,
             campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),
+            is_activation=wanted == "ACTIVE" and before != "ACTIVE",
             note="Pausing cannot increase spend, so its projected delta is 0.",
         )
+
+    def activation_bound(self, ctx, row, currency):
+        return ad_set_activation_bound(ctx, row, currency)
 
 
 class AdStatus(StatusKind):
@@ -193,14 +201,20 @@ class AdStatus(StatusKind):
         row = ads.find(ctx.client, ad_id=ad_id)
         before = row.get("status") or ""
         metrics = ctx.metrics_7d(str(row["id"]), "ad")
-        # Pausing one ad cannot raise spend. Activating one cannot either, in
-        # any amount this can bound: the ad set's budget is the cap, and it is
-        # already being spent by the ad's siblings.
-        projected = Decimal("0")
+        # Pausing one ad cannot raise spend. Activating one moves nothing while
+        # siblings already spend the ad set's budget -- but as the ad set's
+        # ONLY active ad it restarts that ad set's whole spend.
+        bound_note = ""
+        if wanted == "PAUSED":
+            projected = Decimal("0")
+        else:
+            projected, bound_note = ad_activation_bound(ctx, row, ctx.currency())
 
         warnings = []
         if before == wanted:
             warnings.append(f"already {wanted}; applying would be a no-op")
+        if bound_note:
+            warnings.append(f"projected delta: {bound_note}")
         effective = row.get("effective_status")
         if wanted == "ACTIVE" and effective in ("CAMPAIGN_PAUSED", "ADSET_PAUSED"):
             warnings.append(
@@ -234,12 +248,16 @@ class AdStatus(StatusKind):
             warnings=warnings,
             campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),
+            is_activation=wanted == "ACTIVE" and before != "ACTIVE" and projected > 0,
             note=(
-                "The projected delta is 0 in both directions: the ad set's "
-                "budget is the cap, and it does not move when one ad inside it "
-                "starts or stops. What changes is which creative spends it."
+                "Pausing projects 0. Activating projects 0 while other ACTIVE ads "
+                "already spend the ad set's budget, and the ad set's budget when "
+                "this would be its only active ad."
             ),
         )
+
+    def activation_bound(self, ctx, row, currency):
+        return ad_activation_bound(ctx, row, currency)
 
 
 # ---------------------------------------------------------------------------

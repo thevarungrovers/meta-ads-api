@@ -149,8 +149,27 @@ class Engine:
         checks.extend(proposal.checks)
         if proposal.batch:
             checks.append(check_count(ctx.limits, len(items)))
-        checks.append(check_projected_delta(ctx.limits, max(proposal.projected, Decimal("0"))))
-        checks.append(ctx.daily.check(proposal.projected))
+        if proposal.is_activation:
+            # Activating resumes spend up to the whole budget, which on any
+            # real campaign is over the per-change limit -- so the limit does
+            # not apply, and the activation is counted in full against the
+            # DAILY total (and the session total) instead.
+            checks.append(Check(
+                "projected_delta_per_day", True,
+                "activation: counted against the daily total", skipped=True,
+            ))
+        else:
+            checks.append(
+                check_projected_delta(ctx.limits, max(proposal.projected, Decimal("0")))
+            )
+        daily_total = ctx.daily.check(proposal.projected)
+        checks.append(daily_total)
+        activation_warnings = []
+        if proposal.is_activation and proposal.projected > 0:
+            activation_warnings.append(
+                f"activating resumes spend up to {proposal.projected:.2f}/day; it "
+                f"{daily_total.detail}"
+            )
 
         payload = dict(proposal.payload)
         payload["before"] = proposal.before
@@ -207,7 +226,11 @@ class Engine:
             projected_daily_spend_delta=f"{proposal.projected:.2f}",
             checks=render_checks(checks),
             blocked=blocked,
-            warnings=[*proposal.warnings, *ctx.cap_warnings(proposal.projected, kind.weight)],
+            warnings=[
+                *proposal.warnings,
+                *activation_warnings,
+                *ctx.cap_warnings(proposal.projected, kind.weight),
+            ],
             note=proposal.note,
             items=(
                 [{k: v for k, v in asdict(i).items() if k != "inverse"} for i in items]

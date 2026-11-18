@@ -94,3 +94,111 @@ class StatusKind(ChangeKind):
         return self.module.plan_set_status(
             ctx.client, status=entry["before"], **{self.id_arg: entry["entity_id"]}
         )
+
+    def activation_bound(self, ctx, row: dict[str, Any], currency: str):  # pragma: no cover
+        raise NotImplementedError
+
+    def revert_projection(self, ctx, entry: dict[str, Any]):
+        """Undoing a PAUSE resumes delivery: it projects what activating would.
+
+        Not the inverse of the original's 0. Counted like any activation --
+        against the daily and session totals, exempt from the per-change limit.
+        """
+        if entry.get("before") != "ACTIVE":
+            return Decimal("0"), False
+        row = self.find(ctx, entry["entity_id"])
+        bound, _ = self.activation_bound(ctx, row, ctx.currency())
+        return bound, bound > 0
+
+
+# ---------------------------------------------------------------------------
+# What activating something can spend
+# ---------------------------------------------------------------------------
+
+
+def _remaining_days(row: dict[str, Any], end_field: str) -> Decimal | None:
+    import datetime as dt
+
+    raw = row.get(end_field)
+    if not raw:
+        return None
+    try:
+        end = dt.datetime.fromisoformat(str(raw).replace("+0000", "+00:00"))
+    except ValueError:
+        return None
+    seconds = (end - dt.datetime.now(dt.timezone.utc)).total_seconds()
+    return max(Decimal(str(seconds)) / Decimal(86400), Decimal("1"))
+
+
+def daily_bound(row: dict[str, Any], currency: str, end_field: str) -> tuple[Decimal | None, str]:
+    """An object's own daily spend ceiling: its daily budget, or its lifetime
+    budget spread over the days it has left."""
+    daily = money(row, "daily_budget", currency)
+    if daily is not None:
+        return daily, "its daily budget"
+    lifetime = money(row, "lifetime_budget", currency)
+    if lifetime is not None:
+        remaining = money(row, "budget_remaining", currency)
+        days = _remaining_days(row, end_field)
+        pot = remaining if remaining is not None else lifetime
+        if days:
+            return (pot / days).quantize(Decimal("0.01")), "its lifetime budget left / days left"
+        return pot, "its whole remaining lifetime budget (no end date)"
+    return None, ""
+
+
+def campaign_activation_bound(ctx, campaign: dict[str, Any], currency: str) -> tuple[Decimal, str]:
+    """Upper bound on daily spend a campaign can resume."""
+    from metaads_reporting.write import adsets as adset_writes
+
+    own, why = daily_bound(campaign, currency, "stop_time")
+    if own is not None:
+        return own, f"upper bound: {why}"
+    total = Decimal("0")
+    counted = 0
+    for child in adset_writes.search(ctx.client, None, campaign_id=str(campaign["id"]), limit=200):
+        if (child.get("status") or "") != "ACTIVE":
+            continue
+        bound, _ = daily_bound(child, currency, "end_time")
+        if bound is not None:
+            total += bound
+            counted += 1
+    if counted:
+        return total, f"upper bound: the summed budgets of its {counted} ACTIVE ad set(s)"
+    return ctx.limits.max_daily_budget, "no budget readable; bounded by max_daily_budget"
+
+
+def ad_set_activation_bound(ctx, adset: dict[str, Any], currency: str) -> tuple[Decimal, str]:
+    """Upper bound on daily spend an ad set can resume."""
+    from metaads_reporting.write import campaigns as campaign_writes
+
+    own, why = daily_bound(adset, currency, "end_time")
+    if own is not None:
+        return own, f"upper bound: {why}"
+    try:
+        campaign = campaign_writes.find(ctx.client, campaign_id=str(adset.get("campaign_id")))
+        parent, why = daily_bound(campaign, currency, "stop_time")
+        if parent is not None:
+            return parent, f"upper bound: the campaign budget it shares ({why})"
+    except Exception:  # noqa: BLE001 - fall through to the configured ceiling
+        pass
+    return ctx.limits.max_daily_budget, "no budget readable; bounded by max_daily_budget"
+
+
+def ad_activation_bound(ctx, ad: dict[str, Any], currency: str) -> tuple[Decimal, str]:
+    """An ad restarts its ad set's spend only when it is the only active one."""
+    from metaads_reporting.write import ads as ad_writes
+    from metaads_reporting.write import adsets as adset_writes
+
+    siblings = [
+        a for a in ad_writes.search(ctx.client, None, ad_set_id=str(ad.get("adset_id")), limit=200)
+        if str(a.get("id")) != str(ad.get("id")) and (a.get("status") or "") == "ACTIVE"
+    ]
+    if siblings:
+        return Decimal("0"), (
+            f"{len(siblings)} other ACTIVE ad(s) already spend the ad set's budget, "
+            "which does not move"
+        )
+    adset = adset_writes.find(ctx.client, ad_set_id=str(ad.get("adset_id")))
+    bound, why = ad_set_activation_bound(ctx, adset, currency)
+    return bound, f"this would be the ad set's only ACTIVE ad, restarting its spend ({why})"

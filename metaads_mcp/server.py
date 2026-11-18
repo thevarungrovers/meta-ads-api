@@ -173,7 +173,37 @@ tools_read.register(_registrar, STATE)
 tools_write.register(_registrar, STATE)
 
 
+def budget_cap_warnings(state: ServerState) -> list[str]:
+    """Campaigns whose budget is over max_projected_delta_per_day_total.
+
+    An activation is counted in full against the daily total, so such a
+    campaign could never be re-activated through this server. Said at startup
+    rather than discovered at the worst moment.
+    """
+    from metaads_mcp.changes.common import campaign_activation_bound
+    from metaads_reporting.write import campaigns
+
+    ctx = state.engine.ctx
+    currency = ctx.currency()
+    ceiling = state.limits.max_projected_delta_per_day_total
+    found = []
+    for row in campaigns.search(ctx.client, None, limit=200):
+        bound, why = campaign_activation_bound(ctx, row, currency)
+        if bound > ceiling:
+            found.append(
+                f"campaign {row.get('id')} can spend {bound:.2f}/day ({why}), over "
+                f"max_projected_delta_per_day_total = {ceiling}; it could not be "
+                "re-activated here. Raise the total in guardrails.toml if that is wrong."
+            )
+    return found
+
+
 def main() -> None:
+    try:
+        for warning in budget_cap_warnings(STATE):
+            print(f"meta-ads: WARNING {warning}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - a startup check must not stop the server
+        print(f"meta-ads: could not check budgets against the daily cap: {exc}", file=sys.stderr)
     mcp.run("stdio")
 
 
