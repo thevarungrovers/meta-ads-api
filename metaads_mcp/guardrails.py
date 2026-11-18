@@ -308,10 +308,16 @@ def local_midnight_utc(now: dt.datetime | None = None) -> str:
     >>> local_midnight_utc(dt.datetime(2026, 11, 18, 21, 0, tzinfo=dt.timezone(dt.timedelta(hours=-5))))
     '2026-11-18T05:00:00+00:00'
     """
-    local_now = (now or dt.datetime.now().astimezone())
-    if local_now.tzinfo is None:
-        local_now = local_now.astimezone()
-    midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if now is None or now.tzinfo is None:
+        # The SYSTEM zone: midnight as a naive local time, then astimezone(),
+        # which asks the zone rules for the offset AT MIDNIGHT. Taking the
+        # offset of "now" instead is an hour off on a DST-change day.
+        local = now or dt.datetime.now()
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone()
+    else:
+        # A zone-aware ``now`` (a ZoneInfo) recomputes its offset for the
+        # replaced time on its own; a fixed offset is the caller's choice.
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return midnight.astimezone(dt.timezone.utc).isoformat()
 
 

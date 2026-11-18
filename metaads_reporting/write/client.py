@@ -157,16 +157,16 @@ class MutationResult:
             return True
         return bool(self.response.get("id") or _copied_id(self.response))
 
+    def __str__(self) -> str:
+        verb = "validated" if self.validated_only else "APPLIED"
+        return f"{verb}: {self.node_id or '(new)'}"
+
 
 def _copied_id(response: dict[str, Any]) -> str:
     for key in ("copied_campaign_id", "copied_adset_id", "copied_ad_id"):
         if response.get(key):
             return str(response[key])
     return ""
-
-    def __str__(self) -> str:
-        verb = "validated" if self.validated_only else "APPLIED"
-        return f"{verb}: {self.node_id or '(new)'}"
 
 
 def check_writable(entity_type: str, payload: dict[str, Any]) -> None:

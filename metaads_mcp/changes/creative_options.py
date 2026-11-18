@@ -408,6 +408,9 @@ class ReplaceAdCreative(UpdateAdCopy):
         return plan
 
     def approved_for(self, ctx, payload, plan):
+        # The creative AS PREVIEWED (older tokens carry none: read it then).
+        if payload.get("approved") is not None:
+            return payload["approved"]
         from metaads_mcp import verify
 
         return verify.approved_from_spec(ctx.read.node(str(payload["creative_id"]), verify.CREATIVE_FIELDS))
@@ -426,15 +429,18 @@ class ReplaceAdCreative(UpdateAdCopy):
         The preview fetches that creative's previews on the ad set's placements
         and runs the ad checks. Revert points the ad back at its previous creative.
         """
+        from metaads_mcp import verify
+
         payload = {"ad_id": ad_id, "creative_id": str(creative_id)}
         plan = self._plan(ctx, payload)
         row = ads.find(ctx.client, ad_id=ad_id)
         before, after = describe(plan)
+        approved = verify.approved_from_spec(ctx.client.node(str(creative_id), verify.CREATIVE_FIELDS))
         return Proposal(
             entity_type="ad", entity_id=str(row["id"]), entity_name=row.get("name") or "",
             path=f"ad set {row.get('adset_id')} > {row.get('name')}", field_name="creative",
             before=before, after=after, checks=[], projected=Decimal("0"),
-            payload={"ad_id": str(row["id"]), "creative_id": str(creative_id)},
+            payload={"ad_id": str(row["id"]), "creative_id": str(creative_id), "approved": approved},
             status=row.get("status"), effective_status=row.get("effective_status"),
             warnings=list(plan.warnings), campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),

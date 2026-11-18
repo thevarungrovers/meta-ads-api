@@ -59,8 +59,13 @@ class CreateAd(ChangeKind):
         preview fetches the creative's previews on the ad set's placements and
         runs the ad checks. Activating it is a separate preview_ad_status.
         """
+        from metaads_mcp import verify
+
         adset = adsets.find(ctx.client, ad_set_id=ad_set_id)
-        ctx.client.node(str(creative_id), ("id",))
+        # What the human approves is the creative AS PREVIEWED: kept in the
+        # payload, so the after-apply diff compares the live ad against it
+        # rather than against a fresh read of the same creative.
+        approved = verify.approved_from_spec(ctx.client.node(str(creative_id), verify.CREATIVE_FIELDS))
         if not name.strip():
             raise ValueError("The ad needs a name.")
         return Proposal(
@@ -69,7 +74,8 @@ class CreateAd(ChangeKind):
             field_name="created", before=NOTHING,
             after=f"PAUSED ad using creative {creative_id}",
             checks=[], projected=Decimal("0"),
-            payload={"adset_id": str(adset["id"]), "creative_id": str(creative_id), "name": name},
+            payload={"adset_id": str(adset["id"]), "creative_id": str(creative_id), "name": name,
+                     "approved": approved},
             campaign_id=str(adset.get("campaign_id")), account_id=adset.get("account_id"),
             warnings=["the ad is created PAUSED; activating it is a separate, previewed step"],
             note="A PAUSED ad spends nothing; projected 0.",
@@ -88,9 +94,7 @@ class CreateAd(ChangeKind):
         )
 
     def approved_for(self, ctx, payload, plan):
-        from metaads_mcp import verify
-
-        return verify.approved_from_spec(ctx.read.node(payload["creative_id"], verify.CREATIVE_FIELDS))
+        return payload["approved"]
 
     def verify_target(self, payload, result, created):
         return result.node_id or None

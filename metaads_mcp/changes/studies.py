@@ -82,6 +82,7 @@ class CreateAbTest(ChangeKind):
         total = sum(int(c.get("treatment_percentage") or 0) for c in cells)
         checks = [Check("cell_split", total == 100, f"treatment percentages add up to {total}")]
         out_cells, signatures, campaign_ids = [], [], []
+        accounts: list[tuple[str, Any]] = []
         for index, cell in enumerate(cells):
             adset_ids = [str(a) for a in cell.get("ad_set_ids") or []]
             campaign_cell = [str(c) for c in cell.get("campaign_ids") or []]
@@ -95,13 +96,15 @@ class CreateAbTest(ChangeKind):
                 for a, s in zip(adset_ids, sig):
                     checks.append(Check(f"cell_paused[{a}]", s["status"] == "PAUSED",
                                         f"ad set {a} is {s['status']} (cells start PAUSED)"))
-                    row = ctx.read.node(a, ("id", "campaign_id"))
+                    row = ctx.read.node(a, ("id", "campaign_id", "account_id"))
                     campaign_ids.append(str(row.get("campaign_id")))
+                    accounts.append((f"ad set {a}", row.get("account_id")))
                 signatures.append({k: canonical([s[k] for s in sig]) for k in ("audience", "placement", "creative")})
             else:
                 entry["campaigns"] = campaign_cell
                 for c in campaign_cell:
-                    row = ctx.read.node(c, ("id", "status"))
+                    row = ctx.read.node(c, ("id", "status", "account_id"))
+                    accounts.append((f"campaign {c}", row.get("account_id")))
                     checks.append(Check(f"cell_paused[{c}]", row.get("status") == "PAUSED",
                                         f"campaign {c} is {row.get('status')} (cells start PAUSED)"))
                     campaign_ids.append(c)
@@ -123,12 +126,27 @@ class CreateAbTest(ChangeKind):
             from metaads_mcp.guardrails import check_campaign_in_scope
 
             checks.append(check_campaign_in_scope(ctx.limits, campaign))
+        # Every cell is scope-checked by ITS account, and must sit in the
+        # account the study is created in: the engine's own check sees only
+        # that one.
+        from metaads_mcp.guardrails import check_account_in_scope
+
+        study_account = ctx.target_account()
+        for label, account in accounts:
+            account = str(account or "").replace("act_", "")
+            scoped = check_account_in_scope(ctx.limits, account or "(unknown)", ctx.default_account)
+            scoped.name = f"account_in_scope[{label}]"
+            checks.append(scoped)
+            checks.append(Check(f"cell_account[{label}]", account == study_account,
+                                f"{label} is in account {account or '(unknown)'}; the study "
+                                f"is created in {study_account}"))
         return Proposal(
             entity_type="ad study", entity_id="(new)", entity_name=name,
             path=f"account {ctx.default_account}", field_name="created", before=NOTHING,
             after=(f"SPLIT_TEST on {variable} | {start.isoformat()} to {end.isoformat()} | "
                    + " / ".join(f"{c['name']} {c['treatment_percentage']}%" for c in out_cells)),
             checks=checks, projected=Decimal("0"), payload={"create": create},
+            account_id=ctx.target_account(),
             warnings=[*warnings, "the cells spend only once activated with the status tools"],
             note="Creating a study spends nothing; projected 0.",
         )

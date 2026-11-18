@@ -128,7 +128,7 @@ class _AdSetKind(NodeFieldKind):
     apply_annotations = APPLY_SPENDS
 
     def _proposal(self, ctx, row, *, before, after, fields, checks, projected,
-                  warnings=(), note=None, tightens=False) -> Proposal:
+                  warnings=(), note=None, tightens=False, is_activation=False) -> Proposal:
         # `after` is what a re-read will render once the change lands -- the
         # string revert_change and reconcile_ledger compare against -- so it is
         # rendered from the row with the new fields, never hand-written.
@@ -151,6 +151,7 @@ class _AdSetKind(NodeFieldKind):
             campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),
             tightens=tightens,
+            is_activation=is_activation,
         ).with_inverse({"previous": previous_values(row, fields)})
 
 
@@ -161,7 +162,7 @@ class _CampaignKind(NodeFieldKind):
     apply_annotations = APPLY_SPENDS
 
     def _proposal(self, ctx, row, *, before, after, fields, checks, projected,
-                  warnings=(), note=None, tightens=False) -> Proposal:
+                  warnings=(), note=None, tightens=False, is_activation=False) -> Proposal:
         after = self.render(ctx, {**row, **fields})
         return Proposal(
             entity_type="campaign",
@@ -181,6 +182,7 @@ class _CampaignKind(NodeFieldKind):
             campaign_id=str(row["id"]),
             account_id=row.get("account_id"),
             tightens=tightens,
+            is_activation=is_activation,
         ).with_inverse({"previous": previous_values(row, fields)})
 
 
@@ -490,12 +492,47 @@ def _schedule(kind, ctx, row, end_value: str | None, start_value: str | None,
                                    end_field) or Decimal("1")
         projected = (pot / new_days - pot / old_days).quantize(Decimal("0.01"))
         warnings.append(f"the lifetime budget is re-paced over {new_days:.1f} day(s)")
+    extends = False
+    if not row.get("lifetime_budget") and _adds_days(row, fields, end_field):
+        # A DAILY budget spends that budget on every day the flight runs: the
+        # added days are spend that would not have happened. Counted like an
+        # activation -- the unused daily headroom, exempt from the per-change
+        # limit and counted in the daily and session totals.
+        from metaads_mcp.changes.common import unused_headroom
+
+        level = "ad set" if end_field == "end_time" else "campaign"
+        projected = unused_headroom(ctx, {"entity_type": level, "entity_id": row["id"]})
+        extends = projected > 0
+        warnings.append(
+            f"this adds days to a daily-budget flight: up to {projected:.2f}/day more "
+            "(the unused daily budget) on each added day"
+        )
     after = " | ".join(f"{k} {v}" for k, v in sorted(fields.items()))
     return kind._proposal(
         ctx, row, before=kind.render(ctx, row), after=after, fields=fields,
-        checks=[], projected=projected, warnings=warnings,
-        note="On a daily budget the schedule moves no daily spend; on a lifetime budget it re-paces it.",
+        checks=[], projected=projected, warnings=warnings, is_activation=extends,
+        note=("On a daily budget, added days spend the daily budget again; on a lifetime "
+              "budget the schedule re-paces it."),
     )
+
+
+def _adds_days(row: dict[str, Any], fields: dict[str, Any], end_field: str) -> bool:
+    """Whether the new schedule runs on days the old one did not."""
+    def when(raw):
+        if not raw:
+            return None
+        value = dt.datetime.fromisoformat(_iso(raw))
+        return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+
+    try:
+        old_end, new_end = when(row.get(end_field)), when(fields.get(end_field))
+        old_start, new_start = when(row.get("start_time")), when(fields.get("start_time"))
+    except ValueError:
+        return True  # unreadable: assume it does, and count it
+    if new_end is not None and (old_end is None or new_end > old_end):
+        # No old end means it already runs forever: a new end SHORTENS it.
+        return old_end is not None
+    return new_start is not None and old_start is not None and new_start < old_start
 
 
 class AdSetSchedule(_AdSetKind):
