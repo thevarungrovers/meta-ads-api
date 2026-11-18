@@ -19,11 +19,16 @@ from typing import Any
 
 from .client import MutatingMetaAdsClient, MutationError, check_status
 from ..graph import GraphAPIError
-from .lookup import Candidate, NotFound, is_not_found, match_by_name
+from .lookup import Candidate, NotFound, edge_search, is_not_found, match_by_name
 from .plan import FieldChange, PlannedChange
 
 ENTITY = "ad"
 EDGE = "ads"
+
+#: What a search lists by default: everything that can still be changed.
+#: ARCHIVED and DELETED are left out -- they cannot be changed, and including
+#: them makes every name lookup ambiguous against things that no longer exist.
+DEFAULT_STATUSES = ["ACTIVE", "PAUSED", "CAMPAIGN_PAUSED", "ADSET_PAUSED", "PENDING_REVIEW", "DISAPPROVED", "WITH_ISSUES", "IN_PROCESS"]
 
 FIELDS = (
     "id",
@@ -90,6 +95,7 @@ def search(
     account_id: str | None = None,
     limit: int = 200,
     max_pages: int = 10,
+    status_filter: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Ads in the account, one campaign or one ad set, narrowed by name.
 
@@ -106,24 +112,11 @@ def search(
     else:
         parent = account_path(client.resolve_account_id(account_id))
 
-    rows = client.read.edge(
-        parent,
-        EDGE,
-        FIELDS,
-        limit=limit,
-        # `limit` here is what the CALLER wants back, so it is the
-        # intentional cap too. Passing it only as the page size walks the
-        # whole account and trips the runaway guard on a large one.
-        max_items=limit,
-        max_pages=max_pages,
-        effective_status=(
-            '["ACTIVE","PAUSED","CAMPAIGN_PAUSED","ADSET_PAUSED",'
-            '"PENDING_REVIEW","DISAPPROVED","WITH_ISSUES"]'
-        ),
+    rows, _ = edge_search(
+        client, parent, EDGE, FIELDS,
+        needle=needle, limit=limit, max_pages=max_pages,
+        statuses=list(status_filter or DEFAULT_STATUSES),
     )
-    if needle:
-        target = needle.casefold()
-        rows = [r for r in rows if target in (r.get("name") or "").casefold()]
     return rows
 
 

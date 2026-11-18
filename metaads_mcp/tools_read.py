@@ -7,7 +7,7 @@ from here regardless of what is asked for.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.types import ToolAnnotations
 from pydantic import Field
@@ -17,6 +17,19 @@ from metaads_reporting.client import ReadOnlyMetaAdsClient
 from metaads_reporting.insights import InsightsError, name_contains, summarise
 from metaads_reporting.reports import get_report, report_names
 
+
+#: effective_status values a find_* may filter on -- what is ACTUALLY
+#: happening, parents and review folded in, not what somebody set.
+EffectiveStatus = Literal[
+    "ACTIVE",
+    "PAUSED",
+    "CAMPAIGN_PAUSED",
+    "ADSET_PAUSED",
+    "IN_PROCESS",
+    "WITH_ISSUES",
+    "PENDING_REVIEW",
+    "DISAPPROVED",
+]
 
 # ALL FOUR HINTS, ALWAYS, ON EVERY TOOL. A hint left unset is published as
 # absent, and a client that cannot see one falls back on the spec's default --
@@ -104,6 +117,28 @@ def register(mcp, state) -> None:
         summary["token"] = token_health(client)
         return summary
 
+    def found(rows, truncated, render, limit) -> dict[str, Any]:
+        return {
+            "rows": [render(r) for r in rows[:limit]],
+            "count": min(len(rows), limit),
+            "truncated": truncated,
+            "rate_limit": headroom(),
+        }
+
+    def _search(module, parent, needle, limit, status):
+        from metaads_reporting.write.lookup import edge_search
+
+        return edge_search(
+            _as_write_shim(client), parent, module.EDGE, module.FIELDS,
+            needle=needle, limit=limit,
+            statuses=[status] if status else list(module.DEFAULT_STATUSES),
+        )
+
+    def _account() -> str:
+        from metaads_reporting.account_id import account_path
+
+        return account_path(client.resolve_account_id())
+
     @mcp.tool(title="Find campaigns by name", annotations=READ_ONLY)
     @refusals_reach_the_caller
     def find_campaigns(
@@ -112,10 +147,11 @@ def register(mcp, state) -> None:
             Field(description="Case-insensitive substring of the campaign name"),
         ] = None,
         status: Annotated[
-            str | None, Field(description="ACTIVE or PAUSED")
+            EffectiveStatus | None,
+            Field(description="Filter on effective_status, e.g. ACTIVE"),
         ] = None,
         limit: Annotated[int, Field(description="Max rows", ge=1, le=200)] = 50,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Campaigns with their ids, status, objective and budget.
 
         Start here. Every write tool needs an id from this.
@@ -124,31 +160,28 @@ def register(mcp, state) -> None:
         the budget and its ad sets do not (Advantage campaign budget); `adset`
         means the opposite. Changing a budget at the wrong level is refused,
         and which level a given campaign uses is not guessable.
+
+        The name match covers the whole account, not just the first page.
+        `truncated: true` means more matched than `limit` returned -- narrow
+        the search or raise the limit. `status` filters on effective_status,
+        which is what is actually delivering.
         """
         from metaads_reporting.write import campaigns as campaign_writes
 
         currency = client.currency()
-        rows = campaign_writes.search(
-            _as_write_shim(client), name_contains_text, limit=limit
-        )
-        if status:
-            wanted = status.upper()
-            rows = [r for r in rows if (r.get("status") or "").upper() == wanted]
-        return [
-            {
-                "campaign_id": str(r.get("id")),
-                "name": r.get("name"),
-                "status": r.get("status"),
-                "effective_status": r.get("effective_status"),
-                "objective": r.get("objective"),
-                "bid_strategy": r.get("bid_strategy"),
-                "budget_level": campaign_writes.budget_level(r),
-                "daily_budget": money(r.get("daily_budget"), currency),
-                "lifetime_budget": money(r.get("lifetime_budget"), currency),
-                "currency": currency,
-            }
-            for r in rows[:limit]
-        ]
+        rows, truncated = _search(campaign_writes, _account(), name_contains_text, limit, status)
+        return found(rows, truncated, lambda r: {
+            "campaign_id": str(r.get("id")),
+            "name": r.get("name"),
+            "status": r.get("status"),
+            "effective_status": r.get("effective_status"),
+            "objective": r.get("objective"),
+            "bid_strategy": r.get("bid_strategy"),
+            "budget_level": campaign_writes.budget_level(r),
+            "daily_budget": money(r.get("daily_budget"), currency),
+            "lifetime_budget": money(r.get("lifetime_budget"), currency),
+            "currency": currency,
+        }, limit)
 
     @mcp.tool(title="Find ad sets by name", annotations=READ_ONLY)
     @refusals_reach_the_caller
@@ -157,8 +190,11 @@ def register(mcp, state) -> None:
         campaign_id: Annotated[
             str | None, Field(description="Restrict to one campaign")
         ] = None,
+        status: Annotated[
+            EffectiveStatus | None, Field(description="Filter on effective_status")
+        ] = None,
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Ad sets with their ids, status, budget, bid and parent campaign.
 
         Ad set names are unique only WITHIN a campaign -- "Broad" and
@@ -172,29 +208,22 @@ def register(mcp, state) -> None:
         from metaads_reporting.write import adsets as adset_writes
 
         currency = client.currency()
-        rows = adset_writes.search(
-            _as_write_shim(client),
-            name_contains_text,
-            campaign_id=campaign_id,
-            limit=limit,
-        )
-        return [
-            {
-                "ad_set_id": str(r.get("id")),
-                "name": r.get("name"),
-                "status": r.get("status"),
-                "effective_status": r.get("effective_status"),
-                "campaign_id": str(r.get("campaign_id")),
-                "daily_budget": money(r.get("daily_budget"), currency),
-                "lifetime_budget": money(r.get("lifetime_budget"), currency),
-                "bid_amount": money(r.get("bid_amount"), currency),
-                "bid_strategy": r.get("bid_strategy"),
-                "optimization_goal": r.get("optimization_goal"),
-                "billing_event": r.get("billing_event"),
-                "currency": currency,
-            }
-            for r in rows[:limit]
-        ]
+        parent = str(campaign_id) if campaign_id else _account()
+        rows, truncated = _search(adset_writes, parent, name_contains_text, limit, status)
+        return found(rows, truncated, lambda r: {
+            "ad_set_id": str(r.get("id")),
+            "name": r.get("name"),
+            "status": r.get("status"),
+            "effective_status": r.get("effective_status"),
+            "campaign_id": str(r.get("campaign_id")),
+            "daily_budget": money(r.get("daily_budget"), currency),
+            "lifetime_budget": money(r.get("lifetime_budget"), currency),
+            "bid_amount": money(r.get("bid_amount"), currency),
+            "bid_strategy": r.get("bid_strategy"),
+            "optimization_goal": r.get("optimization_goal"),
+            "billing_event": r.get("billing_event"),
+            "currency": currency,
+        }, limit)
 
     @mcp.tool(title="Find ads by name", annotations=READ_ONLY)
     @refusals_reach_the_caller
@@ -204,8 +233,11 @@ def register(mcp, state) -> None:
         campaign_id: Annotated[
             str | None, Field(description="Restrict to one campaign")
         ] = None,
+        status: Annotated[
+            EffectiveStatus | None, Field(description="Filter on effective_status")
+        ] = None,
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Ads with their ids, status and parents.
 
         `effective_status` is the field to read, not `status`. `DISAPPROVED`
@@ -214,25 +246,17 @@ def register(mcp, state) -> None:
         """
         from metaads_reporting.write import ads as ad_writes
 
-        rows = ad_writes.search(
-            _as_write_shim(client),
-            name_contains_text,
-            ad_set_id=ad_set_id,
-            campaign_id=campaign_id,
-            limit=limit,
-        )
-        return [
-            {
-                "ad_id": str(r.get("id")),
-                "name": r.get("name"),
-                "status": r.get("status"),
-                "effective_status": r.get("effective_status"),
-                "ad_set_id": str(r.get("adset_id")),
-                "campaign_id": str(r.get("campaign_id")),
-                "updated_time": r.get("updated_time"),
-            }
-            for r in rows[:limit]
-        ]
+        parent = str(ad_set_id or campaign_id or "") or _account()
+        rows, truncated = _search(ad_writes, parent, name_contains_text, limit, status)
+        return found(rows, truncated, lambda r: {
+            "ad_id": str(r.get("id")),
+            "name": r.get("name"),
+            "status": r.get("status"),
+            "effective_status": r.get("effective_status"),
+            "ad_set_id": str(r.get("adset_id")),
+            "campaign_id": str(r.get("campaign_id")),
+            "updated_time": r.get("updated_time"),
+        }, limit)
 
     @mcp.tool(title="Run a performance report", annotations=READ_ONLY)
     @refusals_reach_the_caller
