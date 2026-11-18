@@ -414,22 +414,27 @@ class AdSetTargeting(NodeFieldKind):
                           {"targeting": spec}, payload["before"], payload["after"])
 
     @staticmethod
-    def _owned(entry) -> tuple[list[str], dict[str, Any], dict[str, Any] | None]:
+    def _owned(entry, live: dict[str, Any] | None = None
+               ) -> tuple[list[str], dict[str, Any], dict[str, Any] | None]:
         """(dimensions the entry's change owns, their previous values, what it sent).
 
         A row written before rows named their dimensions holds the WHOLE
-        previous spec and nothing it sent: it owns every key but the
-        placements and devices, which are left as they are now.
+        previous spec and nothing it sent. It owns every key in the previous
+        spec OR the live one, except the placements and devices (left as they
+        are now): a key the original edit ADDED -- an audience, an exclusion,
+        a flexible_spec, locales -- is in the live spec only, and owning only
+        the previous keys left it in place on revert.
         """
         inverse = entry.get("inverse") or {}
         previous = as_obj((inverse.get("previous") or {}).get("targeting")) or {}
         if inverse.get("touched") is not None:
             return list(inverse["touched"]), previous, inverse.get("sent") or {}
-        return [k for k in previous if k not in WHERE_KEYS], previous, None
+        keys = set(previous) | set(live or {})
+        return sorted(k for k in keys if k not in WHERE_KEYS), previous, None
 
     def current_for_entry(self, ctx, entry):
         spec = self._spec(ctx, entry["entity_id"])
-        touched, _, sent = self._owned(entry)
+        touched, _, sent = self._owned(entry, spec)
         if sent is None:
             return fingerprint(spec, where=False)
         if dimensions(spec, touched, sent=sent) == dimensions(sent, touched, sent=sent):
@@ -442,8 +447,8 @@ class AdSetTargeting(NodeFieldKind):
     def revert_row_inverse(self, ctx, entry):
         # The revert replaces the dimensions this entry owns with their
         # previous values; a revert of the revert puts back what is there now.
-        touched, previous, _ = self._owned(entry)
         live = self._spec(ctx, entry["entity_id"])
+        touched, previous, _ = self._owned(entry, live)
         return {
             "touched": touched,
             "previous": {"targeting": {k: live[k] for k in touched if k in live}},
@@ -451,15 +456,35 @@ class AdSetTargeting(NodeFieldKind):
         }
 
     def inverse(self, ctx, entry):
-        touched, previous, _ = self._owned(entry)
+        live = self._spec(ctx, entry["entity_id"])
+        touched, previous, _ = self._owned(entry, live)
         if not previous and not touched:
             raise ValueError(
                 f"Entry {entry['entry_id']} recorded no previous targeting, so there "
                 "is nothing exact to put back. Use preview_ad_set_targeting."
             )
-        spec = with_dimensions(self._spec(ctx, entry["entity_id"]), touched, previous)
+        spec = with_dimensions(live, touched, previous)
         return self._plan(entry["entity_id"], entry.get("entity_name") or "",
                           {"targeting": spec}, entry["after"], entry["before"])
+
+    def revert_landed(self, ctx, entry):
+        """Re-read after the revert: the owned dimensions must be the previous ones.
+
+        Meta answering success is not proof that it REPLACED the spec: a key
+        the original edit added that is still there means the undo did not
+        happen, and the ledger must not record it as one.
+        """
+        live = self._spec(ctx, entry["entity_id"])
+        touched, previous, _ = self._owned(entry, live)
+        # Keys only in the live spec compare by fingerprint (an audience left
+        # behind shows); other unknown keys only when the previous spec had
+        # them, since Meta re-derives some on read.
+        got = dimensions(live, touched, sent=previous)
+        wanted = dimensions(previous, touched, sent=previous)
+        if got != wanted:
+            return (f"the targeting reads {fingerprint(live)} after the revert, "
+                    f"not the previous {fingerprint(previous)}")
+        return None
 
     def _estimate(self, ctx, spec, goal):
         try:

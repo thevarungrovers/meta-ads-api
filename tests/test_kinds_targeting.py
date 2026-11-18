@@ -321,3 +321,92 @@ def test_a_widening_edit_projects_the_unused_budget_like_an_activation(monkeypat
     assert preview.projected_daily_spend_delta == "232.36", preview
     assert any("projected_delta_per_day" in c and "SKIP" in c for c in preview.checks), preview.checks
     assert "Advantage+" in (preview.note or "")
+
+
+# --- legacy rows (no touched) and a revert that did not land -----------------
+
+
+def _legacy_row(s, before_spec, after_spec):
+    """A row written before rows named their dimensions: the whole previous
+    spec, nothing it sent, before/after spelled without placements."""
+    from metaads_reporting import logdb
+
+    s.objects[ADSET_ID]["targeting"] = json.loads(json.dumps(after_spec))
+    logdb.insert_change(
+        entry_id="legacytg", tool="apply_ad_set_targeting", account_id="1234567890",
+        entity_type="ad set", entity_id=ADSET_ID, entity_name="Example ad set",
+        field_name="targeting", before=fingerprint(before_spec, where=False),
+        after=fingerprint(after_spec, where=False), projected_delta="0",
+        inverse={"kind": "ad_set_targeting", "weight": 1,
+                 "previous": {"targeting": json.loads(json.dumps(before_spec))}},
+    )
+    logdb.complete_change(entry_id="legacytg", ok=True)
+    return "legacytg"
+
+
+@pytest.mark.parametrize("added", [
+    {"custom_audiences": [{"id": "A"}]},
+    {"excluded_custom_audiences": [{"id": "B"}]},
+    {"locales": [6]},
+    {"exclusions": {"interests": [{"id": "7001"}]}},
+])
+def test_a_legacy_revert_removes_keys_the_original_edit_added(monkeypatch, added):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    entry = _legacy_row(s, BASE, {**BASE, **added})
+    tools["revert_change"](entry_id=entry)
+    after = _targeting(s)
+    for key in added:
+        assert key not in after, f"{key} the original edit added survived the revert"
+    assert after == BASE
+
+
+def test_a_legacy_revert_removes_an_added_flexible_spec(monkeypatch):
+    s = sim()
+    before = {k: v for k, v in BASE.items() if k != "flexible_spec"}
+    tools, _ = rig(monkeypatch, s)
+    entry = _legacy_row(s, before, BASE)
+    tools["revert_change"](entry_id=entry)
+    assert "flexible_spec" not in _targeting(s)
+
+
+def test_a_legacy_revert_keeps_placements(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    entry = _legacy_row(s, BASE, {**BASE, "custom_audiences": [{"id": "A"}]})
+    s.objects[ADSET_ID]["targeting"] = {**_targeting(s), "publisher_platforms": ["facebook"]}
+    tools["revert_change"](entry_id=entry)
+    after = _targeting(s)
+    assert "custom_audiences" not in after and after["publisher_platforms"] == ["facebook"]
+
+
+def _merging_targeting(s):
+    """Meta as feared: an update MERGES the targeting keys instead of replacing."""
+    original = s._post
+
+    def post(segments, body):
+        node = segments[0]
+        before = s.objects.get(node, {}).get("targeting")
+        answer = original(segments, body)
+        if "targeting" in body and node in s.objects and before is not None:
+            from metaads_mcp.changes.common import as_obj
+
+            s.objects[node]["targeting"] = {**as_obj(before), **as_obj(s.objects[node]["targeting"])}
+        return answer
+
+    s._post = post
+
+
+def test_a_targeting_revert_that_did_not_land_is_not_recorded_as_applied(monkeypatch):
+    from metaads_mcp import ledger
+
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "ad_set_targeting", s, ad_set_id=ADSET_ID, audiences_include=["A"])
+    result = tools["apply_ad_set_targeting"](preview_token=preview.preview_token)
+    _merging_targeting(s)
+    with pytest.raises(Exception) as caught:
+        tools["revert_change"](entry_id=result.entry_id)
+    assert "did not land" in str(caught.value)
+    entry = ledger.entries()[-1]
+    assert entry["tool"] == "revert_change" and not entry["applied"] and entry["error"]
