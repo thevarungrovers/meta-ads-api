@@ -96,6 +96,24 @@ class Engine:
             f"{entry.get('entry_id')}): no change kind owns it."
         )
 
+    def _require_live_token(self) -> None:
+        """Refuse a write with a token /debug_token says is dead.
+
+        Checked at apply, against the hour-cached health, so a write never
+        leaves this process on a credential that cannot carry it. "unknown"
+        does not block: Meta itself will answer for the token.
+        """
+        from metaads_mcp.errors import AUTH_EXPIRED
+        from metaads_reporting.token_health import token_health
+
+        health = token_health(self.ctx.read)
+        if health.get("status") == "expired":
+            raise PreviewExpired(
+                f"{AUTH_EXPIRED}: the access token is expired or invalid "
+                f"({health.get('expires')}). Nothing was sent. Generate a new "
+                "System User token and restart the server."
+            )
+
     # -- caps ------------------------------------------------------------
 
     def _refuse_if_over_caps(self, projected: Decimal, weight: int) -> None:
@@ -207,6 +225,7 @@ class Engine:
         # the switch is a file precisely so somebody can throw it from another
         # terminal mid-session.
         require_writes_enabled()
+        self._require_live_token()
         payload = pending.payload
         entity = payload["_entity"]
 
@@ -367,6 +386,7 @@ class Engine:
         # out not to exist -- find_entry reaches back over the whole ledger,
         # including earlier sessions this process never saw.
         require_writes_enabled()
+        self._require_live_token()
         self._refuse_if_over_caps(Decimal("0"), 1)
 
         entry = ledger.find_entry(entry_id)

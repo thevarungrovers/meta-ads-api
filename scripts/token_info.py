@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from metaads_reporting.client import ReadOnlyMetaAdsClient  # noqa: E402
 from metaads_reporting.config import ConfigError, Settings  # noqa: E402
 from metaads_reporting.graph import GraphError  # noqa: E402
+from metaads_reporting.token_health import describe_expiry  # noqa: E402,F401
 
 #: Scopes this toolchain uses, and what stops working without each.
 NEEDED_SCOPES = {
@@ -38,28 +39,6 @@ NEEDED_SCOPES = {
     "ads_management": "every preview_*/apply_* pair, and scripts/manage.py",
     "business_management": "listing which ad accounts the token can reach",
 }
-
-
-def describe_expiry(timestamp: int | None) -> tuple[str, int | None]:
-    """A human line and the days remaining, or None for a token with no expiry.
-
-    The sign is spelled out rather than printed raw. A timestamp in the PAST --
-    `issued_at` is always one -- gives a negative day count, and "(-5 days)"
-    next to an issue date reads as a broken clock rather than as "five days
-    ago". Only `expires_at` is ever in the future, and this function formats
-    both.
-    """
-    if not timestamp:
-        return ("never (no expiry set)", None)
-    when = dt.datetime.fromtimestamp(int(timestamp), dt.timezone.utc)
-    days = (when - dt.datetime.now(dt.timezone.utc)).days
-    if days < 0:
-        human = f"{abs(days)} days ago"
-    elif days == 0:
-        human = "today"
-    else:
-        human = f"in {days} days"
-    return (f"{when.isoformat()} ({human})", days)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -97,8 +97,11 @@ def register(mcp, state) -> None:
         the same reason: report dates are evaluated in the ACCOUNT's zone, not
         yours.
         """
+        from metaads_reporting.token_health import token_health
+
         summary = client.account_summary()
         summary["rate_limit"] = client.rate_limit()
+        summary["token"] = token_health(client)
         return summary
 
     @mcp.tool(title="Find campaigns by name", annotations=READ_ONLY)
@@ -394,12 +397,14 @@ def register(mcp, state) -> None:
         actually be applied rather than something that will be refused.
         """
         from metaads_mcp.guardrails import DailyUsage, read_only_mode, writes_disabled
+        from metaads_reporting.token_health import token_health
 
         read_only = read_only_mode()
         return {
             "limits": state.limits.describe(),
             "session": state.counters.snapshot(),
             "today": DailyUsage(state.limits).snapshot(),
+            "token": token_health(client),
             "writes_disabled": writes_disabled(),
             "read_only_server": read_only,
             "pending_previews": state.previews.pending_count,

@@ -125,3 +125,13 @@ def _no_real_link_checks(monkeypatch):
     monkeypatch.setattr(
         "metaads_reporting.linkcheck._new_session", lambda: _OfflineLinkSession()
     )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_token_health():
+    """The health check caches per client id for an hour; ids are reused."""
+    from metaads_reporting import token_health
+
+    token_health._cache.clear()
+    yield
+    token_health._cache.clear()

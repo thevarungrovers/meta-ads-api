@@ -49,6 +49,11 @@ class GraphSim:
         #: Creates that really happened, and the multipart fields of the last call.
         self.created: list[dict[str, Any]] = []
         self.last_files: dict[str, Any] = {}
+        #: What /debug_token answers: a never-expiring System User token.
+        self.token_debug: dict[str, Any] = {
+            "type": "SYSTEM_USER", "is_valid": True, "expires_at": 0,
+            "data_access_expires_at": 0, "scopes": ["ads_management", "ads_read"],
+        }
         #: ad_formats the previews edges refuse.
         self.refuse_formats: set[str] = set()
         #: Set to a FakeResponse to make the NEXT request fail.
@@ -118,6 +123,8 @@ class GraphSim:
                 {"data": [self._project(self.objects[c], fields) for c in children]}
             )
 
+        if node == "debug_token":
+            return FakeResponse({"data": dict(self.token_debug)})
         if node.startswith("act_"):
             return FakeResponse(self._project(self.account, fields))
         if node == "me":
