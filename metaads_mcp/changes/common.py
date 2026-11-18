@@ -202,3 +202,98 @@ def ad_activation_bound(ctx, ad: dict[str, Any], currency: str) -> tuple[Decimal
     adset = adset_writes.find(ctx.client, ad_set_id=str(ad.get("adset_id")))
     bound, why = ad_set_activation_bound(ctx, adset, currency)
     return bound, f"this would be the ad set's only ACTIVE ad, restarting its spend ({why})"
+
+
+# ---------------------------------------------------------------------------
+# Changing fields on one node, with the previous values kept as the inverse
+# ---------------------------------------------------------------------------
+
+
+def as_obj(value: Any) -> Any:
+    """A Graph value that may come back JSON-encoded (as an update sent it)."""
+    import json
+
+    if isinstance(value, str) and value[:1] in "{[":
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def canonical(value: Any) -> str:
+    """One spelling for a structured value, so staleness compares exactly."""
+    import json
+
+    value = as_obj(value)
+    if value is None:
+        return "(not set)"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return str(value)
+
+
+class NodeFieldKind(ChangeKind):
+    """A kind that writes some fields on ONE existing campaign, ad set or ad.
+
+    Subclasses supply ``propose`` and :meth:`render` (the before/after string,
+    which is also the staleness key). The payload carries ``entity_id``,
+    ``fields`` (what to send) and ``previous`` (the same keys' values now), so
+    building the change and its inverse are generic.
+    """
+
+    #: "campaign" | "adset" | "ad" -- the write allowlist's entity type.
+    graph_type: str = ""
+    entity_type: str = ""
+    #: Fields read to render the current value.
+    read_fields: tuple[str, ...] = ()
+
+    def read_row(self, ctx, entity_id: str) -> dict[str, Any]:
+        return ctx.client.node(str(entity_id), ("id", "name", *self.read_fields))
+
+    def render(self, ctx, row: dict[str, Any]) -> str:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def current(self, ctx, payload: dict[str, Any]) -> str:
+        return self.render(ctx, self.read_row(ctx, payload["entity_id"]))
+
+    def current_for_entry(self, ctx, entry: dict[str, Any]) -> str | None:
+        return self.render(ctx, self.read_row(ctx, entry["entity_id"]))
+
+    def _plan(self, entity_id: str, name: str, fields: dict[str, Any], before: str, after: str):
+        from metaads_reporting.write.plan import FieldChange, PlannedChange
+
+        return PlannedChange(
+            action="update",
+            entity=self.entity_type,
+            entity_type=self.graph_type,
+            node_id=str(entity_id),
+            label=f"{name} (id {entity_id})",
+            payload=dict(fields),
+            changes=[FieldChange(self.name, before, after)],
+        )
+
+    def build(self, ctx, payload: dict[str, Any]):
+        return self._plan(payload["entity_id"], payload.get("name", ""),
+                          payload["fields"], payload["before"], payload["after"])
+
+    def inverse(self, ctx, entry: dict[str, Any]):
+        previous = (entry.get("inverse") or {}).get("previous")
+        if not previous:
+            raise ValueError(
+                f"Entry {entry['entry_id']} recorded no previous values, so there "
+                "is nothing exact to put back. Use the matching preview_* tool."
+            )
+        return self._plan(entry["entity_id"], entry.get("entity_name") or "",
+                          previous, entry["after"], entry["before"])
+
+
+def previous_values(row: dict[str, Any], keys) -> dict[str, Any]:
+    """The current raw values of ``keys``, for the inverse. Unset keys are left
+    out: Meta cannot be sent "nothing", and the other fields carry the meaning."""
+    out = {}
+    for key in keys:
+        value = as_obj(row.get(key))
+        if value not in (None, "", [], {}):
+            out[key] = value
+    return out

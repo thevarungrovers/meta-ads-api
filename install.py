@@ -100,6 +100,15 @@ SAFE_TOOLS = (
     "preview_duplicate_ad",
     "preview_update_ad_copy",
     "preview_create_audience",
+    "preview_ad_set_lifetime_budget",
+    "preview_campaign_lifetime_budget",
+    "preview_ad_set_bid_strategy",
+    "preview_campaign_bid_strategy",
+    "preview_ad_set_roas_floor",
+    "preview_ad_set_schedule",
+    "preview_campaign_schedule",
+    "preview_ad_set_dayparting",
+    "preview_ad_set_frequency_cap",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -113,6 +122,15 @@ WRITE_TOOLS = (
     "apply_duplicate_ad",
     "apply_update_ad_copy",
     "apply_create_audience",
+    "apply_ad_set_lifetime_budget",
+    "apply_campaign_lifetime_budget",
+    "apply_ad_set_bid_strategy",
+    "apply_campaign_bid_strategy",
+    "apply_ad_set_roas_floor",
+    "apply_ad_set_schedule",
+    "apply_campaign_schedule",
+    "apply_ad_set_dayparting",
+    "apply_ad_set_frequency_cap",
     "revert_change",
 )
 

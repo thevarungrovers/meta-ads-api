@@ -45,10 +45,22 @@ from ..graph import GraphAPIError, GraphTransport, WRITE_METHODS
 #: API accepts": each entry is one someone decided to support. Adding to this
 #: mapping is the deliberate act that widens the blast radius.
 WRITABLE_FIELDS: dict[str, frozenset[str]] = {
-    "campaign": frozenset({"status", "name", "daily_budget", "lifetime_budget"}),
-    "adset": frozenset(
-        {"status", "name", "daily_budget", "lifetime_budget", "bid_amount"}
-    ),
+    "campaign": frozenset({
+        "status", "name", "daily_budget", "lifetime_budget",
+        # Under campaign budget optimization the bid strategy lives here.
+        "bid_strategy",
+        # The schedule. start_time only before the campaign has delivered.
+        "start_time", "stop_time",
+    }),
+    "adset": frozenset({
+        "status", "name", "daily_budget", "lifetime_budget", "bid_amount",
+        # Bidding: the strategy, and its ROAS floor (bid_constraints).
+        "bid_strategy", "bid_constraints",
+        # Schedule and dayparting (dayparting needs pacing_type day_parting).
+        "start_time", "end_time", "adset_schedule", "pacing_type",
+        # Frequency cap, honoured only under reach-type optimization goals.
+        "frequency_control_specs",
+    }),
     # `creative` points an EXISTING ad at a different creative. It is the only
     # way to change what a live ad says, because a creative is immutable once
     # attached. The value is {"creative_id": "..."} -- a dict, which `update`

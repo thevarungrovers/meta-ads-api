@@ -312,6 +312,13 @@ def test_the_write_surface_the_docs_claim_matches_the_allowlist():
         # Points an EXISTING ad at a different creative. The only way to change
         # what a live ad says, because a creative is immutable once attached.
         "creative",
+        # Phase 3 bidding and schedule kinds (metaads_mcp/changes/bidding.py),
+        # each behind a typed preview/apply pair with money guardrails:
+        "bid_strategy",  # campaign (CBO) and ad set
+        "bid_constraints",  # the ROAS floor
+        "start_time", "end_time", "stop_time",  # schedules; start only pre-launch
+        "adset_schedule", "pacing_type",  # dayparting, lifetime budgets only
+        "frequency_control_specs",  # reach-type goals only
     }, (
         f"the write surface changed to {sorted(every)} -- README and SKILL.md "
         f"both state it explicitly and now need updating"

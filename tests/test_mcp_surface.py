@@ -65,6 +65,15 @@ PREVIEW_TOOLS = frozenset(
         "preview_duplicate_ad",
         "preview_update_ad_copy",
         "preview_create_audience",
+        "preview_ad_set_lifetime_budget",
+        "preview_campaign_lifetime_budget",
+        "preview_ad_set_bid_strategy",
+        "preview_campaign_bid_strategy",
+        "preview_ad_set_roas_floor",
+        "preview_ad_set_schedule",
+        "preview_campaign_schedule",
+        "preview_ad_set_dayparting",
+        "preview_ad_set_frequency_cap",
     }
 )
 
@@ -80,6 +89,15 @@ APPLY_TOOLS = frozenset(
         "apply_update_ad_copy",
         "apply_create_audience",
         "revert_change",
+        "apply_ad_set_lifetime_budget",
+        "apply_campaign_lifetime_budget",
+        "apply_ad_set_bid_strategy",
+        "apply_campaign_bid_strategy",
+        "apply_ad_set_roas_floor",
+        "apply_ad_set_schedule",
+        "apply_campaign_schedule",
+        "apply_ad_set_dayparting",
+        "apply_ad_set_frequency_cap",
     }
 )
 
@@ -183,10 +201,25 @@ def test_only_the_local_tools_claim_a_closed_world(tools):
         assert tool.annotations.open_world_hint is expected, name
 
 
+#: Applies that move money, stop or reshape delivery, change targeting, or
+#: create something. Grown deliberately, one kind at a time.
+SPENDS = {
+    "apply_ad_set_lifetime_budget",
+    "apply_campaign_lifetime_budget",
+    "apply_ad_set_bid_strategy",
+    "apply_campaign_bid_strategy",
+    "apply_ad_set_roas_floor",
+    "apply_ad_set_schedule",
+    "apply_campaign_schedule",
+    "apply_ad_set_dayparting",
+    "apply_ad_set_frequency_cap",
+}
+
+
 def test_the_money_moving_applies_are_marked_destructive(tools):
     """And only those. Marking a reversible single-ad pause destructive would
     train somebody to click through the loud prompts."""
-    spends = {
+    spends = SPENDS | {
         "apply_campaign_status",
         "apply_campaign_daily_budget",
         "apply_ad_set_status",

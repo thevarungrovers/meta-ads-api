@@ -44,6 +44,10 @@ DEFAULTS: dict[str, object] = {
     "max_projected_session_delta": Decimal("500.00"),
     # how many placements an ad change previews (most-spent first)
     "max_preview_formats": 5,
+    # bidding: the highest COST_CAP target, and the lowest ROAS floor allowed
+    # (a near-zero floor is an uncapped bid by another name)
+    "max_cost_cap": Decimal("50.00"),
+    "min_roas_floor": Decimal("0.50"),
     # the local calendar day, across restarts and processes
     "max_applies_per_day": 40,
     "max_projected_delta_per_day_total": Decimal("1000.00"),
@@ -55,6 +59,8 @@ _DECIMAL_KEYS = {
     "max_projected_delta_per_day",
     "max_projected_session_delta",
     "max_projected_delta_per_day_total",
+    "max_cost_cap",
+    "min_roas_floor",
 }
 _FLOAT_KEYS = {"max_budget_change_pct", "max_bid_increase_pct"}
 _INT_KEYS = {
@@ -90,6 +96,8 @@ class Limits:
     max_preview_formats: int = 5
     max_applies_per_day: int = 40
     max_projected_delta_per_day_total: Decimal = Decimal("1000.00")
+    max_cost_cap: Decimal = Decimal("50.00")
+    min_roas_floor: Decimal = Decimal("0.50")
     allowed_account_ids: tuple[str, ...] = ()
     allowed_campaign_ids: tuple[str, ...] = ()
     allowed_currencies: tuple[str, ...] = ("CAD",)
@@ -106,6 +114,8 @@ class Limits:
             "max_projected_session_delta": str(self.max_projected_session_delta),
             "max_preview_formats": self.max_preview_formats,
             "max_applies_per_day": self.max_applies_per_day,
+            "max_cost_cap": str(self.max_cost_cap),
+            "min_roas_floor": str(self.min_roas_floor),
             "max_projected_delta_per_day_total": str(
                 self.max_projected_delta_per_day_total
             ),
