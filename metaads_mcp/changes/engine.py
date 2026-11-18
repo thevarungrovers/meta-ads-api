@@ -343,6 +343,10 @@ class Engine:
                 after=item.after,
                 projected_delta=str(projected),
                 inverse=inverse,
+                # In the INTENT, not only the outcome: a revert that fails (or
+                # whose outcome never arrives) must still block a second
+                # attempt -- the first may have landed at Meta's end.
+                reverts=reverts[index] if reverts else None,
             )
         try:
             if kind is not None and payload is not None:

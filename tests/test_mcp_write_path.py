@@ -556,3 +556,31 @@ def test_every_preview_names_the_currency(tools):
     tool, state, sim = tools
     preview = tool["preview_campaign_status"](campaign_id=CAMPAIGN_ID, new_status="PAUSED")
     assert preview.currency == "CAD"
+
+
+def test_a_failed_revert_still_marks_the_entry_reverted(tools):
+    """The failure path used to write the outcome without `reverts`, so the
+    entry looked unreverted and could be reverted again blind -- exactly what
+    happened when a live revert hit Meta's 1-write-per-30s limit."""
+    tool, state, sim = tools
+    preview = tool["preview_campaign_status"](campaign_id=CAMPAIGN_ID, new_status="PAUSED")
+    result = tool["apply_campaign_status"](preview_token=preview.preview_token)
+
+    original = sim.request
+
+    def router(method, url, params=None, data=None, files=None, timeout=None):
+        if method == "POST":
+            return error_response(100, message="Invalid parameter")
+        return original(method, url, params, data, files, timeout)
+
+    sim.request = router
+    with pytest.raises(Exception):
+        tool["revert_change"](entry_id=result.entry_id)
+    sim.request = original
+
+    rows = tool["list_my_changes"]()
+    assert rows[0]["reverted"] is True
+    assert rows[-1]["applied"] is False and rows[-1]["error"]
+    with pytest.raises(Exception) as caught:
+        tool["revert_change"](entry_id=result.entry_id)
+    assert "already been reverted" in str(caught.value)
