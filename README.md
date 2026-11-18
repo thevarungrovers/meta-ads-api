@@ -607,7 +607,12 @@ With a rate, the preview still shows the projection in the entity's currency, an
 a warning says what it is counted as; the token, the counters and the ledger
 carry the converted amount, rounded up for an increase and down for a cut, never
 to the nearest. The ledger also keeps the entity-currency figure, and a revert
-works from that one, so it is converted exactly once. Every change that can
+works from that one, so it is converted exactly once. A revert row written
+before that figure was kept, in a non-cap currency, holds a doubly converted
+amount: it is never read back. A daily budget's is recomputed from the row's
+before/after values; where that is not possible (a bid, say), the revert that
+lowers spend still goes through, and re-applying the change later is refused
+with the reason. Every change that can
 move money -- whatever it projects, a pause included -- checks the entity's
 currency is in `allowed_currencies`; only names, labels and PAUSED creations
 are exempt. Adding days to a daily-budget flight projects the whole daily

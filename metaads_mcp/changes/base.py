@@ -148,26 +148,94 @@ def from_cap_currency(ctx, entry: dict[str, Any], amount: Decimal) -> Decimal:
     return amount / rate
 
 
+class LegacyProjection(ValueError):
+    """A legacy revert row's figure was converted twice and cannot be rebuilt."""
+
+
+def _is_revert_row(entry: dict[str, Any]) -> bool:
+    inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+    return entry.get("tool") == "revert_change" or bool(inverse.get("revert_row"))
+
+
+def _converted(ctx, entry: dict[str, Any]) -> bool:
+    """Whether ``entry``'s account is in a currency other than the cap one."""
+    from metaads_mcp.guardrails import cap_currency
+
+    currency = (ctx.currency(str(entry.get("account_id") or "") or None) or "").upper()
+    return bool(currency) and currency != cap_currency(ctx.limits)
+
+
+#: Fields whose projection IS the move of the stored amount (a daily budget
+#: is the cap itself), so a legacy row's figure can be rebuilt from its
+#: before/after values.
+_AMOUNT_FIELDS = frozenset({"daily_budget"})
+
+
+def _recomputed(ctx, entry: dict[str, Any]) -> Decimal:
+    """A LEGACY revert row's projection, in the entity's currency, rebuilt
+    from its before/after values.
+
+    Such a row was written before ``projected_entity`` existed; in a non-cap
+    currency the old code read the cap-currency figure as the entity's and
+    converted it again, so its own ``projected_daily_spend_delta`` is wrong
+    by the rate, and must not be read back. A revert never projects below 0.
+    """
+    field_name = entry.get("field")
+    after = str(entry.get("after") or "").strip()
+    if field_name == "status" and after == "PAUSED":
+        return Decimal("0")
+    if field_name in _AMOUNT_FIELDS:
+        try:
+            moved = amount_from_stored(entry.get("after")) - amount_from_stored(entry.get("before"))
+        except ValueError:
+            moved = None
+        if moved is not None:
+            return max(moved, Decimal("0"))
+    raise LegacyProjection(
+        f"Entry {entry.get('entry_id')} is a revert written before the ledger kept "
+        f"projections in the entity's currency: its recorded figure was converted twice "
+        f"and a {field_name} change cannot be recomputed from its before/after values "
+        f"({entry.get('before')!r} -> {entry.get('after')!r}). Nothing was sent. Make "
+        "the change again with the matching preview_* tool, which projects it afresh."
+    )
+
+
 def entity_projection(ctx, entry: dict[str, Any]) -> Decimal:
     """What ``entry`` projected, in its ENTITY's currency.
 
     The row's ``projected_daily_spend_delta`` is in the CAP currency (it feeds
     the daily total); the entity's own figure is kept in the inverse as
     ``projected_entity``. Reading the cap figure as the entity's and
-    converting it again was a double conversion.
+    converting it again was a double conversion -- and a REVERT row written
+    by that code, in a non-cap currency, still carries the doubly converted
+    figure: it is recomputed (see :func:`_recomputed`), never read back.
     """
     inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
     if inverse.get("projected_entity") is not None:
         return _decimal(inverse["projected_entity"])
+    if _is_revert_row(entry) and _converted(ctx, entry):
+        return _recomputed(ctx, entry)
     return from_cap_currency(ctx, entry, _decimal(entry.get("projected_daily_spend_delta")))
 
 
 def undone_projection(ctx, entry: dict[str, Any]) -> Decimal:
     """For a revert row: what the change it undid projected, in the entity's
-    currency -- what reverting the revert re-applies."""
+    currency -- what reverting the revert re-applies.
+
+    A legacy row (no ``undoes_projected_entity``) copied its parent's
+    cap-currency figure, which is wrong when the parent was itself a legacy
+    revert in a non-cap currency: the parent's projection is then taken from
+    the parent, the same way as any other entry's.
+    """
     inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
     if inverse.get("undoes_projected_entity") is not None:
         return _decimal(inverse["undoes_projected_entity"])
+    if entry.get("reverts") and _converted(ctx, entry):
+        from metaads_mcp import ledger
+
+        parent = ledger.find_entry(entry["reverts"])
+        if parent is not None:
+            return entity_projection(ctx, parent)
     return from_cap_currency(ctx, entry, _decimal(inverse.get("undoes_projected")))
 
 

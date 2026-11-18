@@ -353,7 +353,7 @@ class NodeFieldKind(ChangeKind):
         extra = {k: v for k, v in inverse.items()
                  if k not in ("previous", "cleared", "kind", "weight", "batch_id", "revert_row",
                               "undoes_projected", "undoes_projected_entity", "projected_entity",
-                              "not_revertible", "tightens")}
+                              "not_revertible", "not_revertible_reason", "tightens")}
         return {**extra, "previous": replaced, **({"cleared": cleared} if cleared else {})}
 
 

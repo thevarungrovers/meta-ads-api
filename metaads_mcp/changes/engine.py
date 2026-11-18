@@ -43,6 +43,7 @@ from metaads_mcp.changes.base import (
     PREVIEW_SAFE,
     ChangeKind,
     LedgerItem,
+    LegacyProjection,
     Proposal,
     chain_tightens,
     entity_projection,
@@ -733,16 +734,53 @@ class Engine:
         own, _ = kind.revert_projection(ctx, entry)
         own = max(own, Decimal("0"))
         projected = self._revert_in_cap_currency(entry, own)
+        reduces = (projected == 0 and not self._tightening(entry)
+                   and kind.revert_reduces_spend(ctx, entry))
+        # What this entry projected, which reverting the revert re-applies. A
+        # legacy revert row's figure is recomputed; where it cannot be, a
+        # revert that only lowers spend still goes through, but its own row
+        # is marked not revertible -- re-applying at an unknown cost is
+        # refused then, with the reason.
+        try:
+            undoes = entity_projection(ctx, entry)
+            undoes_cap = self._undoes_in_cap_currency(entry, undoes)
+        except LegacyProjection as exc:
+            if not reduces:
+                raise
+            undoes, undoes_cap = None, None
+            row_inverse = None
+            not_revertible_reason = str(exc)
+        else:
+            not_revertible_reason = None
+        item = self._inverse_item(entry, row_inverse, undoes=undoes, projected=own,
+                                  undoes_cap=undoes_cap)
+        if not_revertible_reason:
+            item.inverse["not_revertible_reason"] = not_revertible_reason
         return {
             "entry": entry,
             "kind": kind,
             "projected": projected,
-            "reduces": (projected == 0 and not self._tightening(entry)
-                        and kind.revert_reduces_spend(ctx, entry)),
+            "reduces": reduces,
             "plan": kind.inverse(ctx, entry),
-            "item": self._inverse_item(entry, row_inverse,
-                                       undoes=entity_projection(ctx, entry), projected=own),
+            "item": item,
         }
+
+    def _undoes_in_cap_currency(self, entry: dict[str, Any], undoes: Decimal) -> str:
+        """The cap-currency figure a revert row keeps as ``undoes_projected``.
+
+        The entry's own ``projected_daily_spend_delta``, except on a legacy
+        revert row in a non-cap currency, whose stored figure was converted
+        twice: there it is the recomputed projection, converted once.
+        """
+        stored = str(entry.get("projected_daily_spend_delta") or "0")
+        inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+        if inverse.get("projected_entity") is not None or entry.get("tool") != "revert_change":
+            return stored
+        currency = self.ctx.currency(str(entry.get("account_id") or "") or None)
+        if (currency or "").upper() == cap_currency(self.ctx.limits):
+            return stored
+        counted = to_cap_currency(self.ctx.limits, undoes, currency)
+        return stored if counted is None else f"{counted:.2f}"
 
     def _revert_in_cap_currency(self, entry: dict[str, Any], projected: Decimal) -> Decimal:
         """A revert that restores spend (undoing a pause, a cut, a tightening):
@@ -886,24 +924,30 @@ class Engine:
         if inverse.get("not_revertible"):
             raise ValueError(
                 f"Entry {entry['entry_id']} is a revert of a change that cannot be "
-                "re-applied by reverting it. Make the change again with the matching "
-                "preview_* tool."
+                "re-applied by reverting it"
+                + (f" ({inverse['not_revertible_reason']})"
+                   if inverse.get("not_revertible_reason") else "")
+                + ". Make the change again with the matching preview_* tool."
             )
 
     @staticmethod
     def _inverse_item(entry: dict[str, Any], row_inverse: dict[str, Any] | None, *,
-                      undoes: Decimal, projected: Decimal) -> LedgerItem:
+                      undoes: Decimal | None, projected: Decimal,
+                      undoes_cap: str | None = None) -> LedgerItem:
         # NOT a copy of the entry's inverse: that holds the value the revert
         # puts back, and a revert of this row must put back what it replaced.
         # ``undoes_projected`` is the cap-currency figure (its sign is what
         # older code reads); the two *_entity keys are in the entity's
-        # currency, which is what a later revert projects from.
+        # currency, which is what a later revert projects from. An unknown
+        # ``undoes`` (a legacy figure that could not be rebuilt) is left out.
         inverse: dict[str, Any] = {
             "revert_row": True,
-            "undoes_projected": str(entry.get("projected_daily_spend_delta") or "0"),
-            "undoes_projected_entity": str(undoes),
+            "undoes_projected": (undoes_cap if undoes_cap is not None
+                                 else str(entry.get("projected_daily_spend_delta") or "0")),
             "projected_entity": str(projected),
         }
+        if undoes is not None:
+            inverse["undoes_projected_entity"] = str(undoes)
         if row_inverse is None:
             inverse["not_revertible"] = True
         else:
