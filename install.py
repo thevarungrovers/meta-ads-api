@@ -109,6 +109,7 @@ SAFE_TOOLS = (
     "preview_campaign_schedule",
     "preview_ad_set_dayparting",
     "preview_ad_set_frequency_cap",
+    "preview_ad_set_targeting",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -131,6 +132,7 @@ WRITE_TOOLS = (
     "apply_campaign_schedule",
     "apply_ad_set_dayparting",
     "apply_ad_set_frequency_cap",
+    "apply_ad_set_targeting",
     "revert_change",
 )
 

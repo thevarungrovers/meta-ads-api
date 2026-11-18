@@ -48,6 +48,12 @@ DEFAULTS: dict[str, object] = {
     # (a near-zero floor is an uncapped bid by another name)
     "max_cost_cap": Decimal("50.00"),
     "min_roas_floor": Decimal("0.50"),
+    # targeting: audiences per ad set (include + exclude), the overlap and
+    # exclusion thresholds that WARN, and the reach move that FAILs
+    "max_audiences_per_ad_set": 10,
+    "overlap_warn_pct": 50.0,
+    "exclusion_swallow_pct": 80.0,
+    "max_reach_change_pct": 80.0,
     # the local calendar day, across restarts and processes
     "max_applies_per_day": 40,
     "max_projected_delta_per_day_total": Decimal("1000.00"),
@@ -62,12 +68,19 @@ _DECIMAL_KEYS = {
     "max_cost_cap",
     "min_roas_floor",
 }
-_FLOAT_KEYS = {"max_budget_change_pct", "max_bid_increase_pct"}
+_FLOAT_KEYS = {
+    "max_budget_change_pct",
+    "max_bid_increase_pct",
+    "overlap_warn_pct",
+    "exclusion_swallow_pct",
+    "max_reach_change_pct",
+}
 _INT_KEYS = {
     "max_entities_per_call",
     "max_applies_per_session",
     "max_preview_formats",
     "max_applies_per_day",
+    "max_audiences_per_ad_set",
 }
 
 
@@ -98,6 +111,10 @@ class Limits:
     max_projected_delta_per_day_total: Decimal = Decimal("1000.00")
     max_cost_cap: Decimal = Decimal("50.00")
     min_roas_floor: Decimal = Decimal("0.50")
+    max_audiences_per_ad_set: int = 10
+    overlap_warn_pct: float = 50.0
+    exclusion_swallow_pct: float = 80.0
+    max_reach_change_pct: float = 80.0
     allowed_account_ids: tuple[str, ...] = ()
     allowed_campaign_ids: tuple[str, ...] = ()
     allowed_currencies: tuple[str, ...] = ("CAD",)
@@ -116,6 +133,10 @@ class Limits:
             "max_applies_per_day": self.max_applies_per_day,
             "max_cost_cap": str(self.max_cost_cap),
             "min_roas_floor": str(self.min_roas_floor),
+            "max_audiences_per_ad_set": self.max_audiences_per_ad_set,
+            "overlap_warn_pct": self.overlap_warn_pct,
+            "exclusion_swallow_pct": self.exclusion_swallow_pct,
+            "max_reach_change_pct": self.max_reach_change_pct,
             "max_projected_delta_per_day_total": str(
                 self.max_projected_delta_per_day_total
             ),

@@ -74,6 +74,7 @@ PREVIEW_TOOLS = frozenset(
         "preview_campaign_schedule",
         "preview_ad_set_dayparting",
         "preview_ad_set_frequency_cap",
+        "preview_ad_set_targeting",
     }
 )
 
@@ -98,6 +99,7 @@ APPLY_TOOLS = frozenset(
         "apply_campaign_schedule",
         "apply_ad_set_dayparting",
         "apply_ad_set_frequency_cap",
+        "apply_ad_set_targeting",
     }
 )
 
@@ -213,6 +215,7 @@ SPENDS = {
     "apply_campaign_schedule",
     "apply_ad_set_dayparting",
     "apply_ad_set_frequency_cap",
+    "apply_ad_set_targeting",
 }
 
 

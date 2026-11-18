@@ -63,8 +63,13 @@ def test_only_allowlisted_fields_are_writable():
     assert "not in the allowlist" in str(caught.value)
 
 
-def test_targeting_is_not_writable_anywhere():
+def test_targeting_is_writable_only_on_an_ad_set():
+    """An ad set's targeting is writable since the ad_set_targeting kind, which
+    always sends the full merged spec. Nowhere else."""
     for entity in WRITABLE_FIELDS:
+        if entity == "adset":
+            check_writable(entity, {"targeting": "{}"})
+            continue
         with pytest.raises(MutationError):
             check_writable(entity, {"targeting": "{}"})
 

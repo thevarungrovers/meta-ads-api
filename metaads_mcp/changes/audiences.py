@@ -310,6 +310,11 @@ class CreateAudience(ChangeKind):
         }
         plan = self._plan(ctx, payload)
         checks, warnings = self._checks(ctx, payload)
+        if payload["kind"] == "saved":
+            # The same validator an ad set's targeting goes through.
+            from metaads_mcp.changes.targeting import validate_spec
+
+            checks.extend(validate_spec(ctx, targeting or {}, campaign=None, require_geo=False))
         return Proposal(
             entity_type=plan.entity,
             entity_id="(new)",

@@ -60,6 +60,9 @@ WRITABLE_FIELDS: dict[str, frozenset[str]] = {
         "start_time", "end_time", "adset_schedule", "pacing_type",
         # Frequency cap, honoured only under reach-type optimization goals.
         "frequency_control_specs",
+        # The WHOLE targeting spec: Meta replaces it wholesale, so the
+        # targeting kind always sends the full merged spec, never a fragment.
+        "targeting",
     }),
     # `creative` points an EXISTING ad at a different creative. It is the only
     # way to change what a live ad says, because a creative is immutable once

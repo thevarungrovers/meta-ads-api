@@ -319,6 +319,7 @@ def test_the_write_surface_the_docs_claim_matches_the_allowlist():
         "start_time", "end_time", "stop_time",  # schedules; start only pre-launch
         "adset_schedule", "pacing_type",  # dayparting, lifetime budgets only
         "frequency_control_specs",  # reach-type goals only
+        "targeting",  # ad_set_targeting: always the full merged spec
     }, (
         f"the write surface changed to {sorted(every)} -- README and SKILL.md "
         f"both state it explicitly and now need updating"
