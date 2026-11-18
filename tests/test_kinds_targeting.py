@@ -253,3 +253,71 @@ def test_saved_placements_that_widen_fail_without_the_opt_in(monkeypatch):
         ad_set_id=ADSET_ID, saved_audience_id="SAVED1", use_saved_audience_placements=True,
         allow_wider_placements=True)
     assert not failed(opted, "placements_widen"), opted.checks
+
+
+# --- an estimate that is not there, on an edit that can widen ----------------
+
+from tests.fakes import FakeResponse  # noqa: E402
+
+
+def _broken(kind):
+    def answer(params):
+        if kind == "rate_limited":
+            return FakeResponse({"error": {"message": "User request limit reached",
+                                           "code": 17}}, status=400)
+        if kind == "not_ready":
+            return {"data": [{"estimate_mau_lower_bound": 1000, "estimate_mau_upper_bound": 1000,
+                              "estimate_ready": False}]}
+        if kind == "zero":
+            return {"data": [{"estimate_mau_lower_bound": 0, "estimate_mau_upper_bound": 0,
+                              "estimate_ready": True}]}
+        raise RuntimeError("estimate down")
+    return answer
+
+
+@pytest.mark.parametrize("broken", ["error", "rate_limited", "not_ready", "zero"])
+@pytest.mark.parametrize("edit", [
+    {"geo_include": {"countries": ["US"]}},
+    {"age_min": 18},
+    {"genders": []},
+    {"advantage_audience": True},
+    {"detailed_remove": ["6001"]},
+])
+def test_a_widening_edit_without_an_estimate_fails_closed(monkeypatch, broken, edit):
+    s = sim()
+    s.objects[ADSET_ID]["targeting"] = {**BASE, "genders": [1]}
+    s.canned["delivery_estimate"] = _broken(broken)
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_ad_set_targeting"](ad_set_id=ADSET_ID, **edit)
+    assert failed(preview, "max_reach_change_pct"), preview.checks
+    assert any("retry" in c.lower() for c in preview.checks if c.startswith("FAIL"))
+
+
+def test_removing_an_audience_or_exclusion_without_an_estimate_fails_closed(monkeypatch):
+    s = sim()
+    s.objects[ADSET_ID]["targeting"] = {**BASE, "custom_audiences": [{"id": "A"}],
+                                        "excluded_custom_audiences": [{"id": "B"}]}
+    s.canned["delivery_estimate"] = _broken("error")
+    tools, _ = rig(monkeypatch, s)
+    for edit in ({"audiences_remove": ["A"]}, {"audiences_remove": ["B"]}):
+        preview = tools["preview_ad_set_targeting"](ad_set_id=ADSET_ID, **edit)
+        assert failed(preview, "max_reach_change_pct"), (edit, preview.checks)
+
+
+def test_a_narrowing_edit_without_an_estimate_still_previews(monkeypatch):
+    s = sim()
+    s.canned["delivery_estimate"] = _broken("error")
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_ad_set_targeting"](ad_set_id=ADSET_ID, age_min=30)
+    assert not preview.blocked, preview.checks
+
+
+def test_a_widening_edit_projects_the_unused_budget_like_an_activation(monkeypatch):
+    s = sim()
+    s.objects[ADSET_ID]["targeting"] = {**BASE, "genders": [1]}
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_ad_set_targeting"](ad_set_id=ADSET_ID, genders=[])
+    # The campaign's 250.00 budget, less the 123.45 / 7 it spends a day.
+    assert preview.projected_daily_spend_delta == "232.36", preview
+    assert any("projected_delta_per_day" in c and "SKIP" in c for c in preview.checks), preview.checks
+    assert "Advantage+" in (preview.note or "")

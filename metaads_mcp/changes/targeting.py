@@ -31,7 +31,7 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from metaads_mcp.changes.base import APPLY_SPENDS, Proposal
-from metaads_mcp.changes.common import NodeFieldKind, as_obj, canonical, daily_bound
+from metaads_mcp.changes.common import NodeFieldKind, ad_set_activation_bound, as_obj, canonical
 from metaads_mcp.guardrails import Check
 from metaads_reporting import reach, special_ad_rules
 from metaads_reporting.audience_status import usability
@@ -181,6 +181,69 @@ def placement_widening(before: dict[str, Any], after: dict[str, Any]) -> list[st
     return reasons
 
 
+def _place_tokens(spec: dict[str, Any], key: str) -> set[str]:
+    geo = spec.get(key) or {}
+    out = set()
+    for kind, items in geo.items():
+        if kind == "location_types" or not isinstance(items, list):
+            continue
+        for p in items:
+            if isinstance(p, dict):
+                ident = p.get("key") or p.get("name") or f"{p.get('latitude')},{p.get('longitude')}"
+                out.add(f"{kind}:{ident}@{p.get('radius')}{p.get('distance_unit', '')}")
+            else:
+                out.add(f"{kind}:{p}")
+    return out
+
+
+def _detailed_tokens(block: dict[str, Any] | None) -> set[str]:
+    return {f"{cat}:{i}" for cat, items in (block or {}).items() for i in _ids(items)}
+
+
+def reach_widening(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """Every way ``after`` can reach MORE people than ``before``.
+
+    Structural, so it holds when the reach estimate is not there: a widening
+    edit then fails closed instead of passing on a missing number. Errs toward
+    "widens" where the arithmetic is not certain (detailed targeting is ORed
+    inside a group, so most edits to an existing one can widen).
+    """
+    reasons: list[str] = []
+    if _place_tokens(after, "geo_locations") - _place_tokens(before, "geo_locations"):
+        reasons.append("places added")
+    if _place_tokens(before, "excluded_geo_locations") - _place_tokens(after, "excluded_geo_locations"):
+        reasons.append("excluded places removed")
+    if int(after.get("age_min") or 18) < int(before.get("age_min") or 18):
+        reasons.append("minimum age lowered")
+    if int(after.get("age_max") or 65) > int(before.get("age_max") or 65):
+        reasons.append("maximum age raised")
+    for key, what in (("genders", "genders"), ("locales", "languages")):
+        was = {str(v) for v in before.get(key) or []}
+        now = {str(v) for v in after.get(key) or []}
+        if was and (not now or now - was):
+            reasons.append(f"{what} widened")
+    was_flex, now_flex = before.get("flexible_spec") or [], after.get("flexible_spec") or []
+    if was_flex and canonical(was_flex) != canonical(now_flex):
+        reasons.append("detailed targeting changed (removing or adding to a group can widen)")
+    if _detailed_tokens(before.get("exclusions")) - _detailed_tokens(after.get("exclusions")):
+        reasons.append("detailed exclusions removed")
+    was_in = set(_ids(before.get("custom_audiences")))
+    now_in = set(_ids(after.get("custom_audiences")))
+    if was_in and (not now_in or now_in - was_in):
+        reasons.append("included audiences widened")
+    if set(_ids(before.get("excluded_custom_audiences"))) - set(_ids(after.get("excluded_custom_audiences"))):
+        reasons.append("excluded audiences removed")
+    if ((after.get("targeting_automation") or {}).get("advantage_audience") == 1
+            and (before.get("targeting_automation") or {}).get("advantage_audience") != 1):
+        reasons.append("Advantage+ audience turned on")
+    reasons.extend(placement_widening(before, after))
+    others = sorted(k for k in set(before) | set(after) if k not in FINGERPRINTED
+                    and canonical(before.get(k)) != canonical(after.get(k)))
+    if others:
+        reasons.append(f"other targeting keys changed ({', '.join(others)})")
+    return reasons
+
+
 def _merge_places(target: dict, places: dict, *, remove: bool = False) -> None:
     for key, items in (places or {}).items():
         current = list(target.get(key) or [])
@@ -321,7 +384,8 @@ class AdSetTargeting(NodeFieldKind):
     graph_type = "adset"
     entity_type = "ad set"
     read_fields = ("status", "effective_status", "campaign_id", "account_id", "targeting",
-                   "optimization_goal", "daily_budget", "lifetime_budget", "end_time")
+                   "optimization_goal", "daily_budget", "lifetime_budget", "budget_remaining",
+                   "end_time")
     ledger_keys = (("ad set", "targeting"),)
 
     def render(self, ctx, row):
@@ -391,6 +455,18 @@ class AdSetTargeting(NodeFieldKind):
             return reach.estimate(ctx.read, spec, goal or "REACH")
         except Exception:  # noqa: BLE001 - estimates are advisory
             return None
+
+    def _estimate_why(self, ctx, spec, goal) -> tuple[dict | None, str]:
+        """(a usable estimate or None, why not)."""
+        try:
+            est = reach.estimate(ctx.read, spec, goal or "REACH")
+        except Exception as exc:  # noqa: BLE001 - reported on the check line
+            return None, (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        if not est.get("ready"):
+            return None, "Meta says the estimate is not ready yet"
+        if est.get("midpoint") is None:
+            return None, "Meta returned no reach bounds"
+        return est, ""
 
     def _audience_checks(self, ctx, new, current, goal) -> tuple[list[Check], list[str], set[str]]:
         checks: list[Check] = []
@@ -533,26 +609,49 @@ class AdSetTargeting(NodeFieldKind):
                                     else " -- pass allow_wider_placements=True to allow it"),
             ))
 
-        before_est = self._estimate(ctx, current, goal)
-        after_est = self._estimate(ctx, new, goal)
-        projected = Decimal("0")
-        if before_est and after_est and before_est["midpoint"] and after_est["midpoint"] is not None:
+        widening = reach_widening(current, new)
+        before_est, why_before = self._estimate_why(ctx, current, goal)
+        after_est, why_after = self._estimate_why(ctx, new, goal)
+        if before_est is not None and not before_est["midpoint"]:
+            before_est, why_before = None, "the current reach estimate is 0, so no change can be measured against it"
+        limit = ctx.limits.max_reach_change_pct
+        grows = bool(widening)
+        if before_est and after_est:
             change = (after_est["midpoint"] - before_est["midpoint"]) / before_est["midpoint"] * 100
             # WIDENING past the limit fails: it is the direction that can raise
             # spend. Narrowing past it only warns -- attaching one custom
             # audience routinely narrows reach by 99%, and that is the point.
-            limit = ctx.limits.max_reach_change_pct
             detail = (f"estimated reach {before_est['midpoint']:,} -> {after_est['midpoint']:,} "
                       f"({change:+.0f}%) against +{limit:.0f}%")
             checks.append(Check("max_reach_change_pct", change <= limit, detail,
                                 warn=change < -limit))
-            if after_est["midpoint"] > before_est["midpoint"]:
-                bound, _ = daily_bound(row, ctx.currency(), "end_time")
-                if bound is not None:
-                    spent = ctx.spend_7d(ctx.metrics_7d(str(row["id"]), "adset")) / 7
-                    projected = max(bound - spent, Decimal("0"))
+            grows = grows or after_est["midpoint"] > before_est["midpoint"]
+        elif widening:
+            # FAIL CLOSED: an edit that can widen reach is exactly the one the
+            # reach limit exists for, so a missing number cannot pass it.
+            checks.append(Check(
+                "max_reach_change_pct", False,
+                f"reach could not be estimated ({why_before or why_after}) and this edit "
+                f"can widen it ({'; '.join(widening)}); a widening edit is not allowed "
+                "without an estimate -- retry later",
+            ))
         else:
-            checks.append(Check("max_reach_change_pct", True, "reach could not be estimated", skipped=True))
+            checks.append(Check("max_reach_change_pct", True,
+                                f"reach could not be estimated ({why_before or why_after}); "
+                                "this edit only narrows", skipped=True))
+        projected = Decimal("0")
+        if grows:
+            # More people means the budget can be spent where it was not: the
+            # ad set's unused headroom, counted like an activation (exempt from
+            # the per-change limit, counted in the daily and session totals).
+            bound, why = ad_set_activation_bound(ctx, row, ctx.currency())
+            spent = ctx.spend_7d(ctx.metrics_7d(str(row["id"]), "adset")) / 7
+            projected = max(bound - spent, Decimal("0")).quantize(Decimal("0.01"))
+            warnings.append(
+                f"this can widen reach ({'; '.join(widening) or 'estimate grows'}): "
+                f"projected at the unused budget headroom, {projected:.2f}/day "
+                f"({why}, less the 7-day average spend)"
+            )
         if advantage_audience:
             warnings.append(
                 "Advantage+ audience ON: included audiences and interests become "
@@ -571,6 +670,7 @@ class AdSetTargeting(NodeFieldKind):
             after=fingerprint(new),
             checks=checks,
             projected=projected,
+            is_activation=grows,
             payload={"entity_id": str(row["id"]), "name": row.get("name") or "",
                      "fields": {"targeting": new}, "full_before": canonical(current),
                      "touched": touched, "sent": sent},
@@ -582,7 +682,8 @@ class AdSetTargeting(NodeFieldKind):
             note=(
                 f"Estimated reach: {before_est and before_est.get('midpoint')} -> "
                 f"{after_est and after_est.get('midpoint')} (rounded bounds, an estimate). "
-                "Widening reach is bounded by the ad set's unused daily budget."
+                "The estimate excludes Advantage+ audience expansion, which can reach "
+                "beyond it. Widening reach is projected at the ad set's unused daily budget."
             ),
         ).with_inverse({
             # Only the dimensions this edit changed: the revert puts THOSE back
