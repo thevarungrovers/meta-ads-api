@@ -190,3 +190,24 @@ def test_read_only_mode_publishes_no_apply_for_any_kind(monkeypatch):
         assert f"preview_{kind.name}" in names
         assert f"apply_{kind.name}" not in names, kind.name
     assert "revert_change" not in names
+
+
+def test_optimization_goal_round_trips_and_warns_about_learning(monkeypatch):
+    sim = abo_sim(promoted_object={"pixel_id": "PX1", "custom_event_type": "PURCHASE"})
+    tools, _ = rig(monkeypatch, sim)
+    preview = preview_ok(tools, "ad_set_optimization_goal", sim, ad_set_id=ADSET_ID,
+                         optimization_goal="LANDING_PAGE_VIEWS")
+    assert any("learning phase restarts" in w for w in preview.warnings)
+    assert any("PX1" in w for w in preview.warnings)
+    apply_and_revert(tools, "ad_set_optimization_goal", preview)
+    assert sim.objects[ADSET_ID]["optimization_goal"] == "OFFSITE_CONVERSIONS"
+
+
+def test_attribution_spec_round_trips(monkeypatch):
+    sim = abo_sim(attribution_spec=[{"event_type": "CLICK_THROUGH", "window_days": 7},
+                                    {"event_type": "VIEW_THROUGH", "window_days": 1}])
+    tools, _ = rig(monkeypatch, sim)
+    preview = preview_ok(tools, "ad_set_attribution_spec", sim, ad_set_id=ADSET_ID,
+                         click_days=1, view_days=0)
+    result, _ = apply_and_revert(tools, "ad_set_attribution_spec", preview)
+    assert json.loads(sim.objects[ADSET_ID]["attribution_spec"])[0]["window_days"] == 7

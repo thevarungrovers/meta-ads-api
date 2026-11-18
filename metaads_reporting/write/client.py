@@ -63,6 +63,9 @@ WRITABLE_FIELDS: dict[str, frozenset[str]] = {
         # The WHOLE targeting spec: Meta replaces it wholesale, so the
         # targeting kind always sends the full merged spec, never a fragment.
         "targeting",
+        # What the ad set optimizes for, how it is billed, and the window it
+        # attributes conversions over.
+        "optimization_goal", "billing_event", "attribution_spec",
     }),
     # `creative` points an EXISTING ad at a different creative. It is the only
     # way to change what a live ad says, because a creative is immutable once

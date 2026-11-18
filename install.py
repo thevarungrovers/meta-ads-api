@@ -115,6 +115,8 @@ SAFE_TOOLS = (
     "preview_advantage_creative_options",
     "preview_attach_lead_form",
     "preview_replace_ad_creative",
+    "preview_ad_set_optimization_goal",
+    "preview_ad_set_attribution_spec",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -143,6 +145,8 @@ WRITE_TOOLS = (
     "apply_advantage_creative_options",
     "apply_attach_lead_form",
     "apply_replace_ad_creative",
+    "apply_ad_set_optimization_goal",
+    "apply_ad_set_attribution_spec",
     "revert_change",
 )
 

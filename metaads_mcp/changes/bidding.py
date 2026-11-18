@@ -638,3 +638,96 @@ BIDDING_KINDS = (
     AdSetLifetimeBudget, CampaignLifetimeBudget, AdSetBidStrategy, CampaignBidStrategy,
     AdSetRoasFloor, AdSetSchedule, CampaignSchedule, AdSetDayparting, AdSetFrequencyCap,
 )
+
+
+# ---------------------------------------------------------------------------
+# Optimization
+# ---------------------------------------------------------------------------
+
+OptimizationGoal = Literal[
+    "OFFSITE_CONVERSIONS", "LINK_CLICKS", "LANDING_PAGE_VIEWS", "IMPRESSIONS", "REACH",
+    "THRUPLAY", "LEAD_GENERATION", "QUALITY_LEAD", "VALUE", "POST_ENGAGEMENT",
+    "APP_INSTALLS", "AD_RECALL_LIFT", "CONVERSATIONS",
+]
+BillingEvent = Literal["IMPRESSIONS", "LINK_CLICKS", "THRUPLAY"]
+
+
+class AdSetOptimizationGoal(_AdSetKind):
+    name = "ad_set_optimization_goal"
+    preview_title = "Preview changing what an ad set optimizes for"
+    apply_title = "Apply an optimization goal change (RESETS LEARNING)"
+    ledger_keys = (("ad set", "optimization_goal"),)
+    read_fields = ADSET_READ + ("promoted_object",)
+
+    def render(self, ctx, row):
+        return f"{row.get('optimization_goal') or '(not set)'} | billed on {row.get('billing_event') or '(not set)'}"
+
+    def propose(
+        self,
+        ctx,
+        ad_set_id: Annotated[str, Field(description="From find_ad_sets")],
+        optimization_goal: Annotated[OptimizationGoal, Field(description="What Meta optimizes delivery for")],
+        billing_event: Annotated[
+            BillingEvent | None, Field(description="Only when the goal needs a different one (e.g. THRUPLAY)")
+        ] = None,
+    ) -> Proposal:
+        """Change what an ad set optimizes for (and, where Meta requires it, its
+        billing event). Writes nothing.
+
+        The ad set re-enters the learning phase from scratch. The preview shows
+        the promoted object (pixel and event, page, app) the new goal will use;
+        Meta's validate_only says whether that goal is valid for it and for the
+        campaign's objective.
+        """
+        row = self.read_row(ctx, ad_set_id)
+        fields: dict[str, Any] = {"optimization_goal": optimization_goal}
+        if billing_event:
+            fields["billing_event"] = billing_event
+        if row.get("optimization_goal") == optimization_goal and not billing_event:
+            raise ValueError(f"The ad set already optimizes for {optimization_goal}.")
+        return self._proposal(
+            ctx, row, before=self.render(ctx, row), after="", fields=fields, checks=[],
+            projected=Decimal("0"),
+            warnings=[
+                "the learning phase restarts from scratch: expect unstable cost per result for days",
+                f"promoted object: {canonical(row.get('promoted_object'))}",
+            ],
+            note="The budget does not move; projected 0.",
+        )
+
+
+class AdSetAttributionSpec(_AdSetKind):
+    name = "ad_set_attribution_spec"
+    preview_title = "Preview changing an ad set's attribution window"
+    apply_title = "Apply an attribution window change"
+    ledger_keys = (("ad set", "attribution_spec"),)
+    read_fields = ADSET_READ + ("attribution_spec",)
+
+    def render(self, ctx, row):
+        return canonical(row.get("attribution_spec"))
+
+    def propose(
+        self,
+        ctx,
+        ad_set_id: Annotated[str, Field(description="From find_ad_sets")],
+        click_days: Annotated[Literal[1, 7], Field(description="Click-through window, days")] = 7,
+        view_days: Annotated[Literal[0, 1], Field(description="View-through window, days (0 = none)")] = 1,
+    ) -> Proposal:
+        """Change the attribution window an ad set optimizes and reports on.
+
+        Writes nothing. A shorter window credits fewer conversions, so reported
+        results drop without anything changing in the real world -- say so to
+        the human. Delivery re-learns.
+        """
+        row = self.read_row(ctx, ad_set_id)
+        spec = [{"event_type": "CLICK_THROUGH", "window_days": int(click_days)}]
+        if view_days:
+            spec.append({"event_type": "VIEW_THROUGH", "window_days": int(view_days)})
+        return self._proposal(
+            ctx, row, before=self.render(ctx, row), after="", fields={"attribution_spec": spec},
+            checks=[], projected=Decimal("0"),
+            warnings=["reported conversions change with the window, not with performance"],
+        )
+
+
+BIDDING_KINDS = BIDDING_KINDS + (AdSetOptimizationGoal, AdSetAttributionSpec)
