@@ -39,7 +39,9 @@ import os
 import pathlib
 import platform
 import re
+import secrets
 import shutil
+import stat
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent
@@ -641,6 +643,34 @@ def next_steps(agent: str, read_only: bool) -> list[str]:
 IDENTITY_KEYS = ("META_ADS_MCP_OWNER_INITIALS", "META_ADS_MCP_AGENT_NAME")
 
 
+def _replace_private(path: pathlib.Path, text: str) -> None:
+    """Replace ``path`` atomically: write a temp file beside it, created
+    0o600 from the start (it holds the credentials too), then os.replace.
+
+    A crash leaves either the old file or the new one, never half of each.
+    The mode is never looser than 0o600, and an existing stricter one (0o400)
+    is kept.
+    """
+    mode = 0o600
+    if path.exists():
+        mode = stat.S_IMODE(path.stat().st_mode) & 0o600 or 0o600
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_identity(env_path: pathlib.Path, owner: str | None, agent: str | None,
                    dry_run: bool) -> list[str]:
     """Put the naming identity into .env -- the ONLY place it is read from.
@@ -659,7 +689,17 @@ def write_identity(env_path: pathlib.Path, owner: str | None, agent: str | None,
         return []
     check = Identity.from_values(wanted.get(IDENTITY_KEYS[0]), wanted.get(IDENTITY_KEYS[1]))
     if check.problem:
-        raise InstallError(check.problem)
+        # Which key, and the rule -- never the value: a mistyped secret
+        # pasted into the wrong prompt must not end up in a terminal log.
+        bad = [key for key, value in wanted.items()
+               if value and Identity.from_values(*(
+                   (value, None) if key == IDENTITY_KEYS[0] else (None, value))).problem]
+        raise InstallError(
+            f"invalid {' and '.join(bad) or 'naming identity'}: owner initials are 2-4 "
+            "uppercase letters (e.g. AB); the agent name is a lowercase slug of 2-24 "
+            "characters, a letter first, then letters, digits or _ (no -), and not "
+            "cli or manual (e.g. max). Leave it empty for no prefix."
+        )
     lines = env_path.read_text().splitlines() if env_path.exists() else []
     out, seen = [], set()
     for line in lines:
@@ -672,11 +712,7 @@ def write_identity(env_path: pathlib.Path, owner: str | None, agent: str | None,
     out.extend(f"{k}={v}" for k, v in wanted.items() if k not in seen)
     if dry_run:
         return [f"would set {', '.join(wanted)} in {env_path.name}"]
-    env_path.write_text("\n".join(out) + "\n")
-    try:
-        env_path.chmod(0o600)
-    except OSError:
-        pass
+    _replace_private(env_path, "\n".join(out) + "\n")
     return [f"set {', '.join(wanted)} in {env_path.name} (the agent's name prefix)"]
 
 
