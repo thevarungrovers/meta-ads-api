@@ -270,51 +270,68 @@ resolved for you.
 
 ### Can read (safe)
 
-| Tool | Gives you |
+| Tools | Give you |
 |---|---|
-| `list_ad_accounts` | Accounts this token can reach |
-| `get_account` | Currency, time zone, status, spend cap, balance |
-| `find_campaigns` | Campaigns, ids, `budget_level`, budgets |
-| `find_ad_sets` | Ad sets, budgets, `bid_strategy`, `bid_amount` |
-| `find_ads` | Ads and their `effective_status` |
-| `run_report` | Performance, five reports |
-| `get_ad_creative` | What an ad **says**, its creative shape, and the social proof at stake |
-| `list_audiences` | Custom, lookalike and saved audiences |
-| `get_guardrails` | The bounds and the session budget left |
-| `list_my_changes` | What it has changed, with `entry_id`s |
+| `list_ad_accounts`, `get_account` | Accounts; currency, time zone, status, token health, rate limit |
+| `find_campaigns`, `find_ad_sets`, `find_ads` | Ids, `budget_level`, budgets, bids, `effective_status`, and `truncated` when cut off |
+| `get_campaign`, `get_ad_set`, `get_ad` | One entity in full: special ad categories, the whole targeting spec, placements, learning stage, review feedback, preview links, 7/30-day totals |
+| `run_report`, `get_report_run` | Performance: ten reports (incl. placements, demographics, geo, hour of day, conversions by action), any breakdown, a real `max_rows`, async runs |
+| `get_ad_creative`, `verify_ad`, `get_ad_previews` | What an ad says; whether it was approved and still matches what was approved; preview links per placement |
+| `list_audiences`, `get_audience` | Audiences with size, `usable`, and which ad sets use them |
+| `search_targeting`, `estimate_reach` | Targeting ids (interests, behaviours, places, locales ...); reach bounds |
+| `list_ad_images`, `list_ad_videos`, `list_labels` | Media to reuse; labels |
+| `list_pixels`, `get_pixel_health`, `list_custom_conversions` | Tracking diagnostics |
+| `list_connected_identities`, `list_lead_forms` | Pages, Instagram accounts, apps; form metadata (never leads) |
+| `list_ad_rules`, `list_ab_tests`, `get_ab_test`, `list_catalogs`, `list_product_sets` | Rules (money rules flagged), studies, catalogs |
+| `list_recent_changes`, `search_ad_library` | Ads Manager's activity log; Meta's Ad Library |
+| `get_guardrails`, `list_my_changes`, `reconcile_ledger` | Bounds and today's budget; what it changed; whether the account still matches |
 
 ### Can change (needs your yes)
 
-| Pair | Changes |
+Every one is a `preview_*` / `apply_*` pair, on one engine
+(`metaads_mcp/changes/`): kill switch, token, staleness, session and daily
+caps, a two-phase ledger, Meta's `validate_only` in the preview.
+
+| Kinds | Change |
 |---|---|
-| `preview/apply_campaign_status` | Pause or activate a whole campaign |
-| `preview/apply_campaign_daily_budget` | A campaign-budget campaign's daily budget |
-| `preview/apply_ad_set_status` | Pause or activate an ad set |
-| `preview/apply_ad_set_daily_budget` | An ad set's daily budget |
-| `preview/apply_ad_set_bid_amount` | An ad set's bid cap or cost target |
-| `preview/apply_ad_status` | Pause or activate one ad |
-| `preview/apply_duplicate_ad` | A **new PAUSED ad** beside an existing one, with changed copy or media |
-| `preview/apply_update_ad_copy` | Repoint a **live ad** at a new creative (discards social proof) |
-| `preview/apply_create_audience` | A saved targeting spec, or a lookalike |
-| `revert_change` | Undo one ledger entry |
+| `campaign_status`, `ad_set_status`, `ad_status`, `multi_ad_status` | Pause or activate (a batch of ads in one ad set) |
+| `campaign_daily_budget`, `ad_set_daily_budget`, `campaign_lifetime_budget`, `ad_set_lifetime_budget` | Budgets, at the level that holds them |
+| `ad_set_bid_amount`, `ad_set_bid_strategy`, `campaign_bid_strategy`, `ad_set_roas_floor` | Bidding |
+| `ad_set_schedule`, `campaign_schedule`, `ad_set_dayparting`, `ad_set_frequency_cap` | When it runs and how often |
+| `ad_set_targeting`, `ad_set_placements` | Who and where: places, ages, interests, audiences in/out, Advantage+ |
+| `ad_set_optimization_goal`, `ad_set_attribution_spec` | What it optimizes for; the attribution window |
+| `create_audience` | Website, engagement, video, lead-form, app, lookalike (1-10%), saved |
+| `duplicate_ad`, `update_ad_copy`, `url_tags`, `advantage_creative_options`, `attach_lead_form`, `replace_ad_creative` | What an ad says, via a new creative |
+| `create_creative`, `create_ad`, `create_campaign`, `create_ad_set`, `duplicate_ad_set`, `duplicate_campaign` | New things, always **PAUSED**, 3 applies each |
+| `create_ab_test` | A split test between PAUSED cells |
+| `low_risk_change` | Names and ad labels only, on a closed allowlist |
+| `revert_change` | Undo one ledger entry or a whole batch |
+
+Every ad change is **verified**: the preview fetches preview links for the
+placements the ad set uses and checks text truncation, image shape (from the
+file header), video length, the call to action and the destination link; the
+apply re-reads the ad and diffs it against what was approved, with its review
+state. `verify_ad` repeats that after review.
 
 ### Cannot do at all — including from the CLI
 
 | Not available | Why |
 |---|---|
-| Create a **campaign** or **ad set** | A campaign carries a `special_ad_categories` declaration — a legal statement about housing/employment/credit/social-issue advertising. That belongs to a person. (Creating an **ad** inside an existing ad set *is* supported; it inherits the declaration.) |
-| Upload a **video** | The `advideos` edge is asynchronous and chunked; an ad built on a still-encoding video is rejected. An existing `video_id` can be reused, which covers duplicating a video ad. |
-| Create a **customer-list audience** | It uploads hashed customer emails and phone numbers to Meta. Saved audiences and lookalikes are supported; this one is refused **structurally** — see below |
-| Change targeting, optimization goal, billing event, schedule | Not on the write client's field allowlist |
-| Set a status to `DELETED` or `ARCHIVED` | Irreversible through the API — pause instead |
-| Delete anything | The mutating client has no delete method at all |
-| Anything touching billing or account access | Out of scope by design |
+| Delete or archive anything, audiences included | Irreversible. Pausing is the undo; an unused audience changes nothing. The mutating client has no delete method at all |
+| Create a **customer-list audience** | It uploads hashed customer emails and phone numbers to Meta — refused **structurally**, see below |
+| Create a **lead form**, download leads | A form carries a privacy policy and legal text a person answers for; leads are personal data |
+| Switch a campaign between campaign and ad-set budgets | It redistributes spend across every ad set |
+| Automated rules that change money | An unattended writer outside every guardrail here |
+| Upload a **video** | The `advideos` edge is asynchronous and chunked; reuse an existing `video_id` |
+| Pixel/CAPI configuration, catalog feeds, billing, account access | Out of scope by design |
 
 None of that is "refused at call time" — there is **no generic
-update/passthrough tool**, and the write client's field allowlist contains only
-`status`, `name`, `creative`, `daily_budget`, `lifetime_budget` and
-`bid_amount`. An unregistered operation is unreachable, not merely
-undocumented. `tests/test_mcp_surface.py` pins the tool names so adding one is a
+update/passthrough tool**, and the write client's field allowlist
+(`write/client.py:WRITABLE_FIELDS`) names every field that can be written:
+status, name, budgets, bids and bid constraints, schedules and dayparting,
+frequency caps, targeting, optimization goal, billing event, attribution, an
+ad's creative, labels, and an A/B test's end time. Creates are refused unless
+PAUSED. `tests/test_mcp_surface.py` pins the tool names so adding one is a
 reviewed diff.
 
 ### Customer-list audiences are refused on purpose
@@ -325,10 +342,11 @@ Meta already has" from "upload our customer list" are the `subtype` field and
 whether a `data` payload is attached — far too thin a line to leave to
 convention. So both halves are checked:
 
-- `check_subtype` admits `LOOKALIKE` and nothing else;
+- each creatable subtype (`WEBSITE`, `ENGAGEMENT`, `APP`, `LOOKALIKE`) has its
+  own payload-key allowlist, and `CUSTOM` is refused outright;
 - `check_no_customer_data` refuses any payload carrying `data`, `schema`,
-  `payload`, `users`, `customer_file_source`, `pixel_id` … and runs on **every**
-  call, not just the suspicious-looking ones.
+  `payload`, `users`, `is_raw` or `customer_file_source`, for every subtype,
+  and runs on **every** call, not just the suspicious-looking ones.
 
 Reading an existing customer-list audience is fine and necessary — you need to
 see one to pick a lookalike source. Creating one is what is blocked.
@@ -407,16 +425,29 @@ A key you delete falls back to the code default. A key you **misspell is an
 error at startup**, not a silently ignored line — a ceiling that is quietly not
 there reads as protection.
 
-### 2. Limits per conversation
+Bidding and targeting add `max_cost_cap`, `min_roas_floor`,
+`max_audiences_per_ad_set`, `overlap_warn_pct`, `exclusion_swallow_pct` and
+`max_reach_change_pct`; `max_preview_formats` caps how many placements an ad
+change previews.
+
+### 2. Limits per conversation, and per day
 
 ```toml
-max_applies_per_session     = 20
-max_projected_session_delta = "500.00"
+max_applies_per_session           = 20
+max_projected_session_delta       = "500.00"
+max_applies_per_day               = 40
+max_projected_delta_per_day_total = "1000.00"
 ```
 
 These matter more. A per-call limit does nothing against a loop making four
-hundred individually-legal changes. Counters live in memory and reset only when
-the server restarts — which is a deliberate act.
+hundred individually-legal changes. The session counters live in memory; the
+**daily** ones are computed from the ledger (successful applies since LOCAL
+midnight), so they survive restarts and are shared by every server process.
+A creation costs 3 applies. **Activating** something (and a revert that
+restores spend) is counted against the daily and session totals and exempt
+from the per-change `max_projected_delta_per_day`, so the daily total must be at
+least the largest budget you would re-activate -- the server warns at startup
+when one is larger. `scripts/manage.py` writes are not counted.
 
 ### 3. Scope
 
@@ -458,7 +489,7 @@ the same risk:
 
 | Failure | Retried? | Why |
 |---|---|---|
-| Rate limit (613, 4, 17, 32, 429, 80xxx) | **Yes**, up to 3 times | Meta refused it outright. Nothing was applied, so repeating it is safe |
+| Rate limit (613, 4, 17, 32, 429, 80xxx) | **Yes**, while the wait fits in a tool call | Meta refused it outright. Nothing was applied, so repeating it is safe |
 | Timeout / connection error | **Never** | The request may have reached Meta with the response lost. A retry makes a second change |
 | HTTP 5xx | **Never, on a write** | Same ambiguity |
 | Anything permanent (100, 200, …) | No | Repeating it just fails again |
@@ -469,8 +500,11 @@ and fail three more times for nothing. Reads are unaffected and still retry
 everything transient.
 
 **So an `apply_*` can take ~30 seconds to return.** That is the retry working.
-It also means batching writes is slow by construction: five changes is five
-windows.
+Past a minute (Meta's own `estimated_time_to_regain_access`, or the next
+backoff) the transport stops sleeping and the tool answers
+`RATE_LIMITED retry_after=<seconds>` instead, because an MCP client would have
+timed the call out anyway. Batching writes is slow by construction: five changes
+is five windows.
 
 ## Everything is written down
 
@@ -537,7 +571,7 @@ for.
 ## Tests
 
 ```bash
-./.venv/bin/python -m pytest -q
+./.venv/bin/pytest -q
 ```
 
 Everything is offline. `tests/graphsim.py` is a small in-memory Graph API that
@@ -575,10 +609,14 @@ Two things every test gets automatically, from `tests/conftest.py`:
 | `code 190, subcode 463` | The token expired | Generate a new one; `token_info.py --check` warns in advance |
 | `code 200` or `code 10` | Missing scope **or** the System User is not assigned to the account | Check both — they give the same error |
 | `code 100, subcode 33` | The object does not exist, *or* the token cannot see it | Meta does not distinguish these. Check the id and the assignment |
-| `code 4`, `17`, `32`, `613`, `80xxx` | Rate limit | Reads retry automatically. `get_account` reports headroom |
+| `code 4`, `17`, `32`, `613`, `80xxx` | Rate limit | Retried while the wait is under a minute, else `RATE_LIMITED retry_after=`. Every read reports headroom |
 | Server "connected" but tools missing | You registered it mid-session | Restart the client; the tool list is read once, at startup |
 | A budget looks 100x wrong | Minor units | You are reading a raw node field. `currency.from_minor_units` is the converter |
 | Every number is one day out | Account time zone | Report dates are evaluated in the account's zone. `get_account` shows it |
+
+Over MCP every failure carries a prefix -- `AUTH_EXPIRED`, `PERMISSION`,
+`RATE_LIMITED retry_after=`, `NOT_FOUND`, `POLICY`, `INVALID`,
+`TOO_MUCH_DATA`, `TRANSIENT`, `INTERNAL` -- from `metaads_mcp/errors.py`.
 
 Start with `./.venv/bin/python scripts/test_connection.py`. The rungs are
 ordered so the **first** failure names the real problem.
@@ -596,14 +634,20 @@ metaads_reporting/        the library
   config.py               .env, with blank treated as absent
   export.py               DataFrames and CSV
   logdb.py                the SQLite log: tool calls, API calls, changes, mutations
-  reports/                five declarative report definitions
+  reports/                ten declarative report definitions
+  placement_specs.py      what each placement shows: cut-offs, shapes, lengths
+  linkcheck.py            destination checks, HEAD only, SSRF-guarded
+  reach.py audience_status.py special_ad_rules.py token_health.py
   write/                  THE ONLY PLACE THAT CAN MUTATE
-    client.py             field allowlist, validate_only, no delete
-    campaigns.py adsets.py ads.py   plan builders
+    client.py             field allowlist, validate_only, PAUSED creates, no delete
+    campaigns.py adsets.py ads.py creatives.py audiences.py media.py   plan builders
+    async_insights.py     the one POST a read needs: <node>/insights
     lookup.py plan.py audit.py
 
 metaads_mcp/              the MCP server
-  server.py guardrails.py previews.py ledger.py tools_read.py tools_write.py
+  server.py guardrails.py previews.py ledger.py errors.py verify.py
+  tools_read.py tools_account.py tools_write.py
+  changes/                every write: a ChangeKind on one engine
 
 scripts/
   test_connection.py      the diagnostic ladder
