@@ -28,6 +28,11 @@ READ_TOOLS = frozenset(
         "list_audiences",
         "reconcile_ledger",
         "get_report_run",
+        "get_campaign",
+        "get_ad_set",
+        "get_ad",
+        "verify_ad",
+        "get_ad_previews",
     }
 )
 

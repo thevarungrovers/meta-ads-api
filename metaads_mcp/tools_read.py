@@ -570,6 +570,13 @@ def register(mcp, state) -> None:
             for e in rows
         ]
 
+    from metaads_mcp import tools_account
+
+    tools_account.register(
+        mcp, state, client,
+        headroom=headroom, money=money, read_only=READ_ONLY, local_only=LOCAL_ONLY,
+    )
+
 
 class _WriteShim:
     """Lets the read tools reuse the write package's search/find helpers.
