@@ -293,3 +293,34 @@ def test_an_empty_env_value_does_not_override_config_env(tmp_path):
     env = _write(tmp_path / ".env", "", "")
     identity = Identity.from_env([config, env])
     assert (identity.owner, identity.agent) == ("CD", "bot")
+
+
+# --- an owner-only prefix must not make the base read as an agent ---------------
+
+
+@pytest.mark.parametrize("base", ["spring-promo", "qc_fr-launch", "ab-x"])
+def test_owner_only_refuses_a_base_that_would_parse_as_an_agent(base):
+    """``AB-`` + ``spring-promo`` is ``AB-spring-promo``: agent "spring". It
+    used to be stamped and then fail later with a misleading message."""
+    with pytest.raises(NameRefused) as caught:
+        stamp(OWNER_ONLY, base, entity_type="campaign")
+    message = str(caught.value)
+    assert "agent" in message and ("_" in message and "space" in message), message
+
+
+@pytest.mark.parametrize("base", ["spring_promo", "spring promo", "Spring-promo", "a-b", "2x-y"])
+def test_owner_only_accepts_a_base_that_cannot_parse_as_an_agent(base):
+    final = stamp(OWNER_ONLY, base, entity_type="campaign").final
+    assert final == f"AB-{base}"
+    assert parse(final) is None or parse(final).agent != base.split("-")[0]
+
+
+def test_owner_only_copy_of_an_ambiguous_source_is_refused_too():
+    with pytest.raises(NameRefused):
+        restamp_for_copy(OWNER_ONLY, "spring-promo", entity_type="ad", suffix=" (copy)")
+
+
+def test_other_identities_still_accept_a_hyphenated_base():
+    for identity in (BOTH, AGENT_ONLY, NEITHER):
+        assert stamp(identity, "spring-promo", entity_type="campaign").base == "spring-promo"
+

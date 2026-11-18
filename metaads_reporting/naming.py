@@ -50,6 +50,8 @@ RESERVED_AGENTS = frozenset({"cli", "manual"})
 
 #: A full prefix as it appears at the start of a name.
 _FULL = re.compile(r"^([A-Z]{2,4})-([a-z][a-z0-9_]{1,23})-(.*)$", re.S)
+#: A base that, after an owner-only ``AB-``, would read as an agent name.
+_AGENT_LEAD = re.compile(r"^[a-z][a-z0-9_]{1,23}-")
 
 #: Every entity type a name is stamped on, and its limit.
 NAME_LIMIT = 400
@@ -330,6 +332,16 @@ def _base_of(identity: Identity, name: str, entity_type: str) -> tuple[str, str]
 def _check_base(base: str, identity: Identity, entity_type: str) -> None:
     if not base:
         raise NameRefused(f"the {entity_type} name is empty")
+    if identity.owner and not identity.agent and _AGENT_LEAD.match(base):
+        # Owner-only: "AB-" + "spring-promo" is "AB-spring-promo", which
+        # every later parse reads as agent "spring" -- not ours.
+        lead = base.split("-", 1)[0]
+        raise NameRefused(
+            f"the {entity_type} name {base!r} would read as agent {lead!r} after the "
+            f"owner-only prefix {identity.prefix!r} ({identity.prefix}{base}); join its "
+            f"first word with _ or a space instead of - (for example "
+            f"{lead}_{base.split('-', 1)[1]!s})"
+        )
     bad = invisible_characters(base)
     if bad:
         raise NameRefused(f"the {entity_type} name contains control or invisible characters "
