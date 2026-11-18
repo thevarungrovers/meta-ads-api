@@ -618,9 +618,13 @@ amount: it is never read back. A daily budget's is recomputed from the row's
 before/after values; where that is not possible (a bid, say), the revert that
 lowers spend still goes through, and re-applying the change later is refused
 with the reason. Every change that can
-move money -- whatever it projects, a pause included -- checks the entity's
-currency is in `allowed_currencies`; only names, labels and PAUSED creations
-are exempt. Adding days to a daily-budget flight projects the whole daily
+move money -- whatever it projects -- checks the entity's currency is in
+`allowed_currencies`; only names, labels and PAUSED creations are exempt, and
+pauses. **Pausing is always allowed**: a campaign, ad set or ad (or a batch of
+ads) set to PAUSED passes both currency checks whatever its account's currency,
+because stopping spend is never blocked. The account scope
+(`allowed_account_ids`) still decides which accounts may be touched at all, and
+activating the same thing again is checked as usual. Adding days to a daily-budget flight projects the whole daily
 budget for each added day, not the unused headroom.
 
 ### 4. The stop button

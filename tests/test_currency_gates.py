@@ -64,14 +64,82 @@ def test_a_zero_projection_alone_does_not_skip_the_cap_currency_refusal(monkeypa
 
 
 def test_allowed_currencies_is_checked_whatever_the_projection(monkeypatch):
+    """A change that projects nothing but is not a pause is still checked."""
     tools, sim = two_accounts(monkeypatch, allowed_currencies=("CAD",), currency_rates=())
-    sim.objects[JPY_ADSET]["status"] = "ACTIVE"
-    preview = tools["preview_ad_set_status"](ad_set_id=JPY_ADSET, new_status="PAUSED")
+    sim.objects[JPY_ADSET]["optimization_goal"] = "LINK_CLICKS"
+    preview = tools["preview_ad_set_optimization_goal"](
+        ad_set_id=JPY_ADSET, optimization_goal="LANDING_PAGE_VIEWS")
     assert Decimal(preview.projected_daily_spend_delta) == 0
     assert failed(preview, "currency_allowed"), preview.checks
-    # ... while the missing rate alone never strands it: a pause adds nothing.
-    line = next(c for c in preview.checks if " cap_currency" in c)
-    assert line.startswith("SKIP"), line
+
+
+# --- pausing is always allowed ------------------------------------------------------
+#
+# Stopping spend is never blocked: a pause in an account whose currency is not
+# in allowed_currencies (and has no rate) passes both currency gates. The
+# account scope still decides which accounts may be touched at all.
+
+JPY_AD = "120200000000093"
+
+
+def _outside_currency_scope(monkeypatch, status="ACTIVE"):
+    from tests.fakes import ad
+
+    tools, sim = two_accounts(monkeypatch, allowed_currencies=("CAD",), currency_rates=())
+    sim.objects["120200000000091"]["status"] = status
+    sim.objects[JPY_ADSET]["status"] = status
+    sim.objects[JPY_AD] = ad(JPY_AD, status=status, adset_id=JPY_ADSET,
+                             campaign_id="120200000000091", account_id="2222222222")
+    sim.edges.setdefault(JPY_ADSET, {})["ads"] = [JPY_AD]
+    return tools, sim
+
+
+def _currency_lines(preview):
+    return [c for c in preview.checks if "currency" in c]
+
+
+@pytest.mark.parametrize("name,args", [
+    ("campaign_status", {"campaign_id": "120200000000091"}),
+    ("ad_set_status", {"ad_set_id": JPY_ADSET}),
+    ("ad_status", {"ad_id": JPY_AD}),
+])
+def test_pausing_in_a_currency_outside_the_scope_is_allowed(monkeypatch, name, args):
+    tools, sim = _outside_currency_scope(monkeypatch)
+    preview = tools[f"preview_{name}"](new_status="PAUSED", **args)
+    assert not preview.blocked, preview.checks
+    assert not failed(preview, "currency_allowed"), _currency_lines(preview)
+    assert not failed(preview, "cap_currency"), _currency_lines(preview)
+    tools[f"apply_{name}"](preview_token=preview.preview_token)
+    entity = next(iter(args.values()))
+    assert sim.objects[entity]["status"] == "PAUSED"
+
+
+def test_a_batch_pause_in_a_currency_outside_the_scope_is_allowed(monkeypatch):
+    tools, _ = _outside_currency_scope(monkeypatch)
+    preview = tools["preview_multi_ad_status"](ad_set_id=JPY_ADSET, ad_ids=[JPY_AD],
+                                               new_status="PAUSED")
+    assert not preview.blocked, preview.checks
+
+
+@pytest.mark.parametrize("name,args", [
+    ("campaign_status", {"campaign_id": "120200000000091"}),
+    ("ad_set_status", {"ad_set_id": JPY_ADSET}),
+    ("ad_status", {"ad_id": JPY_AD}),
+])
+def test_activating_in_a_currency_outside_the_scope_is_still_refused(monkeypatch, name, args):
+    tools, _ = _outside_currency_scope(monkeypatch, status="PAUSED")
+    preview = tools[f"preview_{name}"](new_status="ACTIVE", **args)
+    assert preview.blocked
+    assert failed(preview, "currency_allowed"), _currency_lines(preview)
+
+
+def test_a_pause_outside_the_account_scope_is_still_refused(monkeypatch):
+    tools, sim = two_accounts(monkeypatch, allowed_account_ids=("1234567890",),
+                              allowed_currencies=("CAD",), currency_rates=())
+    sim.objects[JPY_ADSET]["status"] = "ACTIVE"
+    preview = tools["preview_ad_set_status"](ad_set_id=JPY_ADSET, new_status="PAUSED")
+    assert preview.blocked
+    assert any(c.startswith("FAIL") and "account" in c for c in preview.checks), preview.checks
 
 
 def test_a_tightening_with_nothing_projected_skips_only_the_rate(monkeypatch):

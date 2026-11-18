@@ -421,8 +421,13 @@ rate is let through (counted as 0), and so is a change whose direction is
 provably down (a stricter frequency cap, a lower bid or cost cap, a higher ROAS
 floor, targeting only narrowed, a flight only shortened); a projection of 0
 alone is not enough, and a looser cap or a swap between bid strategies is refused;
-every change that can move money, a pause included, needs the currency in
+every other change that can move money needs the currency in
 `allowed_currencies`.
+
+**Pausing is always allowed.** Setting a campaign, ad set or ad (or a batch of
+ads) to PAUSED is never blocked by either currency check, whatever the
+account's currency: stopping spend must always work. The account scope still
+applies, and activating it again is checked as usual.
 
 An entry showing `applied: false` **with no error** is the one to look at
 carefully: the write left the process and nothing recorded how it ended, so it

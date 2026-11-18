@@ -190,10 +190,14 @@ class Engine:
                 f"{counted:.2f} {cap_currency(ctx.limits)} at the configured rate"
             )
         # Every change that can move money is in an allowed currency, whatever
-        # it projects and whether or not the kind checked it itself. Only a
+        # it projects and whether or not the kind checked it itself. Exempt: a
         # kind that cannot add spend by construction (a name, a label, a
-        # creation that starts PAUSED) is exempt.
-        if ((not kind.adds_no_spend or proposal.is_activation or counted > 0)
+        # creation that starts PAUSED), and a pure PAUSE -- stopping spend is
+        # never blocked; the account scope above still decides which accounts
+        # may be touched.
+        if self._pure_pause(proposal):
+            checks = [c for c in checks if c.name != "currency_allowed"]
+        elif ((not kind.adds_no_spend or proposal.is_activation or counted > 0)
                 and not any(c.name == "currency_allowed" for c in checks)):
             checks.append(check_currency(ctx.limits, currency))
         if proposal.batch:
@@ -307,6 +311,15 @@ class Engine:
         )
 
     @staticmethod
+    def _pure_pause(proposal: Proposal) -> bool:
+        """A status change to PAUSED (one entity or a batch) and nothing else:
+        it projects nothing and activates nothing."""
+        return (proposal.field_name == "status" and proposal.after == "PAUSED"
+                and not proposal.is_activation and proposal.projected <= 0
+                and all(i.field_name == "status" and i.after == "PAUSED"
+                        for i in proposal.ledger_items()))
+
+    @staticmethod
     def _cannot_add_spend(kind: ChangeKind, proposal: Proposal) -> bool:
         """Whether ``proposal`` provably cannot add spend.
 
@@ -321,8 +334,8 @@ class Engine:
             return True
         if proposal.projected > 0 or proposal.is_activation:
             return False
-        pauses = proposal.field_name == "status" and proposal.after == "PAUSED"
-        return pauses or proposal.reduces_spend or kind.adds_no_spend
+        return (Engine._pure_pause(proposal) or proposal.reduces_spend
+                or kind.adds_no_spend)
 
     def _naming_checks(self, kind: ChangeKind, proposal: Proposal,
                        payload: dict[str, Any]) -> list[Check]:
