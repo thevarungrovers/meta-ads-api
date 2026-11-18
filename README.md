@@ -342,7 +342,9 @@ creative made by a copy edit is named from the ad's base; the ad keeps its name.
 type above. An over-long name is **refused, never truncated**; the preview says
 how long the base may be. The preview always shows the exact final name (the
 `naming` block). A duplicate name only warns -- Meta allows them. Control and
-invisible characters, a doubled prefix, and another agent's or the CLI's prefix
+invisible characters (every default-ignorable code point, such as a Hangul
+filler or a variation selector, the blank Braille pattern, and any space other
+than a plain U+0020), a doubled prefix, and another agent's or the CLI's prefix
 are refused -- including one spelt with look-alike characters: the first two
 dash-separated segments are folded (NFKC, any dash to `-`, Cyrillic and Greek
 letters to the Latin ones they resemble), and a name that then reads as a

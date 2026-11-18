@@ -137,6 +137,27 @@ NAME_LIMITS: dict[str, int] = {
 #: format (Cf, invisible: U+200B zero-width space, U+202E bidi override ...),
 #: line and paragraph separators (Zl U+2028, Zp U+2029).
 _REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+#: Also refused: every Unicode Default_Ignorable_Code_Point (Hangul fillers,
+#: the combining grapheme joiner, variation selectors ... which are Lo or Mn,
+#: not Cf, yet render as nothing) and the blank Braille pattern U+2800. Every
+#: space separator (Zs) other than the plain U+0020 is refused too: NBSP and
+#: U+3000 look like a space but are not one.
+_IGNORABLE_RANGES: tuple[tuple[int, int], ...] = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160),
+    (0x17B4, 0x17B5), (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x206F), (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+
+
+def _refused_char(ch: str) -> bool:
+    import unicodedata
+
+    category = unicodedata.category(ch)
+    code = ord(ch)
+    return (category in _REFUSED_CATEGORIES or (category == "Zs" and ch != " ")
+            or any(low <= code <= high for low, high in _IGNORABLE_RANGES))
 
 
 def invisible_characters(text: str) -> list[str]:
@@ -144,11 +165,10 @@ def invisible_characters(text: str) -> list[str]:
 
     >>> invisible_characters("a\u200bb\nc")
     ['U+000A', 'U+200B']
+    >>> invisible_characters("a\u3164b\u00a0c d")
+    ['U+00A0', 'U+3164']
     """
-    import unicodedata
-
-    return sorted({f"U+{ord(ch):04X}" for ch in text
-                   if unicodedata.category(ch) in _REFUSED_CATEGORIES})
+    return sorted({f"U+{ord(ch):04X}" for ch in text if _refused_char(ch)})
 
 NO_IDENTITY_RULE = "no identity configured; name used as given"
 
@@ -429,8 +449,9 @@ def _check_base(base: str, identity: Identity, entity_type: str) -> None:
             )
     bad = invisible_characters(base)
     if bad:
-        raise NameRefused(f"the {entity_type} name contains control or invisible characters "
-                          f"({', '.join(bad)})")
+        raise NameRefused(f"the {entity_type} name contains control or invisible characters, "
+                          f"or a space other than a plain one ({', '.join(bad)}); names may "
+                          "hold only visible characters and plain spaces")
     limit = NAME_LIMITS.get(entity_type, NAME_LIMIT)
     room = limit - len(identity.prefix)
     if len(base) > room:
