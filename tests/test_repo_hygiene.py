@@ -327,3 +327,52 @@ def test_create_is_still_unreachable_from_the_server():
     for module in (tools_write, campaigns):
         source = (REPO_ROOT / module.__file__.split("meta-ads-api/")[-1]).read_text()
         assert ".create(" not in source, f"{module.__name__} now calls create()"
+
+
+# --- documentation that DISCLAIMS a capability -------------------------------
+#
+# The mirror image of the manage.py test above. Until 2026-11-18 the server's own
+# INSTRUCTIONS told every agent that ad copy and audiences were "NOT AVAILABLE
+# ANYWHERE IN THIS TOOLCHAIN", while preview/apply_duplicate_ad,
+# update_ad_copy and create_audience were registered and tested. An agent that
+# believed the instructions sent a human to Ads Manager for something it could
+# do itself. A disclaimer is a claim, and a claim is testable.
+
+#: Registered tool -> phrases that must not appear in a "cannot do" section
+#: while it is registered.
+_DISCLAIMED_BY = {
+    "apply_update_ad_copy": ("ad copy", "primary text", "swap an image"),
+    "apply_duplicate_ad": ("campaign, ad set or ad", "ad set or ad;"),
+    "apply_create_audience": ("lookalike", "saved audience", "audience of any kind"),
+}
+
+
+def _cannot_sections() -> dict[str, str]:
+    from metaads_mcp.server import INSTRUCTIONS
+
+    skill = (REPO_ROOT / ".claude" / "skills" / "meta-ads" / "SKILL.md").read_text()
+    start = INSTRUCTIONS.index("CANNOT DO")
+    end = INSTRUCTIONS.index("If the human needs one of those", start)
+    s_start = skill.index("### Not here")
+    s_end = skill.index("Ad copy, media and audiences", s_start)
+    return {
+        "server.INSTRUCTIONS": INSTRUCTIONS[start:end].lower(),
+        "SKILL.md": skill[s_start:s_end].lower(),
+    }
+
+
+def test_instructions_do_not_disclaim_a_registered_tool():
+    import asyncio
+
+    from metaads_mcp import server
+
+    registered = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    offenders = []
+    for where, text in _cannot_sections().items():
+        for tool, phrases in _DISCLAIMED_BY.items():
+            if tool not in registered:
+                continue
+            for phrase in phrases:
+                if phrase in text:
+                    offenders.append(f"{where} lists {phrase!r} as impossible, but {tool} exists")
+    assert not offenders, offenders

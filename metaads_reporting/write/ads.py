@@ -4,10 +4,12 @@ The smallest unit, and the one most worth pausing: on Meta a single worn-out
 creative inside an otherwise healthy ad set is the common failure, and pausing
 it is both the usual fix and completely reversible.
 
-Only ``status`` and ``name`` are writable here. Changing what an ad SAYS means
-swapping its creative, which on Meta is not an edit at all -- a creative is
-immutable once attached, so a copy change is a new ad. That is a create, and
-creates are not exposed to an agent.
+``status``, ``name`` and ``creative`` are writable here. Changing what an ad
+SAYS means swapping its creative, which on Meta is not an edit at all -- a
+creative is immutable once attached -- so :func:`plan_duplicate_ad` builds a
+new creative on a new PAUSED ad, and :func:`plan_update_copy` repoints the
+existing ad at a new creative. Both are exposed to the agent through a
+preview/apply pair.
 """
 
 from __future__ import annotations

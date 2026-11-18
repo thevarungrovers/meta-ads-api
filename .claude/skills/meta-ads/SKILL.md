@@ -156,19 +156,23 @@ deliberate: it means an apply cannot be called cold, with nothing shown first.
 
 ### Not here — and not anywhere else in this toolchain
 
-Creating or deleting campaigns, ad sets and ads. Ad copy and creative of every
-kind: primary text, headline, description, images, video. Audiences: custom,
-lookalike, saved. Targeting, optimization goal, billing event, schedule, special
-ad categories. Setting a status to DELETED or ARCHIVED. Billing and account
-access. None of those fields is on the write client's allowlist at all.
+Creating a campaign or an ad set, and deleting anything. A customer-list
+audience (it uploads customer personal data). Targeting, optimization goal,
+billing event, schedule, special ad categories. Setting a status to DELETED or
+ARCHIVED. Billing and account access. Uploading a new video (reuse an existing
+`video_id`).
+
+Ad copy, media and audiences **are** here: see `duplicate_ad`,
+`update_ad_copy` and `create_audience` above.
 
 There is **no generic update/passthrough tool**, so if an operation is not in the
 tables above it cannot be done from here.
 
-**And there is no CLI fallback.** `scripts/manage.py` has the same write surface
-this server does — status, budget, bid, name — and nothing more. If the human
-needs one of the above, tell them plainly that it is not built, and point them at
-Ads Manager. Do not send them to a script.
+**And there is no CLI fallback for the list above.** `scripts/manage.py` has the
+same write surface this server does — status, budget, bid, name, `ad duplicate`,
+`ad set-copy`, `audience lookalike` and `audience saved` — and nothing more. If
+the human needs one of the things above, tell them plainly that it is not built,
+and point them at Ads Manager. Do not send them to a script.
 
 ## Changing what an ad says
 

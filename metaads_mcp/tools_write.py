@@ -24,12 +24,14 @@ NOT EXPOSED, deliberately:
     the API, and PAUSED achieves the same outcome reversibly. The refusal lives
     in ``metaads_reporting.write.client.check_status``, below the tool layer,
     so it holds for every caller.
-  - creating or deleting campaigns, ad sets and ads. A campaign create carries
-    an objective, a budget and a special-ad-category declaration that is a
-    legal statement; it belongs in ``scripts/manage.py``, where a human answers
-    for it. The mutating client has no delete method at all.
-  - swapping an ad's creative. A Meta creative is immutable once attached, so
-    changing what an ad says is a CREATE, not an edit.
+  - creating campaigns and ad sets, and deleting anything. A campaign create
+    carries an objective, a budget and a special-ad-category declaration that
+    is a legal statement a human answers for. The mutating client has no delete
+    method at all. (Ads ARE created here -- always PAUSED -- by
+    preview_duplicate_ad.)
+  - editing a creative in place. A Meta creative is immutable once attached,
+    so changing what an ad says is a new creative: preview_duplicate_ad puts it
+    on a new PAUSED ad, preview_update_ad_copy repoints the existing ad at it.
   - targeting, optimization goal, billing event, schedule, special ad
     categories. None is on the write client's field allowlist.
 

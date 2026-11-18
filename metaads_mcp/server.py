@@ -89,22 +89,26 @@ ALSO WORTH SAYING OUT LOUD: reported conversions use 7-day-click plus
 touched it, which is why Meta's number is routinely several times any
 click-based record of the same campaign. They are not measuring the same thing.
 
-WHAT THIS SERVER CANNOT DO. It changes the status, budget, bid and name of
-things that ALREADY EXIST. That is the whole surface. It cannot:
+WHAT THIS SERVER CAN CHANGE. The status, budget and bid of campaigns, ad sets
+and ads that already exist; an ad's copy or media, either as a NEW PAUSED ad
+beside the original (preview_duplicate_ad) or by repointing the live ad at a new
+creative (preview_update_ad_copy -- a Meta creative is immutable once attached,
+so that is the only way to change what a live ad says); and saved or lookalike
+audiences (preview_create_audience).
 
-  * create or delete a campaign, ad set or ad;
-  * write or change ad copy -- primary text, headline, description -- or swap
-    an image or video. A Meta creative is immutable once attached, so changing
-    what an ad SAYS means creating a new creative and a new ad;
-  * create or edit an audience of any kind: custom, lookalike or saved;
+WHAT IT CANNOT DO:
+
+  * create a campaign or an ad set, or delete anything at all;
+  * create a customer-list audience -- that uploads customer personal data and
+    stays in Ads Manager, where a person accepts the data terms;
   * change targeting, optimization goal, billing event, schedule or special ad
     categories;
   * set a status to DELETED or ARCHIVED (both irreversible -- pause instead);
   * touch billing or account access.
 
-*** NONE OF THAT IS AVAILABLE ANYWHERE IN THIS TOOLCHAIN YET, including the
-CLI. *** If the human needs one of those things, say so plainly and point them
-at Ads Manager. Do NOT tell them to run a script for it -- there isn't one.
+If the human needs one of those, say so plainly and point them at Ads Manager.
+scripts/manage.py has the same write surface as this server and no more, so do
+not send them to a script for it.
 
 There is no generic update/passthrough tool, so if an operation is not listed
 it cannot be performed here.
