@@ -120,12 +120,24 @@ class DuplicateAd(_CreativeKind):
     preview_title = "Preview duplicating an ad with new copy or media"
     apply_title = "Create the duplicate ad the preview described"
     apply_annotations = APPLY_REVERSIBLE
+    creates_named = ("ad", "creative")
+
+    def names(self, ctx, source_name: str, new_name: str | None):
+        """(the ad's name decision, its creative's): ours, on new_name or the
+        source's base with " (copy)"; the creative is "<ad name> creative"."""
+        if new_name:
+            ad = ctx.name_for_create("ad", new_name)
+        else:
+            ad = ctx.name_for_copy("ad", source_name, " (copy)")
+        return ad, ctx.name_derived("creative", f"{ad.final} creative")
 
     def _plan(self, ctx, payload):
+        names = payload.get("names") or {}
         return ads.plan_duplicate_ad(
             ctx.client,
             ad_id=payload["ad_id"],
-            new_name=payload.get("new_name"),
+            new_name=names.get("ad") or payload.get("new_name"),
+            creative_name=names.get("creative"),
             edits=payload.get("edits") or {},
             image_path=payload.get("image_path"),
             video_id=payload.get("video_id"),
@@ -147,7 +159,7 @@ class DuplicateAd(_CreativeKind):
         video_id: Annotated[
             str | None, Field(description="An EXISTING Meta video id to use")
         ] = None,
-        new_name: Annotated[str | None, Field(description="Name for the new ad")] = None,
+        new_name: Annotated[str | None, Field(description="BASE name for the new ad (the owner/agent prefix is added); default: the source's base + ' (copy)'")] = None,
     ) -> Proposal:
         """Show a NEW ad built beside an existing one, with changed copy.
 
@@ -158,15 +170,17 @@ class DuplicateAd(_CreativeKind):
         On a multi-locale creative a single value is applied to every locale.
         Pass nothing for a field to leave it as it is.
         """
+        row = ads.find(ctx.client, ad_id=ad_id)
+        ad_name, creative_name = self.names(ctx, row.get("name") or "", new_name)
         extra = {
             "edits": copy_edits(primary_text, headline, description, link),
             "image_path": image_path,
             "video_id": video_id,
             "new_name": new_name,
+            "names": {"ad": ad_name.final, "creative": creative_name.final},
         }
         plan = self._plan(ctx, {"ad_id": ad_id, **extra})
-        row = ads.find(ctx.client, ad_id=ad_id)
-        return self._preview(
+        proposal = self._preview(
             ctx,
             plan,
             row,
@@ -181,6 +195,9 @@ class DuplicateAd(_CreativeKind):
             payload_extra=extra,
             inverse={"source_ad_id": str(row["id"])},
         )
+        proposal.name(ad_name)
+        proposal.name(creative_name)
+        return proposal
 
     def verify_target(self, payload, result, created) -> str | None:
         return result.node_id or None
@@ -214,6 +231,14 @@ class UpdateAdCopy(_CreativeKind):
     preview_title = "Preview changing a live ad's copy or media"
     apply_title = "Apply the ad copy change (REPLACES THE CREATIVE)"
     apply_annotations = APPLY_SPENDS
+    creates_named = ("creative",)
+    #: What the new creative's name adds to the ad's base.
+    creative_suffix = " creative (updated)"
+
+    def creative_name(self, ctx, ad_name: str):
+        """The new creative: our prefix on the AD's base. The ad itself keeps
+        its name -- a copy edit is not a rename."""
+        return ctx.name_for_copy("creative", ad_name or "", self.creative_suffix)
 
     def _plan(self, ctx, payload):
         return ads.plan_update_copy(
@@ -222,6 +247,7 @@ class UpdateAdCopy(_CreativeKind):
             edits=payload.get("edits") or {},
             image_path=payload.get("image_path"),
             video_id=payload.get("video_id"),
+            creative_name=payload.get("creative_name"),
         )
 
     def propose(
@@ -250,14 +276,16 @@ class UpdateAdCopy(_CreativeKind):
         copy is approved. revert_change points the ad back at its previous
         creative.
         """
+        row = ads.find(ctx.client, ad_id=ad_id)
+        naming = self.creative_name(ctx, row.get("name") or "")
         extra = {
             "edits": copy_edits(primary_text, headline, description, link),
             "image_path": image_path,
             "video_id": video_id,
+            "creative_name": naming.final,
         }
         plan = self._plan(ctx, {"ad_id": ad_id, **extra})
-        row = ads.find(ctx.client, ad_id=ad_id)
-        return self._preview(
+        proposal = self._preview(
             ctx,
             plan,
             row,
@@ -270,6 +298,8 @@ class UpdateAdCopy(_CreativeKind):
             payload_extra=extra,
             inverse={"previous_creative_id": creative_id_of(row)},
         )
+        proposal.name(naming)
+        return proposal
 
     def verify_target(self, payload, result, created) -> str | None:
         return payload["ad_id"]

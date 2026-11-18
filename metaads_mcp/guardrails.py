@@ -383,7 +383,10 @@ class DailyUsage:
         delta = Decimal("0")
         for row in groups.values():
             inverse = row.get("inverse") if isinstance(row.get("inverse"), dict) else {}
-            applies += int(inverse.get("weight") or 1)
+            # weight 0 is explicit: a copy's follow-up renames are part of
+            # the create that already paid for them.
+            weight = inverse.get("weight")
+            applies += 1 if weight is None or weight == "" else int(weight)
             try:
                 value = Decimal(str(row.get("projected_daily_spend_delta") or "0"))
             except InvalidOperation:

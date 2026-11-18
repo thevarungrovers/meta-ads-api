@@ -341,6 +341,15 @@ def stamp(identity: Identity, requested: str, *, entity_type: str) -> Stamped:
                    prefix=identity.prefix, rule=rule, entity_type=entity_type)
 
 
+def derived(name: str, *, entity_type: str) -> Stamped:
+    """A name built from one already decided (an ad's creative: "<ad name>
+    creative"): only the length and characters are checked, the prefix is
+    whatever the name it came from carries."""
+    _check_base(name, Identity(), entity_type)
+    return Stamped(final=name, base=name, requested=name, prefix="", rule="derived",
+                   entity_type=entity_type)
+
+
 def strip_prefix(identity: Identity, name: str) -> str:
     """``name`` without any full prefix (ours, another agent's, the CLI's), and
     without our own partial one."""

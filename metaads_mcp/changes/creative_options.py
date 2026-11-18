@@ -234,11 +234,15 @@ class _Repoint(UpdateAdCopy):
     def extra_checks(self, ctx, row, creative, payload) -> list[Check]:
         return []
 
+    @property
+    def creative_suffix(self) -> str:  # type: ignore[override]
+        return f" creative ({self.name})"
+
     def _plan(self, ctx, payload):
         source = ads.find(ctx.client, ad_id=payload["ad_id"])
         creative = ads._creative_of(ctx.client, source)
-        spec = creatives.plan_payload(creative, {}, name=f"{source.get('name')} creative ({self.name})",
-                                      allow_empty=True)
+        name = payload.get("creative_name") or self.creative_name(ctx, source.get("name") or "").final
+        spec = creatives.plan_payload(creative, {}, name=name, allow_empty=True)
         before, after = self.transform(ctx, creative, payload, spec)
         if canonical(before) == canonical(after):
             raise ValueError(f"The ad's {self.field_label} is already {canonical(after)}.")
@@ -257,9 +261,10 @@ class _Repoint(UpdateAdCopy):
         )
 
     def _propose(self, ctx, ad_id: str, **payload) -> Proposal:
-        payload = {"ad_id": ad_id, **payload}
-        plan = self._plan(ctx, payload)
         row = ads.find(ctx.client, ad_id=ad_id)
+        naming = self.creative_name(ctx, row.get("name") or "")
+        payload = {"ad_id": ad_id, **payload, "creative_name": naming.final}
+        plan = self._plan(ctx, payload)
         creative = ads._creative_of(ctx.client, row)
         proposal = self._preview(
             ctx, plan, row, projected=Decimal("0"),
@@ -269,6 +274,7 @@ class _Repoint(UpdateAdCopy):
         )
         proposal.field_name = self.field_label
         proposal.checks.extend(self.extra_checks(ctx, row, creative, payload))
+        proposal.name(naming)
         return proposal
 
 
@@ -295,7 +301,9 @@ class UrlTags(_Repoint):
         a new creative with the tags and repoints the ad (revert points it back).
         The preview checks the destination WITH the tags appended.
         """
-        return self._propose(ctx, ad_id, url_tags=check_url_tags(url_tags))
+        proposal = self._propose(ctx, ad_id, url_tags=check_url_tags(url_tags))
+        proposal.warnings.extend(name_macro_warnings(url_tags))
+        return proposal
 
 
 class AdvantageCreativeOptions(_Repoint):
@@ -404,6 +412,8 @@ class ReplaceAdCreative(UpdateAdCopy):
     apply_title = "Apply the creative swap (REPLACES THE CREATIVE)"
     apply_annotations = APPLY_SPENDS
     verifies_ad = True
+    #: Points at a creative that already exists: names nothing.
+    creates_named = ()
 
     def _plan(self, ctx, payload):
         source = ads.find(ctx.client, ad_id=payload["ad_id"])

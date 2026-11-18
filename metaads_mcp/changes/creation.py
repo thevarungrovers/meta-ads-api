@@ -262,34 +262,92 @@ class CreateAdSet(_Creates):
                              changes=[FieldChange("ad set", None, create["name"])], edge="adsets")
 
 
+#: Graph type, and readable type, of what a /copies response lists.
+_COPY_TYPES = {"campaign": ("campaign", "campaign"), "adset": ("adset", "ad set"),
+               "ad": ("ad", "ad")}
+
+
 class _Duplicate(_Creates):
+    """Meta's /copies, PAUSED -- then, with a naming identity configured, one
+    rename per object it created, so every copy carries OUR prefix on its
+    source's base (Meta would keep or decorate the source's names). Each
+    rename is its own ledger row; together they count against
+    max_entities_per_call. With no identity, Meta's own copy naming is kept.
+    """
+
     child_edge = ""
     noun = ""
+    graph_type = ""
 
     def _children(self, ctx, source_id: str) -> list[dict[str, Any]]:
         rows = ctx.read.edge(str(source_id), self.child_edge, ("id", "name", "status"),
                              limit=200, max_items=201)
         return rows
 
+    def _tree(self, ctx, row, children) -> list[tuple[str, str, str]]:
+        """(source id, graph type, source name) of everything the copy makes."""
+        tree = [(str(row["id"]), self.graph_type, row.get("name") or "")]
+        child_type = "adset" if self.child_edge == "adsets" else "ad"
+        for child in children:
+            tree.append((str(child["id"]), child_type, child.get("name") or ""))
+            if child_type == "adset":
+                for grandchild in ctx.read.edge(str(child["id"]), "ads", ("id", "name"),
+                                                limit=200, max_items=201):
+                    tree.append((str(grandchild["id"]), "ad", grandchild.get("name") or ""))
+        return tree
+
     def _proposal(self, ctx, row, deep_copy: bool) -> Proposal:
         children = self._children(ctx, str(row["id"])) if deep_copy else []
         if len(children) > 200:
             raise ValueError(f"More than 200 {self.child_edge} under it; copy it in Ads Manager.")
         listing = [f"{c.get('id')} {c.get('name')}" for c in children]
-        return Proposal(
-            entity_type=self.noun, entity_id="(new)", entity_name=f"copy of {row.get('name')}",
+        checks = [Check("children_listed", True,
+                        f"{len(children)} {self.child_edge} will be copied: {listing[:20]}"
+                        + (" ..." if len(listing) > 20 else ""))]
+        decisions = []
+        renames: list[dict[str, str]] = []
+        if ctx.identity.configured or ctx.identity.problem:
+            tree = self._tree(ctx, row, children)
+            limit = ctx.limits.max_entities_per_call
+            checks.append(Check(
+                "copy_renames", len(tree) <= limit,
+                f"{len(tree)} object(s) to name with {ctx.identity.prefix!r} (the copy and "
+                f"everything under it), one rename each, against max_entities_per_call {limit}"
+                + ("" if len(tree) <= limit else "; copy less (deep_copy=False) or in Ads Manager"),
+            ))
+            for source_id, graph_type, source_name in tree:
+                decision = ctx.name_for_copy(_COPY_TYPES[graph_type][1], source_name)
+                decisions.append(decision)
+                renames.append({"source_id": source_id, "graph_type": graph_type,
+                                "source_name": source_name, "final": decision.final})
+        top_name = renames[0]["final"] if renames else f"copy of {row.get('name')}"
+        proposal = Proposal(
+            entity_type=self.noun, entity_id="(new)", entity_name=top_name,
             path=row.get("name") or "", field_name="created", before=NOTHING,
             after=f"PAUSED copy of {self.noun} {row['id']}"
-            + (f" with {len(children)} {self.child_edge}" if deep_copy else " (no children)"),
-            checks=[Check("children_listed", True,
-                          f"{len(children)} {self.child_edge} will be copied: {listing[:20]}"
-                          + (" ..." if len(listing) > 20 else ""))],
+            + (f" with {len(children)} {self.child_edge}" if deep_copy else " (no children)")
+            + (f", named {top_name!r}" if renames else ""),
+            checks=checks,
             projected=Decimal("0"),
-            payload={"source_id": str(row["id"]), "deep_copy": bool(deep_copy)},
+            payload={"source_id": str(row["id"]), "deep_copy": bool(deep_copy), "renames": renames},
             campaign_id=str(row.get("campaign_id") or row["id"]),
             account_id=row.get("account_id"),
-            warnings=["everything is copied PAUSED (status_option=PAUSED); nothing spends until activated"],
+            warnings=["everything is copied PAUSED (status_option=PAUSED); nothing spends until activated"]
+            + ([f"{len(renames)} rename(s) follow the copy, one ledger entry each: "
+                + "; ".join(r["final"] for r in renames[:10]) + (" ..." if len(renames) > 10 else "")]
+               if renames else []),
         )
+        for decision in decisions:
+            proposal.name(decision)
+        if not renames:
+            # No identity: Meta's own copy naming is kept, and said so.
+            from metaads_reporting.naming import NO_IDENTITY_RULE
+
+            proposal.naming.append({"requested": None, "final": None, "prefix": "",
+                                    "base": None, "length": None, "max_length": None,
+                                    "rule": f"{NO_IDENTITY_RULE}; Meta's copy naming is kept"})
+            proposal.created_names.append((self.noun, "(named by Meta)"))
+        return proposal
 
     def build(self, ctx, payload):
         return PlannedChange(
@@ -298,6 +356,48 @@ class _Duplicate(_Creates):
             payload={"status_option": "PAUSED", "deep_copy": "true" if payload["deep_copy"] else "false"},
             changes=[FieldChange("copy", None, payload["source_id"])], edge="copies",
         )
+
+    def follow_ups(self, ctx, payload, result, created):
+        """One name update per object the copy created, to its previewed name."""
+        from metaads_mcp.changes.base import LedgerItem
+
+        renames = {r["source_id"]: r for r in payload.get("renames") or []}
+        if not renames:
+            return []
+        made = [(str(payload["source_id"]), result.node_id, self.graph_type)]
+        for child in result.response.get("ad_object_ids") or []:
+            if isinstance(child, dict) and child.get("copied_id"):
+                made.append((str(child.get("source_id")), str(child["copied_id"]),
+                             str(child.get("ad_object_type") or "")))
+        out = []
+        for source_id, copied_id, graph_type in made:
+            if not copied_id:
+                continue
+            wanted = renames.get(source_id)
+            graph_type = (wanted or {}).get("graph_type") or graph_type
+            if graph_type not in _COPY_TYPES:
+                continue
+            if wanted is None:
+                # Not in the preview's tree (Meta copied more than it listed):
+                # named the same way, from its source.
+                source = ctx.read.node(source_id, ("id", "name"))
+                final = ctx.name_for_copy(_COPY_TYPES[graph_type][1], source.get("name") or "").final
+            else:
+                final = wanted["final"]
+            live = ctx.read.node(copied_id, ("id", "name")).get("name") or ""
+            if live == final:
+                continue
+            plan = PlannedChange(
+                action="update", entity=_COPY_TYPES[graph_type][1], entity_type=graph_type,
+                node_id=copied_id, label=f"{final} (id {copied_id})", payload={"name": final},
+                changes=[FieldChange("name", live, final)])
+            item = LedgerItem(
+                entity_type=_COPY_TYPES[graph_type][1], entity_id=copied_id, entity_name=final,
+                field_name="name", before=live, after=final,
+                inverse={"kind": "low_risk_change", "previous": {"name": live}, "field": "name",
+                         "graph_field": "name", "graph_type": graph_type})
+            out.append((plan, item))
+        return out
 
 
 class DuplicateAdSet(_Duplicate):
@@ -309,6 +409,7 @@ class DuplicateAdSet(_Duplicate):
     child_edge = "ads"
     noun = "ad set"
     graph_type = "adset"
+    creates_named = ("ad set", "ad")
 
     def propose(
         self,
@@ -334,6 +435,7 @@ class DuplicateCampaign(_Duplicate):
     child_edge = "adsets"
     noun = "campaign"
     graph_type = "campaign"
+    creates_named = ("campaign", "ad set", "ad")
 
     def propose(
         self,

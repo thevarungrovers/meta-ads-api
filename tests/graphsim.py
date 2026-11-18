@@ -283,14 +283,17 @@ class GraphSim:
         is_campaign = "objective" in source
         new_id = f"COPY{len(self.created) + 1}"
         self.created.append({"edge": "copies", "node": node, "payload": body})
+        decorate = getattr(self, "copy_suffix", "")
         self.objects[new_id] = {**source, "id": new_id, "status": body.get("status_option", "PAUSED"),
-                                "effective_status": body.get("status_option", "PAUSED")}
+                                "effective_status": body.get("status_option", "PAUSED"),
+                                "name": f"{source.get('name', '')}{decorate}"}
         children = []
         if body.get("deep_copy") in (True, "true", "True"):
             child_edge = "adsets" if is_campaign else "ads"
             for child in (self.edges.get(node) or {}).get(child_edge, []):
                 child_id = f"{new_id}_{child}"
-                self.objects[child_id] = {**self.objects[child], "id": child_id, "status": "PAUSED"}
+                self.objects[child_id] = {**self.objects[child], "id": child_id, "status": "PAUSED",
+                                          "name": f"{self.objects[child].get('name', '')}{decorate}"}
                 children.append({"ad_object_type": child_edge[:-1], "source_id": child,
                                  "copied_id": child_id})
         key = "copied_campaign_id" if is_campaign else "copied_adset_id"

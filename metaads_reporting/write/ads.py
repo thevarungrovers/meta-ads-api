@@ -333,8 +333,13 @@ def plan_duplicate_ad(
     image_path: str | None = None,
     video_id: str | None = None,
     account_id: str | None = None,
+    creative_name: str | None = None,
 ) -> _PlannedChange:
     """A NEW ad beside an existing one, with edited copy and/or new media.
+
+    ``new_name`` and ``creative_name`` default to "<source> (copy)" and
+    "<ad name> creative"; the MCP kind and the CLI always pass both, already
+    named by metaads_reporting.naming.
 
     Always PAUSED. An ad created ACTIVE begins spending the moment it is
     approved, before anyone has looked at it, so going live stays a separate
@@ -359,7 +364,7 @@ def plan_duplicate_ad(
 
     name = new_name or f"{source.get('name')} (copy)"
     creative_plan = _creative_plan(
-        creative, edits, media_spec, name=f"{name} creative"
+        creative, edits, media_spec, name=creative_name or f"{name} creative"
     )
 
     before = creative.current_text()
@@ -412,8 +417,12 @@ def plan_update_copy(
     image_path: str | None = None,
     video_id: str | None = None,
     account_id: str | None = None,
+    creative_name: str | None = None,
 ) -> _PlannedChange:
     """Repoint an EXISTING ad at a new creative. Keeps the ad id.
+
+    The AD keeps its name; only the new creative is named (``creative_name``,
+    default "<ad name> creative (updated)").
 
     The cost is social proof. Unless the ad runs on an existing page post, a
     new creative means a new post, and the likes, comments and shares
@@ -433,7 +442,8 @@ def plan_update_copy(
         )
 
     creative_plan = _creative_plan(
-        creative, edits, media_spec, name=f"{source.get('name')} creative (updated)"
+        creative, edits, media_spec,
+        name=creative_name or f"{source.get('name')} creative (updated)",
     )
 
     before = creative.current_text()

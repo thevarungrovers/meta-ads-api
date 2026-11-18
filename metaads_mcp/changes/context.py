@@ -116,6 +116,13 @@ class WriteContext:
                        lambda: restamp_for_copy(self.identity, source_name,
                                                 entity_type=entity_type, suffix=suffix))
 
+    def name_derived(self, entity_type: str, name: str) -> NameDecision:
+        """A name derived from one already decided: checked for length only."""
+        from metaads_reporting.naming import derived
+
+        return _decide(self.identity, entity_type, name,
+                       lambda: derived(name, entity_type=entity_type))
+
     def name_for_rename(self, entity_type: str, current: str, requested: str, *,
                         ledger_owned: bool) -> NameDecision:
         """The new name of one of the agent's OWN entities; others are refused."""

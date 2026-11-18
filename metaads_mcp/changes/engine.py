@@ -348,6 +348,9 @@ class Engine:
             confirm=lambda: kind.landed(ctx, payload),
         )
         ctx.counters.record(pending.projected_delta, weight=kind.weight)
+        follow_ups = self._send_follow_ups(kind, payload, result, created, tool=tool,
+                                           account=entity.get("account_id"),
+                                           follows=entry_ids[0])
 
         verification = None
         if kind.verifies_ad:
@@ -383,7 +386,50 @@ class Engine:
             entry_ids=entry_ids if batch_id else [],
             projected_daily_spend_delta=f"{pending.projected_delta:.2f}",
             verification=verification,
+            follow_ups=follow_ups,
         )
+
+    def _send_follow_ups(self, kind: ChangeKind, payload, result, created, *, tool: str,
+                         account, follows: str) -> list[dict[str, Any]] | None:
+        """The writes a kind makes right after its apply (a copy's renames).
+
+        Each is its own ledger row -- revertible on its own -- sharing one
+        batch_id, at weight 0 and projected 0: they are part of the apply that
+        was approved and paid for. A failure does not undo the main write
+        (it landed); it is recorded failed and reported, and reconcile_ledger
+        lists the name it left behind.
+        """
+        try:
+            planned = kind.follow_ups(self.ctx, payload, result, created)
+        except Exception as exc:  # noqa: BLE001 - the main write landed; report
+            return [{"ok": False, "error": f"could not plan the follow-up writes: {exc}"}]
+        if not planned:
+            return None
+        batch_id = secrets.token_hex(6)
+        out = []
+        for plan, item in planned:
+            entry_id = ledger.new_entry_id()
+            ledger.write_intent(
+                entry_id=entry_id, tool=tool, account_id=account or self.ctx.default_account,
+                entity_type=item.entity_type, entity_id=str(item.entity_id),
+                entity_name=item.entity_name, field_name=item.field_name,
+                before=item.before, after=item.after, projected_delta="0",
+                inverse={"weight": 0, "batch_id": batch_id, "follows": follows,
+                         **(item.inverse or {})},
+            )
+            try:
+                sent, _ = self.ctx.send(plan, apply=True)
+                if not sent.success:
+                    raise RuntimeError(f"Meta did not confirm: {sent.response!r}")
+            except Exception as exc:  # noqa: BLE001 - recorded and reported
+                ledger.write_outcome(entry_id=entry_id, ok=False, error=str(exc))
+                out.append({"entry_id": entry_id, "entity_id": str(item.entity_id),
+                            "name": item.after, "ok": False, "error": str(exc).splitlines()[0]})
+                continue
+            ledger.write_outcome(entry_id=entry_id, ok=True, resource_name=str(item.entity_id))
+            out.append({"entry_id": entry_id, "entity_id": str(item.entity_id),
+                        "name": item.after, "ok": True, "error": None})
+        return out
 
     @staticmethod
     def _result_entity_id(entity: dict[str, Any], result, created: list[str]) -> str:
