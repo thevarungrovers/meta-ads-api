@@ -74,6 +74,31 @@ REFUSED_STATUSES = {
     ),
 }
 
+#: Account edges whose objects deliver -- and spend -- once ACTIVE. A create on
+#: one of these is refused unless it is created PAUSED: activating is always a
+#: separate, previewed, approved step. Enforced HERE, below every tool, so no
+#: caller can create something live by forgetting a field.
+DELIVERY_EDGES = frozenset({"campaigns", "adsets", "ads"})
+
+
+def check_create_paused(edge: str, payload: dict[str, Any]) -> None:
+    """Refuse a create that would start delivering on its own."""
+    status = str(payload.get("status") or "").upper()
+    if status in REFUSED_STATUSES:
+        raise MutationError(f"Refusing to create anything with status {status}.")
+    if edge in DELIVERY_EDGES and status != "PAUSED":
+        raise MutationError(
+            f"Refusing to create on {edge} with status {status or '(none)'}: "
+            "everything this package creates is created PAUSED, and activating "
+            "it is a separate step a human approves."
+        )
+    option = str(payload.get("status_option") or "").upper()
+    if edge == "copies" and option != "PAUSED":
+        raise MutationError(
+            "Refusing a copy without status_option=PAUSED: copies are created paused."
+        )
+
+
 #: Budget above which a write is refused unless explicitly overridden. Not a
 #: security control -- it is a typo catch, in the account's MAJOR units. The
 #: failure it exists for is an amount entered in minor units by mistake, which
@@ -305,6 +330,7 @@ class MutatingMetaAdsClient:
         """
         if not payload:
             raise MutationError("Nothing to create: the payload is empty.")
+        check_create_paused(edge, payload)
         target = self.resolve_account_id(account_id)
         # Same JSON encoding as `update`. A creative's object_story_spec and an
         # audience's lookalike_spec are both dicts, and handing one to requests

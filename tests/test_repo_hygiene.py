@@ -318,15 +318,37 @@ def test_the_write_surface_the_docs_claim_matches_the_allowlist():
     )
 
 
-def test_create_is_still_unreachable_from_the_server():
-    """create() has no caller. If one is added, it needs its own guard and the
-    docs need to stop saying creation is unavailable."""
-    import metaads_mcp.tools_write as tools_write
-    import metaads_reporting.write.campaigns as campaigns
+def test_every_create_is_paused_by_construction():
+    """The old test grepped tools_write for ".create(" -- which it never
+    contained, because creates go through plan.execute -- so it passed while
+    creation WAS reachable. This pins what actually matters: the one create
+    path refuses anything that would deliver, and the server reaches it only
+    through a ChangeKind.
+    """
+    import ast
 
-    for module in (tools_write, campaigns):
-        source = (REPO_ROOT / module.__file__.split("meta-ads-api/")[-1]).read_text()
-        assert ".create(" not in source, f"{module.__name__} now calls create()"
+    from metaads_reporting.write.client import DELIVERY_EDGES, MutationError, check_create_paused
+
+    assert DELIVERY_EDGES == {"campaigns", "adsets", "ads"}
+    for edge in DELIVERY_EDGES:
+        check_create_paused(edge, {"status": "PAUSED"})
+        for status in ("ACTIVE", None, "ARCHIVED", "DELETED"):
+            with pytest.raises(MutationError):
+                check_create_paused(edge, {"status": status})
+    with pytest.raises(MutationError):
+        check_create_paused("copies", {"status_option": "ACTIVE"})
+
+    # No server module calls a client's create() directly: creation goes
+    # through a kind's build() -> the engine -> plan.execute.
+    for path in (REPO_ROOT / "metaads_mcp").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "create"
+            ):
+                pytest.fail(f"{path.relative_to(REPO_ROOT)}:{node.lineno} calls .create() directly")
 
 
 # --- documentation that DISCLAIMS a capability -------------------------------
