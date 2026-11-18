@@ -67,6 +67,8 @@ class _Creates(ChangeKind):
 
     apply_annotations = APPLY_SPENDS
     weight = CREATE_WEIGHT
+    #: Everything is created PAUSED (the write client enforces it).
+    adds_no_spend = True
     module: Any = None
     id_arg: str = ""
 

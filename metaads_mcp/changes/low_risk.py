@@ -46,6 +46,7 @@ def _labels(row: dict[str, Any]) -> list[dict[str, str]]:
 
 class LowRiskChange(NodeFieldKind):
     name = "low_risk_change"
+    adds_no_spend = True
     preview_title = "Preview a low-risk edit: a name or an ad label"
     apply_title = "Apply a low-risk edit (name or label)"
     apply_annotations = APPLY_REVERSIBLE

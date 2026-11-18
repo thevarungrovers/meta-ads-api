@@ -277,6 +277,10 @@ class Proposal:
     #: itself, but undoing it lifts the restriction: the ledger marks it, and
     #: its revert projects the unused budget headroom and counts it.
     tightens: bool = False
+    #: The kind says this change can only LOWER spend (a cut, a pause): the
+    #: engine may then skip the cap_currency refusal when nothing is
+    #: projected. A projection of 0 alone never proves that.
+    reduces_spend: bool = False
     #: The preview's ``naming`` blocks (metaads_reporting.naming), one per name
     #: decided: requested, final, prefix, base, length, max_length, rule.
     naming: list[dict[str, Any]] = field(default_factory=list)
@@ -346,6 +350,11 @@ class ChangeKind:
     #: SENDS to carry the prefix (and at least one name to be sent);
     #: tests/test_mcp_surface.py requires every creating kind to declare it.
     creates_named: tuple[str, ...] = ()
+    #: The kind cannot add spend BY CONSTRUCTION: names and labels, and
+    #: creations (everything is created PAUSED, enforced by the write client).
+    #: Only these skip the allowed_currencies check; every other kind is
+    #: checked whatever it projects.
+    adds_no_spend: bool = False
 
     def follow_ups(self, ctx, payload: dict[str, Any], result, created: list[str]) -> list:
         """Writes to make right after a successful apply, each its own ledger

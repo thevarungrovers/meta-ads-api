@@ -40,6 +40,7 @@ CREATE_WEIGHT = 3
 
 class CreateAd(ChangeKind):
     name = "create_ad"
+    adds_no_spend = True
     preview_title = "Preview creating a PAUSED ad from an existing creative"
     apply_title = "Create the PAUSED ad the preview described"
     apply_annotations = APPLY_SPENDS
@@ -137,6 +138,7 @@ def default_identity(ctx) -> tuple[str | None, str | None]:
 
 class CreateCreative(ChangeKind):
     name = "create_creative"
+    adds_no_spend = True
     preview_title = "Preview creating a new ad creative (unattached)"
     apply_title = "Create the creative the preview described"
     apply_annotations = APPLY_SPENDS

@@ -80,7 +80,7 @@ def _at(days: int) -> str:
     return (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=days)).replace(microsecond=0).isoformat()
 
 
-def test_shortening_a_daily_flight_is_tightening_and_its_revert_projects_the_headroom(monkeypatch):
+def test_shortening_a_daily_flight_is_tightening_and_its_revert_projects_the_daily_budget(monkeypatch):
     from metaads_mcp import ledger
 
     sim = abo_sim(start_time="2026-01-01T00:00:00+0000", end_time=_at(30))
@@ -90,7 +90,8 @@ def test_shortening_a_daily_flight_is_tightening_and_its_revert_projects_the_hea
     result = tools["apply_ad_set_schedule"](preview_token=preview.preview_token)
     assert ledger.find_entry(result.entry_id)["inverse"].get("tightens") is True
     undo = tools["revert_change"](entry_id=result.entry_id)
-    assert Decimal(undo.projected_daily_spend_delta) == pytest.approx(HEADROOM, abs=Decimal("0.01"))
+    # The days put back each spend the whole daily budget.
+    assert Decimal(undo.projected_daily_spend_delta) == Decimal("50.00")
 
 
 def test_ending_an_open_ended_daily_flight_is_tightening(monkeypatch):
@@ -109,7 +110,7 @@ def test_moving_the_start_earlier_adds_days_even_with_no_old_end(monkeypatch):
     sim.objects[ADSET_ID].pop("end_time", None)
     tools, _ = rig(monkeypatch, sim)
     preview = tools["preview_ad_set_schedule"](ad_set_id=ADSET_ID, start_time=_at(2), end_time=_at(40))
-    assert Decimal(preview.projected_daily_spend_delta) == pytest.approx(HEADROOM, abs=Decimal("0.01"))
+    assert Decimal(preview.projected_daily_spend_delta) == Decimal("50.00")
 
 
 def test_adds_days_counts_an_earlier_start_whatever_the_end():

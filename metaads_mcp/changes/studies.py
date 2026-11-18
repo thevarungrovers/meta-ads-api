@@ -41,6 +41,7 @@ def _ad_set_signature(ctx, ad_set_id: str) -> dict[str, str]:
 
 class CreateAbTest(ChangeKind):
     name = "create_ab_test"
+    adds_no_spend = True
     preview_title = "Preview creating an A/B (split) test between PAUSED ad sets or campaigns"
     apply_title = "Create the A/B test the preview described"
     apply_annotations = APPLY_SPENDS

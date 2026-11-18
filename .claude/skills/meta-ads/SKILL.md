@@ -412,9 +412,12 @@ undo yours.
 A revert that restores spend counts against the caps like the change it
 undoes, in the cap currency (converted once, from the entity's currency).
 Undoing a change that tightened delivery -- and every later revert in that
-chain that lifts it again -- projects the live unused budget headroom. A
-pause or a cut in a currency with no configured rate is let through (counted
-as 0); anything that adds spend needs the currency in `allowed_currencies`.
+chain that lifts it again -- projects the live unused budget headroom
+(undoing a shortened daily-budget flight projects the whole daily budget, as
+does adding days to one). A pause or a cut in a currency with no configured
+rate is let through (counted as 0), but a projection of 0 alone is not enough;
+every change that can move money, a pause included, needs the currency in
+`allowed_currencies`.
 
 An entry showing `applied: false` **with no error** is the one to look at
 carefully: the write left the process and nothing recorded how it ended, so it

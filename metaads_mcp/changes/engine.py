@@ -164,12 +164,14 @@ class Engine:
         checks.extend(proposal.checks)
         currency = ctx.currency(account)
         # The totals are in ONE currency: count this change in it, or refuse.
-        # A change that can only LOWER spend has nothing to count, so a
-        # missing rate never strands a pause or a cut; it is counted as 0
-        # rather than as an unconverted figure.
+        # A change that PROVABLY can only lower spend has nothing to count, so
+        # a missing rate never strands a pause or a cut; it is counted as 0
+        # rather than as an unconverted figure. A projection of 0 alone is
+        # not that proof: adding days to a flight that already spends its
+        # whole budget projected 0 once.
         cap_check = check_cap_currency(ctx.limits, currency)
         counted = to_cap_currency(ctx.limits, proposal.projected, currency)
-        if not cap_check.ok and proposal.projected <= 0:
+        if not cap_check.ok and self._cannot_add_spend(kind, proposal):
             cap_check = Check(
                 "cap_currency", True,
                 f"{currency}: no rate to {cap_currency(ctx.limits)} is configured, but this "
@@ -186,10 +188,11 @@ class Engine:
                 f"{proposal.projected:.2f} {currency} is counted against the totals as "
                 f"{counted:.2f} {cap_currency(ctx.limits)} at the configured rate"
             )
-        # Anything that can restore or add spend (an activation, a widening,
-        # an increase of any kind) is in an allowed currency, whether or not
-        # the kind checked it itself.
-        if ((proposal.is_activation or counted > 0)
+        # Every change that can move money is in an allowed currency, whatever
+        # it projects and whether or not the kind checked it itself. Only a
+        # kind that cannot add spend by construction (a name, a label, a
+        # creation that starts PAUSED) is exempt.
+        if ((not kind.adds_no_spend or proposal.is_activation or counted > 0)
                 and not any(c.name == "currency_allowed" for c in checks)):
             checks.append(check_currency(ctx.limits, currency))
         if proposal.batch:
@@ -301,6 +304,22 @@ class Engine:
             previews=previews,
             naming=proposal.naming or None,
         )
+
+    @staticmethod
+    def _cannot_add_spend(kind: ChangeKind, proposal: Proposal) -> bool:
+        """Whether ``proposal`` provably cannot add spend.
+
+        A negative projection; or nothing projected AND one of: the change
+        pauses (its after-state is PAUSED), the kind declares it a reduction
+        (a cut, a tightening), or the kind cannot add spend by construction.
+        Never a projection of 0 on its own.
+        """
+        if proposal.projected < 0:
+            return True
+        if proposal.projected > 0 or proposal.is_activation:
+            return False
+        pauses = proposal.field_name == "status" and proposal.after == "PAUSED"
+        return pauses or proposal.reduces_spend or proposal.tightens or kind.adds_no_spend
 
     def _naming_checks(self, kind: ChangeKind, proposal: Proposal,
                        payload: dict[str, Any]) -> list[Check]:

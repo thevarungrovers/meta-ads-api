@@ -581,8 +581,9 @@ limits and totals are counted in the *cap currency*: `cap_currency` under
 `[scope]` if set, otherwise the first entry of `allowed_currencies`. A change to
 an entity whose account is in another currency is **refused at preview**
 (`FAIL cap_currency`), because adding JPY amounts to CAD ones makes every total
-meaningless -- unless it can only **lower** spend (a pause, a cut), which is
-let through and counted as 0. The one exception is a conversion you configure
+meaningless -- unless it provably can only **lower** spend (a pause, a cut, a
+tightening that projects nothing, a rename or a PAUSED creation), which is let
+through and counted as 0. A projection of 0 alone is not that proof. The one exception is a conversion you configure
 yourself; no rate is ever looked up or guessed, and a rate for a currency that
 is not in `allowed_currencies` is refused when the file loads:
 
@@ -599,10 +600,11 @@ With a rate, the preview still shows the projection in the entity's currency, an
 a warning says what it is counted as; the token, the counters and the ledger
 carry the converted amount, rounded up for an increase and down for a cut, never
 to the nearest. The ledger also keeps the entity-currency figure, and a revert
-works from that one, so it is converted exactly once. Anything that adds or
-restores spend -- an activation, an increase, a targeting widening, a schedule
-extension, a revert that lifts a restriction -- also checks the entity's
-currency is in `allowed_currencies`.
+works from that one, so it is converted exactly once. Every change that can
+move money -- whatever it projects, a pause included -- checks the entity's
+currency is in `allowed_currencies`; only names, labels and PAUSED creations
+are exempt. Adding days to a daily-budget flight projects the whole daily
+budget for each added day, not the unused headroom.
 
 ### 4. The stop button
 
@@ -686,7 +688,8 @@ re-applies the original change, and costs what it projected. Undoing a change
 that **tightened** delivery (a cap, a floor, narrowed targeting) projects the
 entity's unused budget headroom, and so does every later step of that revert
 chain that lifts the restriction again, however deep: the headroom is re-read
-at that moment, never taken from an older step.
+at that moment, never taken from an older step. Undoing a shortened
+daily-budget flight puts days back, so it projects the whole daily budget.
 
 ## How reading and writing are kept apart
 

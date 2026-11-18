@@ -103,7 +103,7 @@ def test_local_midnight_with_a_zone_aware_now():
 # --- (e) extending a daily-budget flight projects the added days ----------------
 
 
-def test_extending_a_daily_budget_flight_projects_its_headroom(monkeypatch):
+def test_extending_a_daily_budget_flight_projects_its_daily_budget(monkeypatch):
     from tests.test_kinds_bidding import abo_sim
     from tests.test_mcp_write_path import ADSET_ID
 
@@ -112,7 +112,6 @@ def test_extending_a_daily_budget_flight_projects_its_headroom(monkeypatch):
     tools, _ = rig(monkeypatch, sim)
     later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).replace(microsecond=0).isoformat()
     preview = tools["preview_ad_set_schedule"](ad_set_id=ADSET_ID, end_time=later)
-    # 50.00/day less the 123.45 / 7 the fixture spends a day.
-    assert Decimal(preview.projected_daily_spend_delta) == pytest.approx(
-        Decimal("50.00") - Decimal("123.45") / 7, abs=Decimal("0.01"))
+    # Each added day spends the whole 50.00 daily budget, not the headroom.
+    assert Decimal(preview.projected_daily_spend_delta) == Decimal("50.00")
     assert any("projected_delta_per_day" in c and "SKIP" in c for c in preview.checks), preview.checks

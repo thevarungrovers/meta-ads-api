@@ -117,6 +117,7 @@ class _CreativeKind(ChangeKind):
 
 class DuplicateAd(_CreativeKind):
     name = "duplicate_ad"
+    adds_no_spend = True
     preview_title = "Preview duplicating an ad with new copy or media"
     apply_title = "Create the duplicate ad the preview described"
     apply_annotations = APPLY_REVERSIBLE

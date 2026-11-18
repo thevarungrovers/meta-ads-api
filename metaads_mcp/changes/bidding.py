@@ -522,18 +522,17 @@ def _schedule(kind, ctx, row, end_value: str | None, start_value: str | None,
         warnings.append(f"the lifetime budget is re-paced over {new_days:.1f} day(s)")
     extends = False
     if not row.get("lifetime_budget") and _adds_days(row, fields, end_field):
-        # A DAILY budget spends that budget on every day the flight runs: the
-        # added days are spend that would not have happened. Counted like an
-        # activation -- the unused daily headroom, exempt from the per-change
-        # limit and counted in the daily and session totals.
-        from metaads_mcp.changes.common import unused_headroom
-
-        level = "ad set" if end_field == "end_time" else "campaign"
-        projected = unused_headroom(ctx, {"entity_type": level, "entity_id": row["id"]})
+        # A DAILY budget spends that budget on every day the flight runs: each
+        # added day is a whole day's budget that would not have been spent.
+        # NOT the unused headroom -- headroom 0 means the flight already spends
+        # its whole budget, which is exactly why the extra days add spend.
+        # Counted like an activation: exempt from the per-change limit and
+        # counted in the daily and session totals.
+        projected, why = _daily_bound_of(ctx, row, end_field)
         extends = projected > 0
         warnings.append(
-            f"this adds days to a daily-budget flight: up to {projected:.2f}/day more "
-            "(the unused daily budget) on each added day"
+            f"this adds days to a daily-budget flight: up to {projected:.2f}/day on each "
+            f"added day ({why})"
         )
     # A daily-budget flight that loses days projects nothing itself, but its
     # revert adds those days back: tightening, so the revert projects the
@@ -548,6 +547,33 @@ def _schedule(kind, ctx, row, end_value: str | None, start_value: str | None,
         note=("On a daily budget, added days spend the daily budget again; on a lifetime "
               "budget the schedule re-paces it."),
     )
+
+
+def _daily_bound_of(ctx, row: dict[str, Any], end_field: str) -> tuple[Decimal, str]:
+    """What a daily-budget flight spends on one day it runs: its own budget,
+    or its campaign's (an ad set), or its ad sets' (a campaign)."""
+    from metaads_mcp.changes.common import ad_set_activation_bound, campaign_activation_bound
+
+    bound = ad_set_activation_bound if end_field == "end_time" else campaign_activation_bound
+    return bound(ctx, row, ctx.currency_of(row))
+
+
+class _ScheduleRevert:
+    """Undoing a shortened daily-budget flight puts the days back: each one
+    spends the whole daily budget again, not only today's unused headroom."""
+
+    def revert_projection(self, ctx, entry):
+        from metaads_mcp.changes.base import lifts_a_restriction
+
+        projected, activation = super().revert_projection(ctx, entry)
+        if not lifts_a_restriction(entry):
+            return projected, activation
+        row = self.read_row(ctx, str(entry["entity_id"]))
+        if row.get("lifetime_budget"):
+            return projected, activation
+        bound, _ = _daily_bound_of(ctx, row, self.end_field)
+        lifted = max(bound, projected)
+        return lifted, lifted > 0
 
 
 def _when(raw):
@@ -590,7 +616,8 @@ def _removes_days(row: dict[str, Any], fields: dict[str, Any], end_field: str) -
     return earlier_end or later_start
 
 
-class AdSetSchedule(_AdSetKind):
+class AdSetSchedule(_ScheduleRevert, _AdSetKind):
+    end_field = "end_time"
     name = "ad_set_schedule"
     preview_title = "Preview changing an ad set's schedule"
     apply_title = "Apply an ad set schedule change (AFFECTS DELIVERY)"
@@ -614,7 +641,8 @@ class AdSetSchedule(_AdSetKind):
         return _schedule(self, ctx, self.read_row(ctx, ad_set_id), end_time, start_time, "end_time")
 
 
-class CampaignSchedule(_CampaignKind):
+class CampaignSchedule(_ScheduleRevert, _CampaignKind):
+    end_field = "stop_time"
     name = "campaign_schedule"
     preview_title = "Preview changing a campaign's schedule"
     apply_title = "Apply a campaign schedule change (AFFECTS DELIVERY)"

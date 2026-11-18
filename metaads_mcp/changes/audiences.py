@@ -75,6 +75,7 @@ def _retention(kind: str, days: int | None) -> int:
 
 class CreateAudience(ChangeKind):
     name = "create_audience"
+    adds_no_spend = True
     preview_title = "Preview creating an audience"
     apply_title = "Create the audience the preview described"
     apply_annotations = APPLY_REVERSIBLE
