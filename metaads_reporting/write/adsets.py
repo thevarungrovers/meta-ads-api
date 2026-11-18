@@ -51,19 +51,40 @@ FIELDS = (
 
 #: Bid strategies under which ``bid_amount`` is actually used. Everything else
 #: ignores it, silently.
+#:
+#:   LOWEST_COST_WITH_BID_CAP  bid_amount is a hard cap on each auction bid
+#:   COST_CAP                  bid_amount is the average cost per result to hold
+#:
+#: NOT here, and the old table had both: LOWEST_COST_WITH_MIN_ROAS takes its
+#: target in ``bid_constraints.roas_average_floor`` (a ratio, not money), and
+#: TARGET_COST is deprecated. A bid_amount write under either is accepted and
+#: ignored, which is exactly the trap this table exists to refuse.
 STRATEGIES_USING_BID = frozenset({"LOWEST_COST_WITH_BID_CAP", "COST_CAP"})
+STRATEGIES_USING_BID_AMOUNT = STRATEGIES_USING_BID
 
-#: Strategies that use a cost target rather than a bid cap. ``bid_amount`` is
-#: the field for both in the API, which is why the strategy has to be read.
-STRATEGIES_USING_TARGET = frozenset({"TARGET_COST", "LOWEST_COST_WITH_MIN_ROAS"})
-
-#: Every strategy under which a ``bid_amount`` write is honoured.
-STRATEGIES_USING_BID_AMOUNT = STRATEGIES_USING_BID | STRATEGIES_USING_TARGET
+#: Uses bid_constraints.roas_average_floor; see the ad_set_roas_floor kind.
+STRATEGY_MIN_ROAS = "LOWEST_COST_WITH_MIN_ROAS"
 
 
 def effective_bid_strategy(client: MutatingMetaAdsClient, row: dict[str, Any]) -> str:
-    """The bid strategy this ad set actually runs under."""
-    return row.get("bid_strategy") or "(not set)"
+    """The bid strategy this ad set actually runs under.
+
+    Under campaign budget optimization the strategy is set on the CAMPAIGN and
+    an ad set may report none, so an empty answer is read from the parent
+    rather than taken to mean "no strategy".
+    """
+    own = row.get("bid_strategy")
+    if own:
+        return own
+    campaign_id = row.get("campaign_id")
+    if campaign_id:
+        try:
+            parent = client.node(str(campaign_id), ("id", "bid_strategy"))
+        except Exception:  # noqa: BLE001 - unreadable parent: say "not set"
+            parent = {}
+        if parent.get("bid_strategy"):
+            return parent["bid_strategy"]
+    return "(not set)"
 
 
 def find(
@@ -275,15 +296,15 @@ def plan_set_bid_amount(
     """
     row = find(client, ad_set_id=ad_set_id, name=name, account_id=account_id)
     currency = client.currency(account_id)
-    strategy = row.get("bid_strategy") or "(not set)"
+    strategy = effective_bid_strategy(client, row)
 
-    if strategy not in STRATEGIES_USING_BID | STRATEGIES_USING_TARGET:
+    if strategy not in STRATEGIES_USING_BID_AMOUNT:
         raise MutationError(
             f"Ad set {row.get('name')!r} is on bid strategy {strategy}, which "
             f"does not use bid_amount. Meta ACCEPTS the write and ignores it, "
             f"so this would be recorded as applied while nothing changed. "
             f"bid_amount is used under: "
-            f"{', '.join(sorted(STRATEGIES_USING_BID | STRATEGIES_USING_TARGET))}."
+            f"{', '.join(sorted(STRATEGIES_USING_BID_AMOUNT))}."
         )
 
     before = from_minor_units(row.get("bid_amount"), currency)
@@ -296,9 +317,9 @@ def plan_set_bid_amount(
 
     meaning = (
         "a CAP: delivery will not bid above it"
-        if strategy in STRATEGIES_USING_BID
-        else "a TARGET: Meta aims for this average, and may exceed it on an "
-        "individual result"
+        if strategy == "LOWEST_COST_WITH_BID_CAP"
+        else "a TARGET: Meta aims for this average cost, and may exceed it on "
+        "an individual result"
     )
     warnings = [f"under {strategy} this amount is {meaning}"]
     if before and after < before:

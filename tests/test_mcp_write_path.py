@@ -593,3 +593,26 @@ def test_a_failed_revert_still_marks_the_entry_reverted(tools):
     with pytest.raises(Exception) as caught:
         tool["revert_change"](entry_id=result.entry_id)
     assert "already been reverted" in str(caught.value)
+
+
+@pytest.mark.parametrize("strategy", ["LOWEST_COST_WITH_MIN_ROAS", "TARGET_COST"])
+def test_bid_amount_is_refused_where_meta_ignores_it(monkeypatch, strategy):
+    """MIN_ROAS takes its target in bid_constraints.roas_average_floor and
+    TARGET_COST is deprecated: a bid_amount under either is accepted and
+    ignored."""
+    sim = make_sim()
+    sim.objects[ADSET_ID].update(bid_strategy=strategy, bid_amount="300", daily_budget="5000")
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    with pytest.raises(Exception) as caught:
+        registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="4.00")
+    assert "does not use bid_amount" in str(caught.value)
+
+
+def test_under_a_campaign_budget_the_strategy_is_read_from_the_campaign(monkeypatch):
+    sim = make_sim()
+    sim.objects[ADSET_ID].pop("bid_strategy")
+    sim.objects[ADSET_ID]["bid_amount"] = "300"
+    sim.objects[CAMPAIGN_ID]["bid_strategy"] = "COST_CAP"
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    preview = registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="3.50")
+    assert any("COST_CAP" in w and "TARGET" in w for w in preview.warnings)
