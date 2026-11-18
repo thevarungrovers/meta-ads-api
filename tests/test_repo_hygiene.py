@@ -376,7 +376,15 @@ def test_every_create_is_paused_by_construction():
 _DISCLAIMED_BY = {
     "apply_update_ad_copy": ("ad copy", "primary text", "swap an image"),
     "apply_duplicate_ad": ("campaign, ad set or ad", "ad set or ad;"),
-    "apply_create_audience": ("lookalike", "saved audience", "audience of any kind"),
+    "apply_create_audience": ("lookalike", "saved audience", "audience of any kind",
+                              "website audience", "engagement audience"),
+    "apply_create_campaign": ("create a campaign", "create or delete a campaign"),
+    "apply_create_ad_set": ("create a campaign or an ad set", "an ad set,"),
+    "apply_ad_set_targeting": ("change targeting", "targeting, optimization goal"),
+    "apply_ad_set_optimization_goal": ("optimization goal",),
+    "apply_ad_set_schedule": ("schedule or special", "billing event, schedule"),
+    "apply_url_tags": ("url_tags", "utm"),
+    "apply_create_ab_test": ("a/b test", "split test"),
 }
 
 
@@ -388,6 +396,7 @@ def _cannot_sections() -> dict[str, str]:
     end = INSTRUCTIONS.index("If the human needs one of those", start)
     s_start = skill.index("### Not here")
     s_end = skill.index("Ad copy, media and audiences", s_start)
+    assert end > start and s_end > s_start
     return {
         "server.INSTRUCTIONS": INSTRUCTIONS[start:end].lower(),
         "SKILL.md": skill[s_start:s_end].lower(),

@@ -1,6 +1,6 @@
 ---
 name: meta-ads
-description: Use the `meta-ads` MCP server to read a Meta (Facebook and Instagram) ad account and change it safely. Covers the preview/apply approval loop, pausing campaigns, ad sets and ads, daily budgets at both levels, ad set bid caps, insights reports, guardrails, the change ledger and undo. Use whenever the task involves Meta Ads, Facebook Ads, Instagram Ads, Ads Manager, campaigns, ad sets, ads, daily budgets, bid caps, creative fatigue, Advantage campaign budget, or the apply_*/preview_* tools on that server.
+description: Use the `meta-ads` MCP server to read a Meta (Facebook and Instagram) ad account and change it safely. Covers the preview/apply approval loop, status, daily and lifetime budgets, bid strategies and ROAS floors, schedules, targeting and placements, custom/lookalike/saved audiences and their overlap, creating campaigns, ad sets, creatives and ads (always PAUSED), copy changes, UTM tags, Advantage+ creative options, lead forms, A/B tests, ad verification and previews, reports and breakdowns, guardrails and the session/daily caps, the change ledger, reconcile and undo. Use whenever the task involves Meta Ads, Facebook Ads, Instagram Ads, Ads Manager, campaigns, ad sets, ads, audiences, targeting, creatives, budgets, bids, creative fatigue, Advantage+, or the apply_*/preview_* tools on that server.
 ---
 
 # Meta Ads
@@ -100,17 +100,25 @@ treating the gap as a bug.
 - **DON'T try to set anything to DELETED or ARCHIVED.** Both are irreversible
   through the API and neither is exposed. Pause instead — same effect on
   delivery, and it can be undone.
-- **DON'T try to create a campaign or an ad set.** Creating an **ad** inside an
-  existing ad set is supported; a campaign is not, because it carries a legal
-  special-ad-category declaration.
+- **DON'T create anything live.** Everything is created PAUSED (campaigns, ad
+  sets, ads, copies) and activating is a separate status preview the human
+  approves. `special_ad_categories` on `preview_create_campaign` has no
+  default: ask the human, never guess it.
+- **DON'T try to delete anything.** Nothing is ever DELETED or ARCHIVED, and
+  audiences are never deleted -- the undo for attaching one is detaching it.
 - **DON'T reach for `update_ad_copy` by default.** It discards social proof.
   Call `get_ad_creative` first, read `social_proof`, and if it is non-zero say
   so and offer `duplicate_ad` instead.
-- **DON'T try to create a customer-list audience.** Saved and lookalike only.
-  Anything that would upload customer emails or phone numbers is refused
-  structurally, and correctly — point the human at Ads Manager.
+- **DON'T try to create a customer-list audience or a lead form.** Website,
+  engagement, video, lead-form, app, lookalike and saved audiences are here;
+  anything that would upload customer emails or phone numbers is refused
+  structurally, and correctly, and forms carry legal text a person owns --
+  point the human at Ads Manager for both.
 - **DON'T try to upload a video.** Reuse an existing `video_id` instead;
   duplicating a video ad with new copy needs no upload at all.
+- **DON'T claim to have seen an ad preview you did not open.** Preview links are
+  signed URLs; open them with a browser tool if you have one, otherwise hand
+  them to the human.
 - **DON'T sum `reach` or `frequency` across rows.** The same person reached on
   two days is one person. Use the `creative_fatigue` report, which collapses the
   window into one row per ad for exactly this reason.
@@ -125,54 +133,68 @@ treating the gap as a bug.
 
 | Tool | Gives you |
 |---|---|
-| `list_ad_accounts` | Which ad accounts this token can reach |
-| `get_account` | **Currency, time zone**, status, spend cap, balance |
-| `find_campaigns(name_contains_text, status, limit)` | Campaigns, ids, `budget_level`, budgets |
-| `find_ad_sets(campaign_id, name_contains_text, limit)` | Ad sets, budgets, `bid_strategy`, `bid_amount` |
-| `find_ads(ad_set_id, campaign_id, name_contains_text, limit)` | Ads and their `effective_status` |
-| `run_report(report, days, since, until, campaign_name, node_id, limit)` | Performance. `report` is one of `account`, `campaigns`, `adsets`, `ads`, `creative_fatigue` |
-| `get_ad_creative(ad_id)` | What an ad **says**, its creative shape, and the social proof at stake |
-| `list_audiences(kind, limit)` | Custom, lookalike and saved audiences |
-| `get_guardrails` | The bounds, and this session's remaining budget |
-| `list_my_changes(limit)` | What this server has changed, with `entry_id`s for undo |
+| `list_ad_accounts`, `get_account` | Accounts; **currency, time zone**, status, token health, rate limit |
+| `find_campaigns` / `find_ad_sets` / `find_ads` | Ids, `budget_level`, budgets, bids, `effective_status`; `truncated` when cut off |
+| `get_campaign` / `get_ad_set` / `get_ad` | One entity in full: special ad categories, the **whole targeting spec**, placements, review feedback, 7/30-day totals, preview links |
+| `run_report` | Performance. Reports: `account`, `campaigns`, `adsets`, `ads`, `creative_fatigue`, `placements`, `demographics`, `geo`, `hour_of_day`, `conversions_by_action`; `breakdowns`, `max_rows`, `aggregate`, `action_types`, `run_async` |
+| `get_report_run` | Polls an async report |
+| `get_ad_creative` | What an ad **says**, its shape, and the social proof at stake |
+| `verify_ad` / `get_ad_previews` | Review state, field diff against what was approved, preview links per placement |
+| `list_audiences` / `get_audience` | Audiences with size, `usable`, and which ad sets use them (`unused_only`) |
+| `search_targeting` / `estimate_reach` | Interest, behaviour, place, locale ids; reach bounds for a spec |
+| `list_ad_images` / `list_ad_videos` | Media to reuse, with dimensions and length |
+| `list_pixels` / `get_pixel_health` / `list_custom_conversions` | Tracking diagnostics, read-only |
+| `list_connected_identities` / `list_lead_forms` | Pages, Instagram accounts, apps; existing forms (never leads) |
+| `list_labels`, `list_ad_rules`, `list_ab_tests` / `get_ab_test`, `list_catalogs` / `list_product_sets` | Account assets; money-changing rules are flagged |
+| `list_recent_changes` | Who changed what in Ads Manager -- the usual reason a preview is stale |
+| `search_ad_library` | Meta's Ad Library (political/issue ads only outside the EU) |
+| `get_guardrails` | The bounds, the session and **today's** remaining budget, token health |
+| `list_my_changes` / `reconcile_ledger` | What this server changed, and whether the account still matches |
 
 ### Change — preview first, always
 
 | Pair | Changes |
 |---|---|
-| `preview_campaign_status` / `apply_campaign_status` | Pause or activate a **whole campaign** |
-| `preview_campaign_daily_budget` / `apply_campaign_daily_budget` | A **campaign-budget** campaign's daily budget |
-| `preview_ad_set_status` / `apply_ad_set_status` | Pause or activate an ad set |
-| `preview_ad_set_daily_budget` / `apply_ad_set_daily_budget` | An **ad-set-budget** ad set's daily budget |
-| `preview_ad_set_bid_amount` / `apply_ad_set_bid_amount` | An ad set's bid cap or cost target |
-| `preview_ad_status` / `apply_ad_status` | Pause or activate **one ad** |
-| `preview_duplicate_ad` / `apply_duplicate_ad` | A **new PAUSED ad** with changed copy or media |
-| `preview_update_ad_copy` / `apply_update_ad_copy` | Repoint a **live ad** at a new creative |
-| `preview_create_audience` / `apply_create_audience` | A saved spec, or a lookalike |
-| `revert_change(entry_id)` | Undo one ledger entry |
+| `campaign_status` / `ad_set_status` / `ad_status` / `multi_ad_status` | Pause or activate (several ads in one ad set as a batch) |
+| `campaign_daily_budget` / `ad_set_daily_budget` | A daily budget, at the level that holds it |
+| `campaign_lifetime_budget` / `ad_set_lifetime_budget` | A lifetime budget, projected over the days left |
+| `ad_set_bid_amount` / `ad_set_bid_strategy` / `campaign_bid_strategy` / `ad_set_roas_floor` | Bids, cost caps, min ROAS |
+| `ad_set_schedule` / `campaign_schedule` / `ad_set_dayparting` / `ad_set_frequency_cap` | When it runs, and how often one person sees it |
+| `ad_set_targeting` | Places, ages, genders, locales, interests, **audiences in/out**, saved-audience copy, Advantage+ audience |
+| `ad_set_placements` | Advantage+ or manual placements, previewed for every ad |
+| `ad_set_optimization_goal` / `ad_set_attribution_spec` | What it optimizes for; the attribution window |
+| `create_audience` | Website, engagement (Page/IG), video viewers, lead form, app, lookalike (1-10%), saved |
+| `duplicate_ad` / `update_ad_copy` | Copy or media: a new PAUSED ad, or the same ad repointed |
+| `url_tags` / `advantage_creative_options` / `attach_lead_form` / `replace_ad_creative` | Creative-level changes, each a new creative + repoint |
+| `create_creative` / `create_ad` | A new creative (unattached), a new PAUSED ad |
+| `create_campaign` / `create_ad_set` / `duplicate_ad_set` / `duplicate_campaign` | New or copied, always PAUSED |
+| `create_ab_test` | A split test between PAUSED cells |
+| `low_risk_change` | Names and ad labels only, on a closed allowlist |
+| `revert_change(entry_id or batch_id)` | Undo one ledger entry, or a whole batch |
 
 Each `apply_*` takes **only** a `preview_token` — never the values. That is
 deliberate: it means an apply cannot be called cold, with nothing shown first.
 
 ### Not here — and not anywhere else in this toolchain
 
-Creating a campaign or an ad set, and deleting anything. A customer-list
-audience (it uploads customer personal data). Targeting, optimization goal,
-billing event, schedule, special ad categories. Setting a status to DELETED or
-ARCHIVED. Billing and account access. Uploading a new video (reuse an existing
-`video_id`).
+Deleting or archiving anything, audiences included. A customer-list audience
+(it uploads customer personal data). Creating a lead form (a person owns its
+privacy policy and legal text). Downloading leads. Switching a campaign between
+campaign and ad-set budgets. Automated rules that change money. Pixel or CAPI
+configuration, catalog feeds, billing and account access. Uploading a new
+video (reuse an existing `video_id`).
 
-Ad copy, media and audiences **are** here: see `duplicate_ad`,
-`update_ad_copy` and `create_audience` above.
+Ad copy, media and audiences **are** here, as are creation, targeting and
+placements: see the tables above.
 
 There is **no generic update/passthrough tool**, so if an operation is not in the
 tables above it cannot be done from here.
 
-**And there is no CLI fallback for the list above.** `scripts/manage.py` has the
-same write surface this server does — status, budget, bid, name, `ad duplicate`,
-`ad set-copy`, `audience lookalike` and `audience saved` — and nothing more. If
-the human needs one of the things above, tell them plainly that it is not built,
-and point them at Ads Manager. Do not send them to a script.
+**And there is no CLI fallback for the list above.** `scripts/manage.py` has a
+smaller write surface than this server -- status, budget, bid, name, `ad
+duplicate`, `ad set-copy`, `audience lookalike` and `audience saved` -- and
+nothing more. If the human needs one of the things above, tell them plainly that
+it is not built, and point them at Ads Manager. Do not send them to a script.
 
 ## Changing what an ad says
 
@@ -204,15 +226,84 @@ what you can do:
 ## Audiences
 
 `list_audiences` reads everything, including customer-list audiences — you need
-to see one to pick a lookalike source.
+to see one to pick a lookalike source — and says whether each is `usable`.
 
-`preview_create_audience` makes **saved** specs and **lookalikes** only. A
+`preview_create_audience` builds from data Meta already holds: website (pixel
+events), Page and Instagram engagement, video viewers, lead-form openers,
+app activity, lookalikes (1-10% of a country) and saved targeting specs. A
 customer-list audience would upload hashed customer emails and phone numbers to
 Meta, and is refused structurally. That is not a limitation to work around:
 tell the human it belongs in Ads Manager, where a person accepts the data terms.
 
-A lookalike takes a few hours to populate and cannot be used until it does. Say
-that when you create one.
+A rule-based audience or a lookalike takes hours to populate. Say that when you
+create one, and attach it only once `get_audience` reports it usable.
+
+## Caps, errors and the ledger
+
+- **Session and daily caps.** Every apply counts against this session AND the
+  local calendar day (read from the ledger, so a restart does not reset it).
+  Creations cost 3 applies. `get_guardrails` shows both under `session` and
+  `today`.
+- **Activating is counted against the daily total**, not the per-change
+  limit: the preview renders `SKIP projected_delta_per_day (activation: ...)`
+  and a `max_projected_delta_per_day_total` line naming "uses X of today's
+  remaining Y". Budget and bid increases must pass both.
+- **Errors carry a prefix**: `AUTH_EXPIRED` (the token; a person must fix it),
+  `PERMISSION` (a scope or an asset assignment), `RATE_LIMITED retry_after=<s>`
+  (wait that long, then retry once), `NOT_FOUND`, `POLICY` (ad review),
+  `INVALID` (the request), `TOO_MUCH_DATA` (narrow the report), `TRANSIENT`,
+  `INTERNAL` (a bug: report it).
+- **Verification.** Every ad-changing apply returns `verification`: the live ad
+  re-read and diffed against what was approved, review state and fresh preview
+  links. `passed: false` reverts nothing -- say what differs.
+- **`reconcile_ledger`** lists drift (the live value no longer matches what a
+  change left), intents with no outcome, and ads still in review.
+
+## Recipes
+
+**Daily health check.** `get_guardrails` (token health, today's budget) ->
+`reconcile_ledger` (drift, unknown outcomes, pending review) -> `find_ads
+(status="DISAPPROVED")` and `status="WITH_ISSUES"` -> `list_ad_rules` (money
+rules acting outside these caps) -> report, change nothing.
+
+**Creative fatigue rotation.** `run_report("creative_fatigue", days=14)` ->
+`get_ad_creative` on the worst -> `preview_duplicate_ad` with fresh copy (new
+PAUSED ad) -> human approves -> `preview_ad_status` ACTIVE on the new one and
+PAUSED on the old (or `preview_multi_ad_status`).
+
+**Budget reallocation across ad sets.** `run_report("adsets", days=14)` ->
+`get_guardrails` -> one `preview_ad_set_daily_budget` cut and one raise, shown
+together; the cut projects negative and refunds nothing from the caps.
+
+**Launching a campaign.** `preview_create_campaign` (ask the human for
+`special_ad_categories`) -> `preview_create_ad_set` (targeting from
+`search_targeting`, `estimate_reach` first) -> `preview_create_creative` ->
+`preview_create_ad` -> everything is PAUSED; the human activates with the
+status tools, campaign last.
+
+**Breakdown analysis.** `run_report("placements" | "demographics" | "geo" |
+"hour_of_day")`, or any report with `breakdowns=[...]`; follow with
+`preview_ad_set_placements` or `preview_ad_set_targeting` only if the human
+wants to act on it.
+
+**Verify an ad.** Read the `verification` block every ad-changing apply
+returns and report any failed field. Call `verify_ad` again after review
+(usually within 24 hours; Meta says up to 48) and report approval or the
+`ad_review_feedback` reasons. Open the preview links with a browser tool if
+you have one; otherwise hand them to the human, and never claim to have seen a
+rendering you did not open.
+
+**Build an audience and use it.** `list_connected_identities` / `list_pixels`
+-> `preview_create_audience` -> wait for `get_audience` to report `usable` ->
+`estimate_reach` -> `preview_ad_set_targeting(audiences_include=[...])`, and
+read the overlap and exclusion warnings.
+
+**A/B test.** `preview_duplicate_ad_set` (PAUSED copy) -> change ONE variable
+on the copy (`ad_set_targeting`, `ad_set_placements` or a creative change) ->
+`preview_create_ab_test(variable=...)` -> the human activates the cells.
+
+**Audiences cannot be deleted here.** An unused one just sits there and
+changes nothing; `list_audiences(unused_only=True)` shows them.
 
 ## Reading the preview
 
@@ -224,25 +315,28 @@ that when you create one.
 | `status` vs `effective_status` | The second is whether it is actually running |
 | `metrics_7d` | What it has actually been doing, including `frequency` |
 | `projected_daily_spend_delta` | Upper bound on extra spend per day |
-| `checks` | One line per bound, `OK` or `FAIL` |
+| `checks` | One line per bound: `OK`, `FAIL`, `WARN` (does not block) or `SKIP` |
+| `previews` | For an ad change: preview links per placement (signed, short-lived) |
+| `apply_weight` | 3 for a creation, 1 otherwise |
 | `blocked` | `true` means a guardrail failed and the apply will refuse |
 
 Three asymmetries worth repeating to the human:
 
 - **Pausing** cannot increase spend, so its projected delta is `0`.
 - **Activating** is bounded by the **budget**, not by past spend — a campaign
-  that spent nothing last week can still spend its full budget tomorrow.
-- **Pausing or activating one ad** has a projected delta of `0` in both
-  directions. The ad set's budget is the cap and it does not move; what changes
-  is which creative spends it.
+  that spent nothing last week can still spend its full budget tomorrow. An
+  ABO campaign is bounded by its ACTIVE ad sets' budgets summed.
+- **Activating one ad** projects `0` while siblings already spend the ad set's
+  budget, and the ad set's budget when it would be the only ACTIVE ad.
 
 If `blocked: true`, do not try the apply. Read the `FAIL` line and propose
 something inside the bounds.
 
 ## A bid is not a price
 
-`bid_amount` is only honoured under `LOWEST_COST_WITH_BID_CAP` and `COST_CAP`
-(as a cap), and `TARGET_COST` / `LOWEST_COST_WITH_MIN_ROAS` (as a target). Under
+`bid_amount` is only honoured under `LOWEST_COST_WITH_BID_CAP` (a cap) and
+`COST_CAP` (an average-cost target). `LOWEST_COST_WITH_MIN_ROAS` uses a ROAS
+floor instead (`preview_ad_set_roas_floor`), and `TARGET_COST` is deprecated. Under
 `LOWEST_COST_WITHOUT_CAP` — Meta's default, and what most ad sets are on — Meta
 **accepts a bid write and ignores it**.
 
@@ -259,20 +353,21 @@ Meta caps writes on a campaign node at **1 call per 30 seconds** (error code
 613). This is not a per-day quota you will never reach — it is a window you hit
 by doing two writes in a row, which is the normal shape of a correction.
 
-The transport handles it: a rate-limit refusal is retried automatically, after
-a wait longer than the window, because Meta refusing a write means nothing was
-applied. So an `apply_*` may simply **take half a minute to return**. That is
-working, not hanging — do not cancel it and do not re-issue the call.
+The transport handles it: a rate-limit refusal is retried automatically when
+the wait fits inside a tool call (up to a minute), because Meta refusing a write
+means nothing was applied. So an `apply_*` may simply **take half a minute to
+return**. That is working, not hanging — do not cancel it and do not re-issue
+the call. A longer wait comes back as `RATE_LIMITED retry_after=<seconds>`:
+wait that long, then retry once.
 
 What this means in practice:
 
-- **Do not batch.** Changing five ad sets is five writes and takes several
-  minutes. Propose the one change that matters most and say the rest can follow.
+- **Batches take time.** `multi_ad_status` is one write per ad; changing five
+  ad sets is five writes. Propose the change that matters most first.
 - **A revert right after an apply is the most likely call to be delayed**, since
   it is the second write in the window. Wait for it.
-- If you ever see a `code 613` reach you as an error, the automatic retries were
-  exhausted. Stop, tell the human, and check `list_my_changes` before anything
-  else — do not retry by hand.
+- If a `RATE_LIMITED` error reaches you on an apply, nothing was applied. Check
+  `list_my_changes`, wait `retry_after`, and take a fresh preview.
 
 ## Undo
 
@@ -280,8 +375,10 @@ What this means in practice:
 revert_change(entry_id="...")
 ```
 
-It refuses if the entry was never applied, if it has already been reverted, or if
-**the value has moved since** — in that last case somebody edited it in Ads
+Reverting something this server CREATED pauses it; an audience or an
+unattached creative cannot be reverted (nothing is deleted). A `batch_id`
+reverts the whole batch. It refuses if the entry was never applied, if it has
+already been reverted, or if **the value has moved since** — in that last case somebody edited it in Ads
 Manager after your change, and reverting would discard their edit rather than
 undo yours.
 
@@ -299,12 +396,14 @@ retrying.
 | `failed a guardrail check` | The preview was blocked | Read `checks`, propose something smaller |
 | `writes are disabled: ...` | The kill switch | A person set it. Say so and stop; do not work around it |
 | `session apply limit reached` | Per-session cap | Show `list_my_changes` and let the human decide |
+| `daily apply limit reached` / `daily spend total reached` | Today's cap (local day, all processes) | Stop; it resets at local midnight |
+| `RATE_LIMITED retry_after=N` | Meta asked to wait | Wait N seconds, retry once |
 | `looks like minor units` | You passed `2500` for `$25.00` | Pass the decimal string |
 | `does not hold its own budget` | Wrong budget level | Use the other level's tool — and say why |
 | `does not use bid_amount` | The bid strategy ignores it | Do not propose a bid change on this ad set |
 | `DELETED ... irreversible` | Working as intended | Use `PAUSED` |
-| `code 190` | The access token died | A person must regenerate it; nothing you can do |
-| `code 200` / `code 10` | A permission is missing | Needs both the scope **and** the account assignment |
+| `AUTH_EXPIRED` | The access token died | A person must regenerate it; nothing you can do |
+| `PERMISSION` | A permission is missing | Needs both the scope **and** the asset assignment |
 
 ## A worked example
 
