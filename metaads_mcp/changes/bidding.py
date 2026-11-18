@@ -507,32 +507,59 @@ def _schedule(kind, ctx, row, end_value: str | None, start_value: str | None,
             f"this adds days to a daily-budget flight: up to {projected:.2f}/day more "
             "(the unused daily budget) on each added day"
         )
+    # A daily-budget flight that loses days projects nothing itself, but its
+    # revert adds those days back: tightening, so the revert projects the
+    # unused headroom. (A lifetime budget re-paces instead; its projection
+    # above already carries the sign.)
+    shortens = not row.get("lifetime_budget") and _removes_days(row, fields, end_field)
     after = " | ".join(f"{k} {v}" for k, v in sorted(fields.items()))
     return kind._proposal(
         ctx, row, before=kind.render(ctx, row), after=after, fields=fields,
         checks=[], projected=projected, warnings=warnings, is_activation=extends,
+        tightens=shortens,
         note=("On a daily budget, added days spend the daily budget again; on a lifetime "
               "budget the schedule re-paces it."),
     )
 
 
-def _adds_days(row: dict[str, Any], fields: dict[str, Any], end_field: str) -> bool:
-    """Whether the new schedule runs on days the old one did not."""
-    def when(raw):
-        if not raw:
-            return None
-        value = dt.datetime.fromisoformat(_iso(raw))
-        return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+def _when(raw):
+    if not raw:
+        return None
+    value = dt.datetime.fromisoformat(_iso(raw))
+    return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
 
+
+def _adds_days(row: dict[str, Any], fields: dict[str, Any], end_field: str) -> bool:
+    """Whether the new schedule runs on days the old one did not.
+
+    The end and the start are judged separately: a start moved earlier adds
+    days whatever happens to the end (even when there was no end before).
+    """
     try:
-        old_end, new_end = when(row.get(end_field)), when(fields.get(end_field))
-        old_start, new_start = when(row.get("start_time")), when(fields.get("start_time"))
+        old_end, new_end = _when(row.get(end_field)), _when(fields.get(end_field))
+        old_start, new_start = _when(row.get("start_time")), _when(fields.get("start_time"))
     except ValueError:
         return True  # unreadable: assume it does, and count it
-    if new_end is not None and (old_end is None or new_end > old_end):
-        # No old end means it already runs forever: a new end SHORTENS it.
-        return old_end is not None
-    return new_start is not None and old_start is not None and new_start < old_start
+    # No old end means it already runs forever: a new end SHORTENS it.
+    later_end = new_end is not None and old_end is not None and new_end > old_end
+    earlier_start = new_start is not None and old_start is not None and new_start < old_start
+    return later_end or earlier_start
+
+
+def _removes_days(row: dict[str, Any], fields: dict[str, Any], end_field: str) -> bool:
+    """Whether the new schedule drops days the old one ran on.
+
+    An end moved earlier, an end put on a flight that had none, or a start
+    moved later. Unreadable: assume it does, so its revert is counted.
+    """
+    try:
+        old_end, new_end = _when(row.get(end_field)), _when(fields.get(end_field))
+        old_start, new_start = _when(row.get("start_time")), _when(fields.get("start_time"))
+    except ValueError:
+        return True
+    earlier_end = new_end is not None and (old_end is None or new_end < old_end)
+    later_start = new_start is not None and old_start is not None and new_start > old_start
+    return earlier_end or later_start
 
 
 class AdSetSchedule(_AdSetKind):

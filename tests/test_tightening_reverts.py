@@ -69,3 +69,53 @@ def test_a_tightening_revert_over_the_daily_total_is_refused(monkeypatch):
     with pytest.raises(Exception) as caught:
         tools["revert_change"](entry_id=result.entry_id)
     assert "daily spend total" in str(caught.value)
+
+
+# --- schedules on a daily budget ---------------------------------------------
+
+import datetime as _dt  # noqa: E402
+
+
+def _at(days: int) -> str:
+    return (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=days)).replace(microsecond=0).isoformat()
+
+
+def test_shortening_a_daily_flight_is_tightening_and_its_revert_projects_the_headroom(monkeypatch):
+    from metaads_mcp import ledger
+
+    sim = abo_sim(start_time="2026-01-01T00:00:00+0000", end_time=_at(30))
+    tools, _ = rig(monkeypatch, sim)
+    preview = preview_ok(tools, "ad_set_schedule", sim, ad_set_id=ADSET_ID, end_time=_at(10))
+    assert Decimal(preview.projected_daily_spend_delta) == 0
+    result = tools["apply_ad_set_schedule"](preview_token=preview.preview_token)
+    assert ledger.find_entry(result.entry_id)["inverse"].get("tightens") is True
+    undo = tools["revert_change"](entry_id=result.entry_id)
+    assert Decimal(undo.projected_daily_spend_delta) == pytest.approx(HEADROOM, abs=Decimal("0.01"))
+
+
+def test_ending_an_open_ended_daily_flight_is_tightening(monkeypatch):
+    from metaads_mcp import ledger
+
+    sim = abo_sim(start_time="2026-01-01T00:00:00+0000")
+    sim.objects[ADSET_ID].pop("end_time", None)
+    tools, _ = rig(monkeypatch, sim)
+    preview = preview_ok(tools, "ad_set_schedule", sim, ad_set_id=ADSET_ID, end_time=_at(10))
+    result = tools["apply_ad_set_schedule"](preview_token=preview.preview_token)
+    assert ledger.find_entry(result.entry_id)["inverse"].get("tightens") is True
+
+
+def test_moving_the_start_earlier_adds_days_even_with_no_old_end(monkeypatch):
+    sim = abo_sim(start_time=_at(10))
+    sim.objects[ADSET_ID].pop("end_time", None)
+    tools, _ = rig(monkeypatch, sim)
+    preview = tools["preview_ad_set_schedule"](ad_set_id=ADSET_ID, start_time=_at(2), end_time=_at(40))
+    assert Decimal(preview.projected_daily_spend_delta) == pytest.approx(HEADROOM, abs=Decimal("0.01"))
+
+
+def test_adds_days_counts_an_earlier_start_whatever_the_end():
+    from metaads_mcp.changes.bidding import _adds_days
+
+    row = {"start_time": _at(10)}
+    assert _adds_days(row, {"start_time": _at(2), "end_time": _at(40)}, "end_time")
+    assert _adds_days({**row, "end_time": _at(40)}, {"start_time": _at(2), "end_time": _at(20)}, "end_time")
+    assert not _adds_days(row, {"end_time": _at(40)}, "end_time")
