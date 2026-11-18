@@ -448,6 +448,22 @@ def test_manage_ad_duplicate_strips_a_foreign_prefix_from_the_copy(sim, monkeypa
     assert _sent(sim, "ads")["name"] == f"{prefix}launch (copy)"
 
 
+def test_manage_ad_duplicate_refuses_a_derived_creative_name_over_the_limit(
+        sim, monkeypatch, tmp_path, capsys):
+    """The ad name fits (7 + 393 = 400); "<ad name> creative" does not, and is
+    refused like the MCP path refuses it -- never sent, never truncated."""
+    from scripts import manage
+    from tests.test_mcp_creative_path import CREATIVE_ID, link_creative_obj
+
+    _env(monkeypatch, tmp_path, "AB", "max")
+    sim.objects[AD_ID]["creative"] = {"id": CREATIVE_ID}
+    sim.objects[CREATIVE_ID] = link_creative_obj()
+    assert manage.main(["ad", "duplicate", "--id", AD_ID, "--headline", "new",
+                        "--new-name", "x" * 393, "--yes"]) == 1
+    assert "too long" in capsys.readouterr().err
+    assert not sim.created
+
+
 @pytest.mark.parametrize("owner, agent, prefix", CLI_COMBOS)
 def test_manage_audiences_stamp_the_cli_prefix(sim, monkeypatch, tmp_path, owner, agent, prefix):
     from scripts import manage

@@ -328,7 +328,7 @@ def cmd_creative(client, args, *, duplicate: bool) -> int:
     --dry-run would put a file in the account's media library for a change the
     operator then declined.
     """
-    from metaads_reporting.naming import restamp_for_copy, stamp
+    from metaads_reporting.naming import derived, restamp_for_copy, stamp
 
     builder = ads.plan_duplicate_ad if duplicate else ads.plan_update_copy
     kwargs = dict(
@@ -348,7 +348,9 @@ def cmd_creative(client, args, *, duplicate: bool) -> int:
                    else restamp_for_copy(identity, source.get("name") or "", entity_type="ad",
                                          suffix=" (copy)").final)
         kwargs["new_name"] = ad_name
-        kwargs["creative_name"] = f"{ad_name} creative"
+        # Derived from the ad's name, so checked like the MCP path checks it
+        # (length, characters): refused when too long, never truncated.
+        kwargs["creative_name"] = derived(f"{ad_name} creative", entity_type="creative").final
     else:
         kwargs["creative_name"] = restamp_for_copy(
             identity, source.get("name") or "", entity_type="creative",
