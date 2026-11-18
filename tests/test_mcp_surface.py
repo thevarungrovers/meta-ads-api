@@ -26,6 +26,7 @@ READ_TOOLS = frozenset(
         "list_my_changes",
         "get_ad_creative",
         "list_audiences",
+        "reconcile_ledger",
     }
 )
 

@@ -49,7 +49,7 @@ VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
 WINDOWS_VENV_PYTHON = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
 SKILL_FILE = REPO_ROOT / ".claude" / "skills" / SERVER_NAME / "SKILL.md"
 
-#: The tools that cannot change anything: 8 reads and 6 previews. A preview
+#: The tools that cannot change anything: the reads and the previews. A preview
 #: queries the account and mints a token in memory; it writes nothing.
 #: Hardcoded because this script must not import the server (that would need the
 #: dependencies, which is exactly what it may be running before). Kept honest by
@@ -66,6 +66,7 @@ SAFE_TOOLS = (
     "list_my_changes",
     "get_ad_creative",
     "list_audiences",
+    "reconcile_ledger",
     "preview_campaign_status",
     "preview_campaign_daily_budget",
     "preview_ad_set_status",

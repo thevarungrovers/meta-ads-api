@@ -50,6 +50,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from metaads_mcp import ledger
 from metaads_mcp.changes import all_kinds
 from metaads_mcp.changes.base import (  # noqa: F401 - re-exported for callers
     APPLY_REVERSIBLE,
@@ -104,6 +105,76 @@ def register(mcp, state) -> None:
         register_pair(
             mcp, engine, kind, refusals=refusals_reach_the_caller, apply_tool=apply_tool
         )
+
+    from metaads_mcp.tools_read import READ_ONLY
+
+    @mcp.tool(title="Compare the ledger with the live account", annotations=READ_ONLY)
+    @refusals_reach_the_caller
+    def reconcile_ledger(
+        limit: Annotated[int, Field(description="Most recent entries to check", ge=1, le=500)] = 100,
+    ) -> dict:
+        """Check every applied, unreverted change against the account as it is now.
+
+        For each entry, reads the live value and compares it with what the
+        change left behind. `drift` lists entries whose live value differs --
+        somebody changed it in Ads Manager since, or the object moved under it
+        (a campaign whose budget went to its ad sets). Reverting one of those
+        would be refused as stale; a human should close it out.
+
+        Also lists `unknown_outcome` (an intent with no outcome: the write left
+        this process and nothing recorded how it ended) and `pending_review`
+        (an ad change whose verification said review was still pending -- call
+        verify_ad on it). Reads only.
+        """
+        reverted = ledger.reverted_entry_ids()
+        rows = ledger.entries()[-limit:]
+        drift, unknown, pending, ok, unchecked = [], [], [], 0, []
+        for entry in rows:
+            summary = {
+                "entry_id": entry["entry_id"],
+                "at": entry["at"],
+                "tool": entry["tool"],
+                "entity": f"{entry['entity_type']} {entry['entity_name']}",
+                "entity_id": entry["entity_id"],
+                "field": entry["field"],
+                "after": entry["after"],
+            }
+            if entry.get("error") is None and not entry.get("applied") and entry.get("tool") != "revert_change":
+                if entry["entry_id"] not in reverted:
+                    unknown.append(summary)
+                continue
+            if not entry.get("applied") or entry["entry_id"] in reverted:
+                continue
+            if entry.get("tool") == "revert_change":
+                continue
+            verification = entry.get("verification") or {}
+            if (verification.get("review") or {}).get("state") == "pending":
+                pending.append({**summary, "ad_id": verification.get("ad_id")})
+            try:
+                kind = engine.kind_for_entry(entry)
+                live = kind.current_for_entry(ctx, entry)
+            except Exception as exc:  # noqa: BLE001 - reported per entry
+                unchecked.append({**summary, "reason": str(exc).splitlines()[0]})
+                continue
+            if live is None:
+                unchecked.append({**summary, "reason": "this kind has no live value to compare"})
+            elif live != entry["after"]:
+                drift.append({**summary, "live": live})
+            else:
+                ok += 1
+        return {
+            "checked": len(rows),
+            "matching": ok,
+            "drift": drift,
+            "unknown_outcome": unknown,
+            "pending_review": pending,
+            "unchecked": unchecked,
+            "note": (
+                "Drift is not an error to fix blindly: the live value is what the "
+                "account does now. Show the human, and let them decide whether to "
+                "change it back with a preview_* tool or leave it."
+            ),
+        }
 
     @apply_tool(
         title="Revert a change by its ledger entry id", annotations=APPLY_REVERSIBLE
