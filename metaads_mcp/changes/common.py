@@ -315,29 +315,82 @@ class NodeFieldKind(ChangeKind):
                           payload["fields"], payload["before"], payload["after"])
 
     def inverse(self, ctx, entry: dict[str, Any]):
-        previous = (entry.get("inverse") or {}).get("previous")
-        if not previous:
+        inverse = entry.get("inverse") or {}
+        previous = inverse.get("previous") or {}
+        cleared = list(inverse.get("cleared") or [])
+        if not previous and not cleared:
             raise ValueError(
                 f"Entry {entry['entry_id']} recorded no previous values, so there "
                 "is nothing exact to put back. Use the matching preview_* tool."
             )
+        fields = {**clearing_fields(cleared, entry_id=entry["entry_id"]), **previous}
+        if not fields:
+            raise ValueError(
+                f"Entry {entry['entry_id']} recorded nothing that can be sent back. "
+                "Use the matching preview_* tool."
+            )
         return self._plan(entry["entity_id"], entry.get("entity_name") or "",
-                          previous, entry["after"], entry["before"])
+                          fields, entry["after"], entry["before"])
 
     def revert_row_inverse(self, ctx, entry: dict[str, Any]) -> dict[str, Any] | None:
-        """The live values of the keys the revert sends: the original's after."""
+        """The live values of the keys the revert sends: the original's after.
+
+        A key whose live value is EMPTY is not dropped: the original change
+        emptied it, so it is recorded as ``cleared`` and a revert of this
+        revert empties it again. Dropping it made that re-application send
+        only part of the change.
+        """
         inverse = entry.get("inverse") or {}
-        previous = inverse.get("previous")
-        if not previous:
+        previous = inverse.get("previous") or {}
+        keys = list(dict.fromkeys([*previous, *(inverse.get("cleared") or [])]))
+        if not keys:
             return None
-        live = ctx.client.node(str(entry["entity_id"]), ("id", *previous))
-        replaced = {k: as_obj(live.get(k)) for k in previous if live.get(k) is not None}
-        if not replaced:
+        live = ctx.client.node(str(entry["entity_id"]), ("id", *keys))
+        replaced = {k: as_obj(live.get(k)) for k in keys if not _empty(as_obj(live.get(k)))}
+        cleared = [k for k in keys if _empty(as_obj(live.get(k)))]
+        if not replaced and not cleared:
             return None
         extra = {k: v for k, v in inverse.items()
-                 if k not in ("previous", "kind", "weight", "batch_id", "revert_row",
+                 if k not in ("previous", "cleared", "kind", "weight", "batch_id", "revert_row",
                               "undoes_projected", "not_revertible", "tightens")}
-        return {**extra, "previous": replaced}
+        return {**extra, "previous": replaced, **({"cleared": cleared} if cleared else {})}
+
+
+def _empty(value: Any) -> bool:
+    return value in (None, "", [], {})
+
+
+#: How each field this server writes is sent EMPTY, in Meta's own spelling --
+#: what an inverse sends for a field that was empty before the change set it.
+CLEARED: dict[str, Any] = {
+    "frequency_control_specs": [],  # no cap
+    "adset_schedule": [],           # no dayparting
+    "bid_constraints": {},          # no ROAS floor
+    "adlabels": [],                 # no labels
+    "end_time": 0,                  # Meta: end_time=0 makes an ad set ongoing
+}
+
+#: Fields with no "empty" spelling that need none: a bid is ignored under the
+#: strategy without one, which is what the inverse restores with it.
+OMITTED_WHEN_CLEARED = frozenset({"bid_amount"})
+
+
+def clearing_fields(keys, *, entry_id: str = "") -> dict[str, Any]:
+    """The payload that empties ``keys``. Refuses a field Meta gives no way
+    to empty, rather than sending a partial change."""
+    import copy
+
+    out: dict[str, Any] = {}
+    for key in keys:
+        if key in CLEARED:
+            out[key] = copy.deepcopy(CLEARED[key])
+        elif key not in OMITTED_WHEN_CLEARED:
+            raise ValueError(
+                f"Entry {entry_id}: {key} was empty before and there is no documented "
+                f"way to make it empty again through the API. Change it with the "
+                f"matching preview_* tool instead."
+            )
+    return out
 
 
 def previous_values(row: dict[str, Any], keys) -> dict[str, Any]:

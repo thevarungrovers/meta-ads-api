@@ -91,3 +91,35 @@ def test_reconcile_checks_revert_rows(monkeypatch):
     s.objects[CAMPAIGN_ID]["status"] = "PAUSED"  # someone in Ads Manager
     out = tools["reconcile_ledger"]()
     assert [d["entry_id"] for d in out["drift"]] == [undo.entry_id]
+
+
+# --- a field the original change CLEARED --------------------------------------
+
+
+def test_reverting_a_revert_also_re_clears_a_field_the_original_cleared(monkeypatch):
+    """The original emptied adset_schedule and switched pacing. Reverting it
+    puts both back; reverting THAT must empty adset_schedule again, not only
+    re-send the pacing: a live value of None is an explicit clear."""
+    from metaads_mcp.changes.common import as_obj, canonical
+    from metaads_reporting import logdb
+    from tests.test_kinds_bidding import abo_sim
+
+    schedule = [{"days": [1, 2], "start_minute": 540, "end_minute": 1020}]
+    s = abo_sim(lifetime_budget="100000", pacing_type=["standard"])
+    s.objects[ADSET_ID].pop("daily_budget")
+    tools, _ = rig(monkeypatch, s)
+    logdb.insert_change(
+        entry_id="cleared1", tool="apply_ad_set_dayparting", account_id="1234567890",
+        entity_type="ad set", entity_id=ADSET_ID, entity_name="Example ad set",
+        field_name="dayparting", before=canonical(schedule), after=canonical(None),
+        projected_delta="0",
+        inverse={"kind": "ad_set_dayparting", "weight": 1,
+                 "previous": {"adset_schedule": schedule, "pacing_type": ["day_parting"]}},
+    )
+    logdb.complete_change(entry_id="cleared1", ok=True)
+
+    first = tools["revert_change"](entry_id="cleared1")
+    assert as_obj(s.objects[ADSET_ID]["adset_schedule"]) == schedule
+    tools["revert_change"](entry_id=first.entry_id)
+    assert as_obj(s.objects[ADSET_ID]["adset_schedule"]) in (None, []), "the clear was re-applied"
+    assert as_obj(s.objects[ADSET_ID]["pacing_type"]) == ["standard"]
