@@ -38,6 +38,9 @@ DEFAULT_OUTPUT_DIR = "output"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
+#: An optional second file, read only for the agent identity (see
+#: metaads_reporting.naming); ``.env`` wins over it.
+CONFIG_ENV_PATH = PROJECT_ROOT / "config.env"
 
 
 class ConfigError(RuntimeError):
