@@ -59,8 +59,9 @@ _FULL_HEAD = re.compile(r"[A-Z]{2,4}-[a-z][a-z0-9_]{1,23}-")
 #: bullet, modifier minus, heavy minus). Every Pd character folds to "-" too.
 _DASHES = frozenset("\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"
                     "\u2043\u02d7\u2796")
-#: Cyrillic and Greek letters that read as Latin ones. A small explicit table:
-#: it only has to cover what a prefix is made of (A-Z, a-z, 0-9, _).
+#: Cyrillic, Greek and Cherokee letters that read as Latin ones. A small
+#: explicit table: it only has to cover what a prefix is made of (A-Z, a-z,
+#: 0-9, _).
 _CONFUSABLES = str.maketrans({
     "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c",
     "\u0445": "x", "\u0443": "y", "\u0456": "i", "\u0458": "j", "\u0455": "s",
@@ -70,6 +71,18 @@ _CONFUSABLES = str.maketrans({
     "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H",
     "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
     "\u03a1": "P", "\u03a4": "T", "\u03a7": "X", "\u03a5": "Y",
+    # Cyrillic small letters beyond the basic ones: komi de, shha, palochka,
+    # qa, we.
+    "\u0501": "d", "\u04bb": "h", "\u04cf": "l", "\u051b": "q", "\u051d": "w",
+    # Greek small letters.
+    "\u03b1": "a", "\u03b2": "b", "\u03b5": "e", "\u03b9": "i", "\u03ba": "k",
+    "\u03bd": "v", "\u03bf": "o", "\u03c1": "p", "\u03c4": "t", "\u03c5": "u",
+    "\u03c7": "x", "\u03b3": "y",
+    # Cherokee capitals that look Latin.
+    "\u13aa": "A", "\u13f4": "B", "\u13df": "C", "\u13a0": "D", "\u13ac": "E",
+    "\u13c0": "G", "\u13bb": "H", "\u13ab": "J", "\u13e6": "K", "\u13de": "L",
+    "\u13b7": "M", "\u13e2": "P", "\u13da": "S", "\u13a2": "T", "\u13d9": "V",
+    "\u13b3": "W", "\u13c3": "Z",
 })
 
 
@@ -86,8 +99,8 @@ def _fold(char: str) -> str:
 def look_alike_prefix(text: str, prefix: str = "") -> str | None:
     """The prefix ``text`` would READ as through look-alike characters, or None.
 
-    ``text`` is folded to a skeleton (NFKC, dashes to "-", Cyrillic/Greek
-    look-alikes to Latin). If the skeleton starts with a full ``OWNER-agent-``
+    ``text`` is folded to a skeleton (NFKC, dashes to "-", Cyrillic, Greek
+    and Cherokee look-alikes to Latin). If the skeleton starts with a full ``OWNER-agent-``
     prefix -- or with ``prefix``, this checkout's own -- and the original
     differs from the skeleton in exactly that head, the name is a disguised
     prefix. Only the head is compared, so non-ASCII in the base after it is

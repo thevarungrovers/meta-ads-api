@@ -1,7 +1,7 @@
 """A prefix spelt with look-alike characters is still a prefix.
 
 The head of a name (its first two dash-separated segments) is folded to a
-skeleton -- NFKC, dash-like characters to "-", Cyrillic and Greek letters to
+skeleton -- NFKC, dash-like characters to "-", Cyrillic, Greek and Cherokee letters to
 the Latin ones they read as -- and a name whose skeleton starts with a full
 OWNER-agent- prefix (or our own), while the original differs there, is
 refused: in stamp, in rename and owns, in the engine's backstop and in the
@@ -41,6 +41,29 @@ def test_a_disguised_foreign_prefix_is_refused(identity, name):
 def test_owner_only_refuses_a_base_that_reads_as_an_agent_through_look_alikes(name):
     with pytest.raises(NameRefused, match="look-alike"):
         stamp(OWNER_ONLY, name, entity_type="ad")
+
+
+@pytest.mark.parametrize("name", [
+    "m\u03b1x-launch",          # Greek small alpha
+    "\u03bf\u03c1\u03c4-x",       # Greek omicron, rho, tau: "opt"
+    "\u03bd\u03b9\u03ba-x",       # Greek nu, iota, kappa: "vik"
+    "\u03b2\u03b5\u03c5\u03c7\u03b3-x",  # Greek beta, epsilon, upsilon, chi, gamma: "beuxy"
+    "\u0501\u04bb\u04cf\u051b\u051d-x",  # Cyrillic komi de, shha, palochka, qa, we: "dhlqw"
+])
+def test_owner_only_refuses_greek_and_cyrillic_small_look_alikes(name):
+    with pytest.raises(NameRefused, match="look-alike"):
+        stamp(OWNER_ONLY, name, entity_type="ad")
+
+
+def test_cherokee_capitals_that_read_as_latin_are_folded():
+    cherokee = ("\u13aa\u13f4\u13df\u13a0\u13ac\u13c0\u13bb\u13ab\u13e6\u13de"
+                "\u13b7\u13e2\u13da\u13a2\u13d9\u13b3\u13c3")
+    assert look_alike_prefix(f"{cherokee[2]}D-bot-launch") == "CD-bot-"
+    for char, latin in zip(cherokee, "ABCDEGHJKLMPSTVWZ"):
+        name = f"{char}{'D' if latin != 'D' else 'C'}-bot-launch"
+        assert look_alike_prefix(name) is not None, (hex(ord(char)), latin)
+        with pytest.raises(NameRefused, match="look-alike"):
+            stamp(BOTH, name, entity_type="campaign")
 
 
 def test_a_disguised_prefix_after_our_own_is_refused():
