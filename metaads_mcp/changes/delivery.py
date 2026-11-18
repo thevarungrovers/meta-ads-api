@@ -550,6 +550,7 @@ class AdSetBidAmount(_MoneyKind):
             warnings=warnings,
             campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),
+            tightens=before is not None and after < before,
             note=(
                 "The projected delta assumes the same click volume at the new "
                 "bid. It is a bound to reason with, not a forecast -- and a cap "

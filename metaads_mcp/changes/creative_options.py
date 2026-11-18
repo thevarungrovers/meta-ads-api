@@ -23,7 +23,7 @@ from pydantic import Field
 from metaads_mcp.changes.base import APPLY_SPENDS, Proposal
 from metaads_mcp.changes.common import NodeFieldKind, as_obj, canonical
 from metaads_mcp.changes.creative import UpdateAdCopy, creative_id_of, describe
-from metaads_mcp.changes.targeting import fingerprint, with_dimensions
+from metaads_mcp.changes.targeting import fingerprint, placement_widening, with_dimensions
 from metaads_mcp.guardrails import Check
 from metaads_reporting.write import ads, creatives
 from metaads_reporting.write.plan import FieldChange, PlannedChange
@@ -164,6 +164,8 @@ class AdSetPlacements(NodeFieldKind):
             campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),
             previews=previews,
+            # Narrowing placements can under-deliver; undoing it can spend more.
+            tightens=bool(placement_widening(new, targeting)),
             note="Placements move where the budget is spent, not how much; projected 0.",
         ).with_inverse({"previous": {"targeting": targeting}})
 

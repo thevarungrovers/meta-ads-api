@@ -128,7 +128,7 @@ class _AdSetKind(NodeFieldKind):
     apply_annotations = APPLY_SPENDS
 
     def _proposal(self, ctx, row, *, before, after, fields, checks, projected,
-                  warnings=(), note=None) -> Proposal:
+                  warnings=(), note=None, tightens=False) -> Proposal:
         # `after` is what a re-read will render once the change lands -- the
         # string revert_change and reconcile_ledger compare against -- so it is
         # rendered from the row with the new fields, never hand-written.
@@ -150,6 +150,7 @@ class _AdSetKind(NodeFieldKind):
             note=note,
             campaign_id=str(row.get("campaign_id")),
             account_id=row.get("account_id"),
+            tightens=tightens,
         ).with_inverse({"previous": previous_values(row, fields)})
 
 
@@ -160,7 +161,7 @@ class _CampaignKind(NodeFieldKind):
     apply_annotations = APPLY_SPENDS
 
     def _proposal(self, ctx, row, *, before, after, fields, checks, projected,
-                  warnings=(), note=None) -> Proposal:
+                  warnings=(), note=None, tightens=False) -> Proposal:
         after = self.render(ctx, {**row, **fields})
         return Proposal(
             entity_type="campaign",
@@ -179,6 +180,7 @@ class _CampaignKind(NodeFieldKind):
             note=note,
             campaign_id=str(row["id"]),
             account_id=row.get("account_id"),
+            tightens=tightens,
         ).with_inverse({"previous": previous_values(row, fields)})
 
 
@@ -356,6 +358,9 @@ class AdSetBidStrategy(_AdSetKind):
         return self._proposal(
             ctx, row, before=self.render(ctx, row), after=after, fields=fields,
             checks=checks, projected=projected,
+            # A cap, a cost target or a floor restricts what the ad set wins:
+            # undoing it lets the ad set spend its unused budget.
+            tightens=strategy != "LOWEST_COST_WITHOUT_CAP",
             warnings=["changing the bid strategy sends the ad set back into the learning phase"],
             note="Removing a cap is bounded by the unused daily budget; adding one cannot raise spend.",
         )
@@ -397,6 +402,7 @@ class CampaignBidStrategy(_CampaignKind):
             ctx, row, before=self.render(ctx, row), after=strategy,
             fields={"bid_strategy": strategy}, checks=[check_currency(ctx.limits, currency)],
             projected=projected,
+            tightens=strategy != "LOWEST_COST_WITHOUT_CAP",
             warnings=["every ad set in the campaign goes back into the learning phase"],
         )
 
@@ -446,6 +452,7 @@ class AdSetRoasFloor(_AdSetKind):
                       f"{change:.1f}% move against +/-{ctx.limits.max_bid_increase_pct:.0f}%"),
             ],
             projected=projected,
+            tightens=before is not None and after > before,
             warnings=["a ROAS floor change re-enters learning on most ad sets"],
             note="Lowering the floor is bounded by the unused daily budget.",
         )
@@ -589,7 +596,7 @@ class AdSetDayparting(_AdSetKind):
         fields = {"adset_schedule": blocks, "pacing_type": ["day_parting"]}
         return self._proposal(
             ctx, row, before=self.render(ctx, row), after=canonical(blocks), fields=fields,
-            checks=[], projected=Decimal("0"),
+            checks=[], projected=Decimal("0"), tightens=True,
             warnings=["the lifetime budget is spent only inside these hours, so their pace rises"],
             note="Restricting hours cannot raise the lifetime total; projected 0.",
         )
@@ -630,7 +637,8 @@ class AdSetFrequencyCap(_AdSetKind):
         return self._proposal(
             ctx, row, before=self.render(ctx, row), after=canonical(specs),
             fields={"frequency_control_specs": specs}, checks=[], projected=Decimal("0"),
-            note="A cap can only reduce delivery; projected 0.",
+            tightens=True,
+            note="A cap can only reduce delivery; projected 0. Undoing it is not free.",
         )
 
 

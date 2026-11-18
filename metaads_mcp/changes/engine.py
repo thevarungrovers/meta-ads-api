@@ -131,6 +131,9 @@ class Engine:
         ctx = self.ctx
         proposal: Proposal = kind.propose(ctx, **args)
         items = proposal.ledger_items()
+        if proposal.tightens:
+            for item in items:
+                item.inverse = {**(item.inverse or {}), "tightens": True}
 
         # The ENTITY's account, not the default compared with itself: one
         # token routinely reaches several accounts, and before this any

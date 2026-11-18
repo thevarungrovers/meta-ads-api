@@ -190,6 +190,11 @@ class Proposal:
     previews: list[dict[str, Any]] | None = None
     #: What revert_change needs beyond before/after, for the single-row case.
     inverse: dict[str, Any] | None = None
+    #: This change TIGHTENS delivery (a cap or floor added or raised, a bid
+    #: lowered, targeting narrowed, hours restricted). It projects nothing
+    #: itself, but undoing it lifts the restriction: the ledger marks it, and
+    #: its revert projects the unused budget headroom and counts it.
+    tightens: bool = False
 
     def with_inverse(self, inverse: dict[str, Any]) -> "Proposal":
         self.inverse = inverse
@@ -288,10 +293,23 @@ class ChangeKind:
         A revert is not free: reverting a budget CUT puts spend back. The
         default is the inverse of what the original change projected -- a cut
         of 10 reverts as +10 -- counted like an activation, since it restores a
-        state the account already had. Kinds whose original projected 0 but
-        whose revert resumes delivery (undoing a pause) override this.
+        state the account already had. A change the ledger marks ``tightens``
+        (see :attr:`Proposal.tightens`) reverts at the entity's unused budget
+        headroom. Kinds whose original projected 0 but whose revert resumes
+        delivery (undoing a pause) override this.
         """
         inverse = entry.get("inverse") or {}
+        if isinstance(inverse, dict) and inverse.get("tightens"):
+            # Undoing a tightening lifts the restriction: the entity can spend
+            # its unused budget again. Counted like an activation.
+            from metaads_mcp.changes.common import unused_headroom
+
+            try:
+                original = Decimal(str(entry.get("projected_daily_spend_delta") or "0"))
+            except (InvalidOperation, ValueError):
+                original = Decimal("0")
+            lifted = max(unused_headroom(ctx, entry), -original, Decimal("0"))
+            return lifted, lifted > 0
         if isinstance(inverse, dict) and inverse.get("revert_row") and inverse.get("undoes_projected") is not None:
             # Reverting a REVERT re-applies the original change: it costs what
             # the original projected, not the inverse of the revert's own.

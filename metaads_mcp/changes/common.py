@@ -212,6 +212,35 @@ def ad_activation_bound(ctx, ad: dict[str, Any], currency: str) -> tuple[Decimal
     return bound, f"this would be the ad set's only ACTIVE ad, restarting its spend ({why})"
 
 
+def unused_headroom(ctx, entry: dict[str, Any]) -> Decimal:
+    """The daily budget a ledger entry's ad set or campaign leaves unspent.
+
+    What lifting a restriction on it (a cap, a floor, narrowed targeting) can
+    add: its own or its campaign's budget, less its last 7 days' average spend.
+    An ad counts its ad set's. With no budget readable, max_daily_budget.
+    """
+    from metaads_reporting.write import adsets as adset_writes
+    from metaads_reporting.write import ads as ad_writes
+    from metaads_reporting.write import campaigns as campaign_writes
+
+    kind, entity_id = entry.get("entity_type"), str(entry.get("entity_id"))
+    if kind == "ad":
+        entity_id = str(ad_writes.find(ctx.client, ad_id=entity_id).get("adset_id"))
+        kind = "ad set"
+    if kind == "ad set":
+        row = adset_writes.find(ctx.client, ad_set_id=entity_id)
+        bound, _ = ad_set_activation_bound(ctx, row, ctx.currency_of(row))
+        level = "adset"
+    elif kind == "campaign":
+        row = campaign_writes.find(ctx.client, campaign_id=entity_id)
+        bound, _ = campaign_activation_bound(ctx, row, ctx.currency_of(row))
+        level = "campaign"
+    else:
+        return Decimal("0")
+    spent = ctx.spend_7d(ctx.metrics_7d(str(row["id"]), level)) / 7
+    return max(bound - spent, Decimal("0")).quantize(Decimal("0.01"))
+
+
 # ---------------------------------------------------------------------------
 # Changing fields on one node, with the previous values kept as the inverse
 # ---------------------------------------------------------------------------
@@ -307,7 +336,7 @@ class NodeFieldKind(ChangeKind):
             return None
         extra = {k: v for k, v in inverse.items()
                  if k not in ("previous", "kind", "weight", "batch_id", "revert_row",
-                              "undoes_projected", "not_revertible")}
+                              "undoes_projected", "not_revertible", "tightens")}
         return {**extra, "previous": replaced}
 
 
