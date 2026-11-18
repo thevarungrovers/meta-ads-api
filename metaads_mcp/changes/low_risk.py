@@ -152,6 +152,11 @@ class LowRiskChange(NodeFieldKind):
         labels, which move no money, delivery or targeting. Everything else is
         a typed preview_* tool with guardrails. Counts one apply; revert puts the
         old name or label set back (a created label is not deleted).
+
+        A rename is allowed only on the agent's OWN entities (its owner/agent
+        prefix, or the ledger shows this server created it); a manual entity
+        or another agent's is refused. Give the base name: the prefix is kept.
+        A new label is named with the prefix too.
         """
         key = (entity_type, field)
         if key not in ALLOWED:
@@ -176,9 +181,17 @@ class LowRiskChange(NodeFieldKind):
             return proposal
         graph_field = ALLOWED[key]
         row = self.read_typed(ctx, entity_type, entity_id)
+        decision = None
         if graph_field == "name":
-            if len(value) > 400:
-                raise ValueError("A name is at most 400 characters.")
+            # Only the agent's OWN entities: its prefix, or the ledger shows
+            # this server created it. The prefix is kept (or restored); the
+            # length limit counts it.
+            from metaads_mcp import ledger
+
+            decision = ctx.name_for_rename(
+                READABLE[entity_type], row.get("name") or "", value,
+                ledger_owned=ledger.created_by_us(str(row["id"])))
+            value = decision.final
             fields = {"name": value}
             after_row = {**row, "name": value}
         else:
@@ -197,10 +210,10 @@ class LowRiskChange(NodeFieldKind):
             after_row = {**row, "adlabels": labels}
         before = self._render_for(graph_field, row)
         after = self._render_for(graph_field, after_row)
-        if before == after:
+        if before == after and not (decision and decision.refused):
             raise ValueError("Nothing would change.")
         previous = previous_values(row, fields) or {graph_field: [] if graph_field == "adlabels" else row.get("name")}
-        return Proposal(
+        proposal = Proposal(
             entity_type=READABLE[entity_type], entity_id=str(row["id"]),
             entity_name=row.get("name") or "", path=row.get("name") or "",
             field_name=field, before=before, after=after, checks=[], projected=Decimal("0"),
@@ -212,6 +225,9 @@ class LowRiskChange(NodeFieldKind):
             note="A name or a label moves no money and no delivery.",
         ).with_inverse({"previous": previous, "field": field, "graph_field": graph_field,
                         "graph_type": GRAPH_TYPE[entity_type]})
+        if decision is not None:
+            proposal.name(decision, created=False)
+        return proposal
 
 
 __all__ = ["ALLOWED", "LowRiskChange", "account_path"]

@@ -29,14 +29,15 @@ def test_url_tags_is_not_low_risk():
 
 def test_a_rename_round_trips(monkeypatch):
     s = make_sim()
+    s.objects[ADSET_ID]["name"] = "AB-max-Broad 25-54"  # the agent's own
     tools, state = rig(monkeypatch, s)
     preview = preview_ok(tools, "low_risk_change", s, entity_type="ad_set", entity_id=ADSET_ID,
                          field="name", value="Broad 25-54 (spring)")
     result = tools["apply_low_risk_change"](preview_token=preview.preview_token)
-    assert s.objects[ADSET_ID]["name"] == "Broad 25-54 (spring)"
+    assert s.objects[ADSET_ID]["name"] == "AB-max-Broad 25-54 (spring)"
     assert state.counters.applies == 1
     tools["revert_change"](entry_id=result.entry_id)
-    assert s.objects[ADSET_ID]["name"] == "Broad 25-54"
+    assert s.objects[ADSET_ID]["name"] == "AB-max-Broad 25-54"
 
 
 def test_a_label_is_created_attached_and_detached(monkeypatch):

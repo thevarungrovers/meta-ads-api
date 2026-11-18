@@ -96,6 +96,9 @@ def register(mcp, state) -> None:
         return mcp.tool(**kwargs)
 
     write_client = MutatingMetaAdsClient.from_env()
+    # The second naming guard, below every tool: with a prefix configured, a
+    # named create or a rename without it is refused before it is sent.
+    write_client.required_name_prefix = state.identity.prefix
     state.write_client = write_client
     ctx = WriteContext(state, write_client, execute, execute_chain)
     engine = Engine(ctx)
