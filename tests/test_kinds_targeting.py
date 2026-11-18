@@ -219,3 +219,37 @@ def test_a_revert_refuses_when_the_touched_dimension_moved(monkeypatch):
 
 def test_the_fingerprint_shows_placements():
     assert fingerprint({**BASE, "publisher_platforms": ["facebook"]}) != fingerprint(BASE)
+
+
+# --- a saved audience and the ad set's placements ---------------------------
+
+MANUAL = {"publisher_platforms": ["facebook"], "facebook_positions": ["feed"],
+          "device_platforms": ["mobile"], "user_os": ["iOS"]}
+
+
+def test_a_saved_audience_keeps_the_ad_sets_placements_and_devices(monkeypatch):
+    s = sim()
+    s.objects[ADSET_ID]["targeting"] = {**BASE, **MANUAL}
+    tools, _ = rig(monkeypatch, s, max_reach_change_pct=500.0)
+    preview = preview_ok(tools, "ad_set_targeting", s, ad_set_id=ADSET_ID,
+                         saved_audience_id="SAVED1")
+    tools["apply_ad_set_targeting"](preview_token=preview.preview_token)
+    after = _targeting(s)
+    assert after["geo_locations"] == {"countries": ["US"]}
+    for key, value in MANUAL.items():
+        assert after.get(key) == value, f"{key} was dropped"
+
+
+def test_saved_placements_that_widen_fail_without_the_opt_in(monkeypatch):
+    s = sim()
+    s.objects[ADSET_ID]["targeting"] = {**BASE, **MANUAL}
+    tools, _ = rig(monkeypatch, s, max_reach_change_pct=500.0)
+    preview = tools["preview_ad_set_targeting"](
+        ad_set_id=ADSET_ID, saved_audience_id="SAVED1", use_saved_audience_placements=True)
+    assert failed(preview, "placements_widen"), preview.checks
+    assert "publisher_platforms" in preview.before and "publisher_platforms" not in preview.after
+
+    opted = tools["preview_ad_set_targeting"](
+        ad_set_id=ADSET_ID, saved_audience_id="SAVED1", use_saved_audience_placements=True,
+        allow_wider_placements=True)
+    assert not failed(opted, "placements_widen"), opted.checks

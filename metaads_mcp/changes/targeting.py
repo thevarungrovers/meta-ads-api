@@ -153,6 +153,34 @@ def with_dimensions(spec: dict[str, Any], keys, values: dict[str, Any]) -> dict[
     return out
 
 
+def placement_widening(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """How ``after`` lets the ads run in MORE places or on more devices.
+
+    A restriction dropped (no publisher_platforms is Advantage+ placements,
+    everywhere), or a platform, position, device or OS added to one, widens.
+    Removing an excluded device widens too.
+    """
+    def values(spec, key):
+        raw = spec.get(key)
+        if raw in (None, "", [], {}):
+            return set()
+        return {str(v) for v in (raw if isinstance(raw, list) else [raw])}
+
+    reasons = []
+    for key in WHERE_KEYS:
+        was, now = values(before, key), values(after, key)
+        if key == "excluded_user_device":
+            if was - now:
+                reasons.append(f"{key} no longer excludes {sorted(was - now)}")
+            continue
+        if was and not now:
+            reasons.append(f"{key} restriction {sorted(was)} removed"
+                           + (" (Advantage+ placements: everywhere)" if key == "publisher_platforms" else ""))
+        elif was and now - was:
+            reasons.append(f"{key} adds {sorted(now - was)}")
+    return reasons
+
+
 def _merge_places(target: dict, places: dict, *, remove: bool = False) -> None:
     for key, items in (places or {}).items():
         current = list(target.get(key) or [])
@@ -446,8 +474,10 @@ class AdSetTargeting(NodeFieldKind):
         audiences_include: Annotated[list[str] | None, Field(description="Custom/lookalike audience ids to include")] = None,
         audiences_exclude: Annotated[list[str] | None, Field(description="Custom audience ids to exclude")] = None,
         audiences_remove: Annotated[list[str] | None, Field(description="Audience ids to detach (include or exclude)")] = None,
-        saved_audience_id: Annotated[str | None, Field(description="Copy this saved audience's targeting into the ad set (replaces the spec, then the edits above apply)")] = None,
+        saved_audience_id: Annotated[str | None, Field(description="Copy this saved audience's targeting into the ad set (replaces the audience part of the spec, then the edits above apply). The ad set's own placements, devices and OS are kept.")] = None,
         advantage_audience: Annotated[bool | None, Field(description="Advantage+ audience on/off")] = None,
+        use_saved_audience_placements: Annotated[bool, Field(description="With saved_audience_id: also take the saved audience's placements, devices and OS instead of keeping the ad set's")] = False,
+        allow_wider_placements: Annotated[bool, Field(description="Allow a change that lets the ads run in more placements or on more devices; without it such a preview FAILs")] = False,
     ) -> Proposal:
         """Change who an ad set reaches. Writes nothing.
 
@@ -469,6 +499,12 @@ class AdSetTargeting(NodeFieldKind):
         if saved_audience_id:
             node = ctx.read.node(str(saved_audience_id), ("id", "name", "targeting"))
             saved, saved_name = as_obj(node.get("targeting")) or {}, node.get("name")
+            if not use_saved_audience_placements:
+                # A saved audience is WHO, not WHERE: copying it must not drop
+                # the ad set's manual placements and flip it to Advantage+
+                # placements, or its device/OS limits.
+                saved = {k: v for k, v in saved.items() if k not in WHERE_KEYS}
+                saved.update({k: copy.deepcopy(current[k]) for k in WHERE_KEYS if k in current})
         edits = {
             "geo_include": geo_include, "geo_remove": geo_remove, "geo_exclude": geo_exclude,
             "age_min": age_min, "age_max": age_max, "genders": genders, "locales": locales,
@@ -489,6 +525,13 @@ class AdSetTargeting(NodeFieldKind):
         goal = row.get("optimization_goal")
         audience_checks, warnings, lookalikes = self._audience_checks(ctx, new, current, goal)
         checks = validate_spec(ctx, new, campaign=campaign, lookalike_ids=lookalikes) + audience_checks
+        wider = placement_widening(current, new)
+        if wider:
+            checks.append(Check(
+                "placements_widen", allow_wider_placements,
+                "; ".join(wider) + (" (allowed: allow_wider_placements)" if allow_wider_placements
+                                    else " -- pass allow_wider_placements=True to allow it"),
+            ))
 
         before_est = self._estimate(ctx, current, goal)
         after_est = self._estimate(ctx, new, goal)
