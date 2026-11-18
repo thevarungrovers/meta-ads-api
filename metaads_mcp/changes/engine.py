@@ -103,6 +103,9 @@ class Engine:
         blocked = self.ctx.counters.would_exceed(projected, weight=weight)
         if blocked:
             raise PreviewExpired(blocked)
+        blocked = self.ctx.daily.would_exceed(projected, weight=weight)
+        if blocked:
+            raise PreviewExpired(blocked)
 
     # -- preview ---------------------------------------------------------
 
@@ -125,6 +128,7 @@ class Engine:
         if proposal.batch:
             checks.append(check_count(ctx.limits, len(items)))
         checks.append(check_projected_delta(ctx.limits, max(proposal.projected, Decimal("0"))))
+        checks.append(ctx.daily.check(proposal.projected))
 
         payload = dict(proposal.payload)
         payload["before"] = proposal.before

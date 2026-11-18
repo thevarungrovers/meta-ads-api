@@ -32,6 +32,22 @@ max_projected_delta_per_day = "200.00"  # upper bound on extra daily spend
 max_applies_per_session     = 20
 max_projected_session_delta = "500.00"
 
+# --- per-day bounds (local calendar day) --------------------------------------
+# Counted from the ledger (logs/meta-ads.db, `changes`), not from memory, so
+# they survive a restart and are shared by every server process. Only
+# successful applies and reverts count; the day starts at LOCAL midnight.
+# Writes made with scripts/manage.py go to the `mutations` log only and are NOT
+# counted here.
+#
+# An ACTIVATION (campaign, ad set or ad set to ACTIVE, or a revert that restores
+# spend) is counted against this daily total and the session total, and is
+# exempt from the per-change max_projected_delta_per_day. So this total must be
+# at least the largest daily budget the agent may need to re-activate -- a CBO
+# campaign's budget, or an ABO campaign's summed ad set budgets. The server
+# logs a warning at startup when one exceeds it.
+max_applies_per_day                = 40
+max_projected_delta_per_day_total  = "1000.00"
+
 [scope]
 # Ad account ids the server may touch, as bare digits with no `act_` prefix.
 # EMPTY means "whatever META_ADS_ACCOUNT_ID in .env points at, and nothing

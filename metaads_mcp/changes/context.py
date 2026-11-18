@@ -118,6 +118,14 @@ class WriteContext:
 
     # -- caps ------------------------------------------------------------
 
+    @property
+    def daily(self):
+        from metaads_mcp.guardrails import DailyUsage
+
+        # Built per use, not cached: it holds no state, only the limits, and
+        # every answer comes from the ledger.
+        return DailyUsage(self.limits)
+
     def cap_warnings(self, projected: Decimal, weight: int) -> list[str]:
         """The session and daily caps, as warnings on the preview.
 
@@ -126,7 +134,10 @@ class WriteContext:
         apply refused for the cap says which cap.
         """
         warnings = []
-        for reason in (self.counters.would_exceed(projected, weight=weight),):
+        for reason in (
+            self.counters.would_exceed(projected, weight=weight),
+            self.daily.would_exceed(projected, weight=weight),
+        ):
             if reason:
                 warnings.append(f"the apply will be REFUSED: {reason}")
         return warnings

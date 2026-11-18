@@ -406,12 +406,13 @@ def register(mcp, state) -> None:
         Call this before proposing a change, so you propose something that can
         actually be applied rather than something that will be refused.
         """
-        from metaads_mcp.guardrails import read_only_mode, writes_disabled
+        from metaads_mcp.guardrails import DailyUsage, read_only_mode, writes_disabled
 
         read_only = read_only_mode()
         return {
             "limits": state.limits.describe(),
             "session": state.counters.snapshot(),
+            "today": DailyUsage(state.limits).snapshot(),
             "writes_disabled": writes_disabled(),
             "read_only_server": read_only,
             "pending_previews": state.previews.pending_count,
@@ -422,7 +423,9 @@ def register(mcp, state) -> None:
                 "what you would change, and let them make it from a writable "
                 "client or Ads Manager."
                 if read_only
-                else "Session counters reset only when the server restarts."
+                else "Session counters reset when the server restarts; the "
+                "daily ones (`today`) are read from the ledger and reset at "
+                "local midnight."
             ),
         }
 

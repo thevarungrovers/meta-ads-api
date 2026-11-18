@@ -7,6 +7,10 @@ Two kinds of limit, and the second matters more:
 * **Per-session** -- at most N applies, at most X total projected daily spend
   added. A per-call limit does nothing against a loop making four hundred
   individually-legal changes, which is the failure mode an agent actually has.
+* **Per-day** -- the same two bounds for the LOCAL calendar day, counted from
+  the ledger rather than from memory. The session counters reset whenever the
+  server process restarts, and an agent in continuous use restarts it often,
+  so on their own they bound a session and nothing longer.
 
 Values come from ``guardrails.toml`` at the repo root, falling back to the
 constants below. A key that is misspelled raises at startup rather than being
@@ -16,6 +20,7 @@ as protection that is not there.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import tomllib
 from dataclasses import dataclass
@@ -39,6 +44,9 @@ DEFAULTS: dict[str, object] = {
     "max_projected_session_delta": Decimal("500.00"),
     # how many placements an ad change previews (most-spent first)
     "max_preview_formats": 5,
+    # the local calendar day, across restarts and processes
+    "max_applies_per_day": 40,
+    "max_projected_delta_per_day_total": Decimal("1000.00"),
 }
 
 _DECIMAL_KEYS = {
@@ -46,9 +54,15 @@ _DECIMAL_KEYS = {
     "max_bid_amount",
     "max_projected_delta_per_day",
     "max_projected_session_delta",
+    "max_projected_delta_per_day_total",
 }
 _FLOAT_KEYS = {"max_budget_change_pct", "max_bid_increase_pct"}
-_INT_KEYS = {"max_entities_per_call", "max_applies_per_session", "max_preview_formats"}
+_INT_KEYS = {
+    "max_entities_per_call",
+    "max_applies_per_session",
+    "max_preview_formats",
+    "max_applies_per_day",
+}
 
 
 class WritesDisabled(RuntimeError):
@@ -74,6 +88,8 @@ class Limits:
     max_applies_per_session: int
     max_projected_session_delta: Decimal
     max_preview_formats: int = 5
+    max_applies_per_day: int = 40
+    max_projected_delta_per_day_total: Decimal = Decimal("1000.00")
     allowed_account_ids: tuple[str, ...] = ()
     allowed_campaign_ids: tuple[str, ...] = ()
     allowed_currencies: tuple[str, ...] = ("CAD",)
@@ -89,6 +105,10 @@ class Limits:
             "max_applies_per_session": self.max_applies_per_session,
             "max_projected_session_delta": str(self.max_projected_session_delta),
             "max_preview_formats": self.max_preview_formats,
+            "max_applies_per_day": self.max_applies_per_day,
+            "max_projected_delta_per_day_total": str(
+                self.max_projected_delta_per_day_total
+            ),
             "allowed_account_ids": list(self.allowed_account_ids)
             or ["(only META_ADS_ACCOUNT_ID)"],
             "allowed_campaign_ids": list(self.allowed_campaign_ids) or ["(all)"],
@@ -242,6 +262,120 @@ class SessionCounters:
                     self._limits.max_projected_session_delta - self.projected_delta,
                 )
             ),
+        }
+
+
+def local_midnight_utc(now: dt.datetime | None = None) -> str:
+    """Today's LOCAL midnight, as the UTC ISO string the ledger stores.
+
+    "Today" is the operator's calendar day, not UTC's: in the evening in the
+    Americas the UTC date has already rolled over, and a cap counted in UTC
+    would reset in the middle of it. The ledger's ``at`` column is UTC ISO
+    (``logdb._now()``), so the boundary is computed locally and converted,
+    which keeps the query a plain indexed string comparison.
+
+    >>> local_midnight_utc(dt.datetime(2026, 11, 18, 21, 0, tzinfo=dt.timezone(dt.timedelta(hours=-5))))
+    '2026-11-18T05:00:00+00:00'
+    """
+    local_now = (now or dt.datetime.now().astimezone())
+    if local_now.tzinfo is None:
+        local_now = local_now.astimezone()
+    midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(dt.timezone.utc).isoformat()
+
+
+class DailyUsage:
+    """Today's applies and projected spend, read back from the ledger.
+
+    No table of its own and no in-memory state: every question is answered by
+    the ``changes`` rows since local midnight, so two server processes -- or a
+    process restarted ten times today -- see the same numbers.
+
+    Counted the way SessionCounters counts: every ``apply_*`` and
+    ``revert_change`` row with ``ok = 1``. A batch counts once (its rows share
+    a batch_id and each carries the whole batch's delta and weight), a
+    creation costs its weight, and a reduction refunds nothing.
+    """
+
+    def __init__(self, limits: Limits, now: dt.datetime | None = None) -> None:
+        self._limits = limits
+        self._now = now
+
+    def usage(self) -> tuple[int, Decimal]:
+        from metaads_reporting import logdb
+
+        groups: dict[str, dict] = {}
+        for row in logdb.changes_since(local_midnight_utc(self._now)):
+            tool = row.get("tool") or ""
+            if not (tool.startswith("apply_") or tool == "revert_change"):
+                continue
+            inverse = row.get("inverse") if isinstance(row.get("inverse"), dict) else {}
+            groups.setdefault(inverse.get("batch_id") or row["entry_id"], row)
+        applies = 0
+        delta = Decimal("0")
+        for row in groups.values():
+            inverse = row.get("inverse") if isinstance(row.get("inverse"), dict) else {}
+            applies += int(inverse.get("weight") or 1)
+            try:
+                value = Decimal(str(row.get("projected_daily_spend_delta") or "0"))
+            except InvalidOperation:
+                value = Decimal("0")
+            delta += max(value, Decimal("0"))
+        return applies, delta
+
+    def would_exceed(self, projected_delta: Decimal, weight: int = 1) -> str | None:
+        applies, delta = self.usage()
+        if applies + weight > self._limits.max_applies_per_day:
+            return (
+                f"daily apply limit reached: {applies} of "
+                f"{self._limits.max_applies_per_day} already used today (local "
+                "time, across every server process)"
+                + (f" and this one costs {weight}" if weight > 1 else "")
+                + ". It resets at local midnight. Stop and tell the human; this "
+                "cap is set in guardrails.toml."
+            )
+        check = self.check(projected_delta, delta)
+        if not check.ok:
+            return (
+                f"daily spend total reached: this change {check.detail} "
+                f"(max_projected_delta_per_day_total = "
+                f"{self._limits.max_projected_delta_per_day_total}, local day, "
+                "across every server process). It resets at local midnight."
+            )
+        return None
+
+    def check(self, projected_delta: Decimal, used: Decimal | None = None) -> Check:
+        """The daily-total line for a preview: "uses X of today's remaining Y".
+
+        Both figures, always: "over the ceiling" alone does not tell a human
+        whether the change is too big or the day is already spent.
+        """
+        if used is None:
+            used = self.usage()[1]
+        remaining = max(
+            Decimal("0"), self._limits.max_projected_delta_per_day_total - used
+        )
+        wanted = max(projected_delta, Decimal("0"))
+        return Check(
+            "max_projected_delta_per_day_total",
+            wanted <= remaining,
+            f"uses {wanted:.2f} of today's remaining {remaining:.2f}",
+        )
+
+    def snapshot(self) -> dict[str, object]:
+        applies, delta = self.usage()
+        return {
+            "day_started_at_utc": local_midnight_utc(self._now),
+            "applies_used": applies,
+            "applies_remaining": max(0, self._limits.max_applies_per_day - applies),
+            "projected_delta": str(delta),
+            "projected_delta_remaining": str(
+                max(
+                    Decimal("0"),
+                    self._limits.max_projected_delta_per_day_total - delta,
+                )
+            ),
+            "note": "scripts/manage.py writes are not counted here",
         }
 
 
