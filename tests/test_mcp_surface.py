@@ -27,6 +27,7 @@ READ_TOOLS = frozenset(
         "get_ad_creative",
         "list_audiences",
         "reconcile_ledger",
+        "get_report_run",
     }
 )
 

@@ -113,3 +113,14 @@ def test_an_hourly_breakdown_cannot_be_combined():
     with pytest.raises(InsightsError):
         InsightsQuery(fields=("spend",), breakdowns=(
             "hourly_stats_aggregated_by_advertiser_time_zone", "age"))
+
+
+def test_an_async_report_runs_and_is_polled(monkeypatch):
+    sim = make_sim()
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    started = registrar.tools["run_report"](report="ads", run_async=True)
+    run = started["report_run_id"]
+    assert [c["edge"] for c in sim.created] == ["insights"]
+    assert sim.applied == [], "a report run is not a change to the account"
+    done = registrar.tools["get_report_run"](report_run_id=run)
+    assert done["async_status"] == "Job Completed" and done["rows_returned"] == 1

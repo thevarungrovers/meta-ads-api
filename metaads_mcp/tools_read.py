@@ -298,6 +298,10 @@ def register(mcp, state) -> None:
             list[Breakdown] | None,
             Field(description="Override the report's breakdowns, e.g. ['age', 'gender']"),
         ] = None,
+        run_async: Annotated[
+            bool,
+            Field(description="Start an async report run instead; poll get_report_run"),
+        ] = False,
     ) -> dict[str, Any]:
         """Account, campaign, ad set or ad performance from the insights edge.
 
@@ -344,6 +348,20 @@ def register(mcp, state) -> None:
                 breakdowns=tuple(breakdowns) if breakdowns else None,
             )
 
+        if run_async:
+            from metaads_reporting.account_id import account_path
+            from metaads_reporting.write import async_insights
+
+            node = node_id or account_path(client.resolve_account_id())
+            run_id = async_insights.start(client, node, query.to_params())
+            return {
+                "report": report,
+                "report_run_id": run_id,
+                "window": query.describe_window(),
+                "next": "call get_report_run with this id until async_status is "
+                "'Job Completed', then it returns the rows",
+            }
+
         rows = client.insight_rows(query, node_id=node_id, max_items=max_rows + 1)
         truncated = len(rows) > max_rows
         rows = rows[:max_rows]
@@ -375,6 +393,33 @@ def register(mcp, state) -> None:
                 "window into one row per ad, when frequency is the question."
             ),
         }
+
+    @mcp.tool(title="Poll an async report run", annotations=READ_ONLY)
+    @refusals_reach_the_caller
+    def get_report_run(
+        report_run_id: Annotated[str, Field(description="From run_report(run_async=True)")],
+        max_rows: Annotated[int, Field(ge=1, le=5000)] = 500,
+    ) -> dict[str, Any]:
+        """Where an async report is, and its rows once it is done.
+
+        `async_status` reaches "Job Completed" at 100%; "Job Failed" or "Job
+        Skipped" means start it again, narrower. Money in the rows is already in
+        major units (insights always are).
+        """
+        from metaads_reporting.write import async_insights
+
+        state_ = async_insights.status(client, report_run_id)
+        out: dict[str, Any] = {
+            "report_run_id": report_run_id,
+            "async_status": state_.get("async_status"),
+            "async_percent_completion": state_.get("async_percent_completion"),
+            "rate_limit": headroom(),
+        }
+        if state_.get("async_status") == "Job Completed":
+            rows = async_insights.rows(client, report_run_id, max_items=max_rows + 1)
+            out.update(rows=rows[:max_rows], rows_returned=min(len(rows), max_rows),
+                       truncated=len(rows) > max_rows)
+        return out
 
     @mcp.tool(title="Read an ad's creative and its current copy", annotations=READ_ONLY)
     @refusals_reach_the_caller

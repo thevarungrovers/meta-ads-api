@@ -194,6 +194,15 @@ class GraphSim:
         if edge in self.CREATE_EDGES:
             return self._create(edge, body)
 
+        if edge == "insights":
+            # An async report run: an object with a status, rows on its edge.
+            run_id = f"RUN{len(self.created) + 1}"
+            self.created.append({"edge": "insights", "payload": dict(body)})
+            self.objects[run_id] = {
+                "id": run_id, "async_status": "Job Completed", "async_percent_completion": 100,
+            }
+            return FakeResponse({"report_run_id": run_id})
+
         payload = {
             k: v
             for k, v in body.items()

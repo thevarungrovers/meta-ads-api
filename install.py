@@ -67,6 +67,7 @@ SAFE_TOOLS = (
     "get_ad_creative",
     "list_audiences",
     "reconcile_ledger",
+    "get_report_run",
     "preview_campaign_status",
     "preview_campaign_daily_budget",
     "preview_ad_set_status",
