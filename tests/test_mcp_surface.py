@@ -36,6 +36,21 @@ READ_TOOLS = frozenset(
         "get_audience",
         "search_targeting",
         "estimate_reach",
+        "list_ad_images",
+        "list_ad_videos",
+        "list_labels",
+        "list_custom_conversions",
+        "list_pixels",
+        "get_pixel_health",
+        "list_connected_identities",
+        "list_lead_forms",
+        "list_ad_rules",
+        "list_ab_tests",
+        "get_ab_test",
+        "list_catalogs",
+        "list_product_sets",
+        "list_recent_changes",
+        "search_ad_library",
     }
 )
 

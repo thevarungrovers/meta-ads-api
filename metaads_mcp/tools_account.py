@@ -292,8 +292,10 @@ def register(mcp, state, client, *, headroom, money, read_only, local_only) -> N
             "note": "Signed, short-lived links. Open them; do not store them.",
         }
 
-    register_assets(mcp, state, client, listing=listing, edge=edge, account=account,
-                    headroom=headroom, money=money, read_only=read_only, local_only=local_only)
+    helpers = dict(listing=listing, edge=edge, account=account, headroom=headroom,
+                   money=money, read_only=read_only, local_only=local_only)
+    register_assets(mcp, state, client, **helpers)
+    register_more(mcp, state, client, **helpers)
 
 
 TargetingType = Literal[
@@ -457,4 +459,254 @@ class _Shim:
         return self._client.resolve_account_id(override)
 
 
-__all__ = ["register", "json"]
+__all__ = ["register"]
+
+
+#: Rule execution types that change money. A rule is an unattended writer that
+#: bypasses every guardrail here, so an ENABLED one of these is flagged.
+MONEY_RULE_EXECUTIONS = frozenset({"CHANGE_BUDGET", "CHANGE_CAMPAIGN_BUDGET", "CHANGE_BID"})
+
+
+def register_more(mcp, state, client, *, listing, edge, account, headroom, money,
+                  read_only, local_only) -> None:  # noqa: C901
+    """Media, labels, pixels, identities, forms, rules, studies, catalogs, history."""
+    import datetime as dt
+
+    @mcp.tool(title="List the account's ad images", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_ad_images(limit: Annotated[int, Field(ge=1, le=500)] = 50) -> dict[str, Any]:
+        """Image hashes in the account's library, with width and height, for
+        reuse in a creative and for the placement shape checks."""
+        rows = edge(account(), "adimages", ("hash", "name", "width", "height", "created_time"), limit)
+        return listing(rows, limit)
+
+    @mcp.tool(title="List the account's ad videos", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_ad_videos(limit: Annotated[int, Field(ge=1, le=500)] = 50) -> dict[str, Any]:
+        """Video ids with length (seconds) and processing status. A video must
+        be `ready` before an ad can use it; uploading new video is not offered
+        here -- reuse an existing id."""
+        rows = edge(account(), "advideos", ("id", "title", "length", "status", "created_time"), limit)
+        return listing(rows, limit, lambda r: {
+            **r, "ready": (r.get("status") or {}).get("video_status") == "ready"
+            if isinstance(r.get("status"), dict) else None,
+        })
+
+    @mcp.tool(title="List ad labels", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_labels(limit: Annotated[int, Field(ge=1, le=500)] = 100) -> dict[str, Any]:
+        """The account's ad labels (act_/adlabels), for organising and filtering."""
+        return listing(edge(account(), "adlabels", ("id", "name", "created_time"), limit), limit)
+
+    @mcp.tool(title="List custom conversions", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_custom_conversions(limit: Annotated[int, Field(ge=1, le=200)] = 50) -> dict[str, Any]:
+        """Custom conversions: their event type, rule, pixel and when they last fired."""
+        rows = edge(account(), "customconversions", (
+            "id", "name", "custom_event_type", "rule", "pixel", "last_fired_time",
+            "is_archived"), limit)
+        return listing(rows, limit)
+
+    @mcp.tool(title="List the account's pixels", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_pixels(limit: Annotated[int, Field(ge=1, le=50)] = 20) -> dict[str, Any]:
+        """Pixels (datasets) the account uses, with when each last fired. A pixel
+        that has not fired recently cannot feed a website audience or a
+        conversion goal."""
+        rows = edge(account(), "adspixels", ("id", "name", "last_fired_time", "is_unavailable",
+                                             "creation_time"), limit)
+        return listing(rows, limit)
+
+    @mcp.tool(title="Check one pixel's health", annotations=read_only)
+    @refusals_reach_the_caller
+    def get_pixel_health(
+        pixel_id: Annotated[str, Field(description="From list_pixels")],
+    ) -> dict[str, Any]:
+        """When the pixel last fired, event counts by event name, and the share
+        of events from the Conversions API versus the browser, where Meta
+        reports it. Read-only diagnostics: nothing here configures a pixel or
+        sends an event.
+
+        The event names are the ones a website audience rule can use.
+        """
+        node = client.node(str(pixel_id), ("id", "name", "last_fired_time", "is_unavailable"))
+        out: dict[str, Any] = {**node}
+        for aggregation in ("event", "event_source"):
+            try:
+                data = client.get(f"{pixel_id}/stats", aggregation=aggregation).get("data") or []
+            except Exception as exc:  # noqa: BLE001 - one aggregation may be refused
+                out[f"by_{aggregation}"] = {"unavailable": str(exc).splitlines()[0]}
+                continue
+            counts: dict[str, int] = {}
+            for bucket in data:
+                for entry in bucket.get("data") or []:
+                    key = str(entry.get("value"))
+                    try:
+                        counts[key] = counts.get(key, 0) + int(entry.get("count") or 0)
+                    except (TypeError, ValueError):
+                        continue
+            out[f"by_{aggregation}"] = counts
+        events = out.get("by_event") if isinstance(out.get("by_event"), dict) else {}
+        out["events_seen"] = sorted(events)
+        out["rate_limit"] = headroom()
+        return out
+
+    @mcp.tool(title="List the Pages, Instagram accounts and apps the account can use",
+              annotations=read_only)
+    @refusals_reach_the_caller
+    def list_connected_identities() -> dict[str, Any]:
+        """Facebook Pages and Instagram accounts the ad account can advertise
+        as, and its advertisable apps. Engagement audiences and a creative's
+        identity take their ids from here."""
+        out: dict[str, Any] = {}
+        for key, name, fields in (
+            ("pages", "promote_pages", ("id", "name")),
+            ("instagram_accounts", "instagram_accounts", ("id", "username")),
+            ("apps", "advertisable_applications", ("id", "name")),
+        ):
+            try:
+                out[key] = edge(account(), name, fields, 100)[:100]
+            except Exception as exc:  # noqa: BLE001 - one edge may need a permission
+                out[key] = {"unavailable": str(exc).splitlines()[0]}
+        out["rate_limit"] = headroom()
+        return out
+
+    @mcp.tool(title="List a Page's lead forms", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_lead_forms(
+        page_id: Annotated[str, Field(description="From list_connected_identities")],
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    ) -> dict[str, Any]:
+        """Form metadata, status and lead counts. Never the leads themselves:
+        downloading submissions (personal data) is out of scope.
+
+        Needs the Page assigned to the System User with lead access; without
+        it Meta answers PERMISSION. Creating a form stays in Ads Manager: it
+        carries a privacy policy and legal text a person answers for.
+        """
+        rows = edge(str(page_id), "leadgen_forms",
+                    ("id", "name", "status", "leads_count", "locale", "created_time"), limit)
+        return listing(rows, limit)
+
+    @mcp.tool(title="List automated rules", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_ad_rules(limit: Annotated[int, Field(ge=1, le=200)] = 50) -> dict[str, Any]:
+        """The account's automated rules: name, status, what they evaluate and
+        what they do. An ENABLED rule that changes budgets or bids is flagged:
+        it acts unattended, outside every guardrail and cap on this server."""
+        rows = edge(account(), "adrules_library", (
+            "id", "name", "status", "evaluation_spec", "execution_spec", "schedule_spec",
+            "created_time", "updated_time"), limit)
+
+        def render(r):
+            execution = (r.get("execution_spec") or {}).get("execution_type")
+            return {**r, "changes_money": execution in MONEY_RULE_EXECUTIONS,
+                    "warning": (
+                        "ENABLED and changes money outside this server's guardrails"
+                        if execution in MONEY_RULE_EXECUTIONS and r.get("status") == "ENABLED"
+                        else None)}
+
+        return listing(rows, limit, render)
+
+    @mcp.tool(title="List A/B tests and lift studies", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_ab_tests(limit: Annotated[int, Field(ge=1, le=100)] = 25) -> dict[str, Any]:
+        """Split tests and lift studies on the account (act_/ad_studies): type,
+        schedule and description. get_ab_test reads one with its cells."""
+        rows = edge(account(), "ad_studies", (
+            "id", "name", "type", "start_time", "end_time", "description",
+            "created_time"), limit)
+        return listing(rows, limit)
+
+    @mcp.tool(title="Read one A/B test with its cells", annotations=read_only)
+    @refusals_reach_the_caller
+    def get_ab_test(
+        study_id: Annotated[str, Field(description="From list_ab_tests")],
+    ) -> dict[str, Any]:
+        """One study: type, schedule, and each cell's split and the ad sets or
+        campaigns in it. Results are read in Ads Manager or with run_report on
+        the cells' ad sets; Meta exposes few study results over the API."""
+        row = client.node(str(study_id), ("id", "name", "type", "start_time", "end_time",
+                                          "description", "objectives"))
+        try:
+            cells = client.edge(str(study_id), "cells", (
+                "id", "name", "treatment_percentage", "adsets", "campaigns"), limit=50,
+                max_items=50)
+        except Exception as exc:  # noqa: BLE001
+            cells = [{"unavailable": str(exc).splitlines()[0]}]
+        return {**row, "cells": cells, "rate_limit": headroom()}
+
+    @mcp.tool(title="List product catalogs", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_catalogs(limit: Annotated[int, Field(ge=1, le=100)] = 25) -> dict[str, Any]:
+        """Product catalogs the business owns, for catalog-sales campaigns.
+        Needs META_ADS_BUSINESS_ID. Read-only: feeds are not edited here."""
+        business = client.settings.business_id
+        if not business:
+            raise ValueError(
+                "Catalogs belong to a business, not an ad account: set "
+                "META_ADS_BUSINESS_ID in .env to list them."
+            )
+        rows = edge(str(business), "owned_product_catalogs",
+                    ("id", "name", "product_count", "vertical"), limit)
+        return listing(rows, limit)
+
+    @mcp.tool(title="List a catalog's product sets", annotations=read_only)
+    @refusals_reach_the_caller
+    def list_product_sets(
+        catalog_id: Annotated[str, Field(description="From list_catalogs")],
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    ) -> dict[str, Any]:
+        """Product sets in a catalog, with their product counts and filters."""
+        rows = edge(str(catalog_id), "product_sets", ("id", "name", "product_count", "filter"), limit)
+        return listing(rows, limit)
+
+    @mcp.tool(title="What changed in the account recently, and who changed it",
+              annotations=read_only)
+    @refusals_reach_the_caller
+    def list_recent_changes(
+        days: Annotated[int, Field(description="How far back", ge=1, le=90)] = 7,
+        limit: Annotated[int, Field(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        """The account's activity log (act_/activities): every change made in
+        Ads Manager, by the API or by a rule, with who made it and when.
+
+        The usual explanation for a preview refused as stale: somebody changed
+        the entity in Ads Manager between preview and apply.
+        """
+        until = dt.datetime.now(dt.timezone.utc)
+        since = until - dt.timedelta(days=days)
+        rows = edge(account(), "activities", (
+            "event_time", "event_type", "translated_event_type", "object_id",
+            "object_name", "object_type", "actor_name", "application_name",
+            "extra_data"), limit,
+            since=int(since.timestamp()), until=int(until.timestamp()))
+        return listing(rows, limit)
+
+    @mcp.tool(title="Search Meta's Ad Library", annotations=read_only)
+    @refusals_reach_the_caller
+    def search_ad_library(
+        q: Annotated[str, Field(description="Search terms")],
+        country: Annotated[str, Field(description="Two-letter country code, e.g. CA")],
+        limit: Annotated[int, Field(ge=1, le=100)] = 25,
+    ) -> dict[str, Any]:
+        """Ads in Meta's public Ad Library (ads_archive).
+
+        LIMITATION: outside the EU the Ad Library API returns only political and
+        issue ads, and it needs a separately identity-verified token -- for
+        competitors' ordinary ads in North America it will usually return
+        nothing or a PERMISSION error. The Ad Library website shows more than
+        the API does.
+        """
+        code = (country or "").strip().upper()
+        if len(code) != 2:
+            raise ValueError(f"country must be a two-letter code, got {country!r}.")
+        data = client.get(
+            "ads_archive",
+            search_terms=q,
+            ad_reached_countries=json.dumps([code]),
+            ad_type="ALL",
+            fields="id,page_name,ad_creative_bodies,ad_delivery_start_time,ad_snapshot_url",
+            limit=limit + 1,
+        ).get("data") or []
+        return listing(data, limit)
