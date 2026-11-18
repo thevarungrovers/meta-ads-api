@@ -43,13 +43,17 @@ from metaads_mcp.changes.base import PREVIEW_SAFE, ChangeKind, LedgerItem, Propo
 from metaads_mcp.guardrails import (
     Check,
     any_failed,
+    cap_currency,
     check_account_in_scope,
     check_campaign_in_scope,
+    check_cap_currency,
     check_count,
+    check_currency,
     check_projected_delta,
     check_writes_enabled,
     render_checks,
     require_writes_enabled,
+    to_cap_currency,
 )
 from metaads_mcp.previews import (
     TOKEN_TTL_SECONDS,
@@ -147,6 +151,23 @@ class Engine:
         if proposal.campaign_id is not None:
             checks.append(check_campaign_in_scope(ctx.limits, str(proposal.campaign_id)))
         checks.extend(proposal.checks)
+        # Anything that can restore or add spend (an activation, a widening,
+        # an extension) is in an allowed currency, whether or not the kind
+        # checked it itself.
+        currency = ctx.currency(account)
+        if proposal.is_activation and not any(c.name == "currency_allowed" for c in checks):
+            checks.append(check_currency(ctx.limits, currency))
+        # The totals are in ONE currency: count this change in it, or refuse.
+        checks.append(check_cap_currency(ctx.limits, currency))
+        counted = to_cap_currency(ctx.limits, proposal.projected, currency)
+        conversion_warnings = []
+        if counted is None:
+            counted = proposal.projected  # blocked by cap_currency anyway
+        elif currency.upper() != cap_currency(ctx.limits) and proposal.projected:
+            conversion_warnings.append(
+                f"{proposal.projected:.2f} {currency} is counted against the totals as "
+                f"{counted:.2f} {cap_currency(ctx.limits)} at the configured rate"
+            )
         if proposal.batch:
             checks.append(check_count(ctx.limits, len(items)))
         if proposal.is_activation:
@@ -160,9 +181,9 @@ class Engine:
             ))
         else:
             checks.append(
-                check_projected_delta(ctx.limits, max(proposal.projected, Decimal("0")))
+                check_projected_delta(ctx.limits, max(counted, Decimal("0")))
             )
-        daily_total = ctx.daily.check(proposal.projected)
+        daily_total = ctx.daily.check(counted)
         checks.append(daily_total)
         activation_warnings = []
         if proposal.is_activation and proposal.projected > 0:
@@ -207,7 +228,8 @@ class Engine:
         token = ctx.previews.mint(
             tool=f"apply_{kind.name}",
             payload=payload,
-            projected_delta=proposal.projected,
+            # In the CAP currency: this is what the caps and the ledger count.
+            projected_delta=counted,
             blocked=blocked,
         )
         return ChangePreview(
@@ -222,7 +244,7 @@ class Engine:
             before=proposal.before,
             after=proposal.after,
             account_id=account,
-            currency=ctx.currency(account),
+            currency=currency,
             status=proposal.status,
             effective_status=proposal.effective_status,
             metrics_7d=proposal.metrics,
@@ -232,7 +254,8 @@ class Engine:
             warnings=[
                 *proposal.warnings,
                 *activation_warnings,
-                *ctx.cap_warnings(proposal.projected, kind.weight),
+                *conversion_warnings,
+                *ctx.cap_warnings(counted, kind.weight),
             ],
             note=proposal.note,
             items=(
@@ -509,7 +532,7 @@ class Engine:
         # own inverse, so reverting the revert re-applies this entry.
         row_inverse = kind.revert_row_inverse(ctx, entry)
         projected, _ = kind.revert_projection(ctx, entry)
-        projected = max(projected, Decimal("0"))
+        projected = self._revert_in_cap_currency(entry, max(projected, Decimal("0")))
         return {
             "entry": entry,
             "kind": kind,
@@ -519,6 +542,32 @@ class Engine:
             "plan": kind.inverse(ctx, entry),
             "item": self._inverse_item(entry, row_inverse),
         }
+
+    def _revert_in_cap_currency(self, entry: dict[str, Any], projected: Decimal) -> Decimal:
+        """A revert that restores spend (undoing a pause, a cut, a tightening):
+        its currency must be allowed, and it is counted in the cap currency.
+
+        A revert projecting nothing is never refused here: it cannot add
+        spend, and the undo must not be stranded.
+        """
+        if projected <= 0:
+            return projected
+        currency = self.ctx.currency(str(entry.get("account_id") or "") or None)
+        allowed = check_currency(self.ctx.limits, currency)
+        if not allowed.ok:
+            raise ValueError(
+                f"Reverting entry {entry['entry_id']} restores up to {projected:.2f} "
+                f"{currency}/day, and {currency} is not in allowed_currencies "
+                f"({allowed.detail}). Nothing was sent."
+            )
+        counted = to_cap_currency(self.ctx.limits, projected, currency)
+        if counted is None:
+            raise ValueError(
+                f"Reverting entry {entry['entry_id']} restores up to {projected:.2f} "
+                f"{currency}/day: {check_cap_currency(self.ctx.limits, currency).detail}. "
+                "Nothing was sent."
+            )
+        return counted
 
     @staticmethod
     def _tightening(entry: dict[str, Any]) -> bool:

@@ -118,6 +118,13 @@ class Limits:
     allowed_account_ids: tuple[str, ...] = ()
     allowed_campaign_ids: tuple[str, ...] = ()
     allowed_currencies: tuple[str, ...] = ("CAD",)
+    #: The ONE currency the per-change, session and daily spend totals are
+    #: counted in. Empty means the first allowed currency.
+    cap_currency: str = ""
+    #: Configured conversions into the cap currency: (code, rate) pairs, where
+    #: one unit of ``code`` is ``rate`` units of the cap currency. Never
+    #: invented: a change in a currency with no rate here is refused.
+    currency_rates: tuple[tuple[str, Decimal], ...] = ()
 
     def describe(self) -> dict[str, object]:
         return {
@@ -144,6 +151,8 @@ class Limits:
             or ["(only META_ADS_ACCOUNT_ID)"],
             "allowed_campaign_ids": list(self.allowed_campaign_ids) or ["(all)"],
             "allowed_currencies": list(self.allowed_currencies),
+            "cap_currency": cap_currency(self),
+            "currency_rates": {code: str(rate) for code, rate in self.currency_rates},
         }
 
 
@@ -190,6 +199,26 @@ def load_limits(path: Path | None = None) -> Limits:
         str(c).upper() for c in scope.get("allowed_currencies", ["CAD"])
     )
 
+    cap = str(scope.get("cap_currency", "") or "").strip().upper()
+    if cap and cap not in currencies:
+        raise GuardrailConfigError(
+            f"guardrails.toml: [scope] cap_currency {cap!r} is not one of "
+            f"allowed_currencies ({', '.join(currencies)})."
+        )
+    rates: list[tuple[str, Decimal]] = []
+    for code, raw in (scope.get("currency_rates") or {}).items():
+        try:
+            rate = Decimal(str(raw))
+        except InvalidOperation as exc:
+            raise GuardrailConfigError(
+                f"guardrails.toml: [scope.currency_rates] {code} = {raw!r} is not a number."
+            ) from exc
+        if not rate.is_finite() or rate <= 0:
+            raise GuardrailConfigError(
+                f"guardrails.toml: [scope.currency_rates] {code} = {raw!r} must be above 0."
+            )
+        rates.append((str(code).upper(), rate))
+
     # An env var can narrow the scope further but never widen it: a
     # machine-local override that could ADD accounts would defeat the committed
     # file.
@@ -205,6 +234,8 @@ def load_limits(path: Path | None = None) -> Limits:
         allowed_account_ids=accounts,
         allowed_campaign_ids=campaigns,
         allowed_currencies=currencies,
+        cap_currency=cap,
+        currency_rates=tuple(rates),
     )
 
 
@@ -448,6 +479,45 @@ def check_currency(limits: Limits, currency: str | None) -> Check:
         "currency_allowed",
         ok,
         f"{currency or '(unknown)'} against {', '.join(limits.allowed_currencies)}",
+    )
+
+
+def cap_currency(limits: Limits) -> str:
+    """The currency every spend total and limit is counted in."""
+    if limits.cap_currency:
+        return limits.cap_currency.upper()
+    return (limits.allowed_currencies[0] if limits.allowed_currencies else "").upper()
+
+
+def to_cap_currency(limits: Limits, amount: Decimal, currency: str | None) -> Decimal | None:
+    """``amount`` in ``currency``, counted in the cap currency; None when no
+    configured rate converts it. No rate is ever invented."""
+    code = (currency or "").upper()
+    if code and code == cap_currency(limits):
+        return amount
+    rate = dict(limits.currency_rates).get(code)
+    if rate is None:
+        return None
+    return (amount * rate).quantize(Decimal("0.01"))
+
+
+def check_cap_currency(limits: Limits, currency: str | None) -> Check:
+    """The totals and limits are in ONE currency: a change in another one is
+    refused unless guardrails.toml configures a rate for it."""
+    cap = cap_currency(limits)
+    code = (currency or "(unknown)").upper()
+    if code == cap:
+        return Check("cap_currency", True, f"{code}: the currency the totals are counted in")
+    rate = dict(limits.currency_rates).get(code)
+    if rate is not None:
+        return Check("cap_currency", True,
+                     f"{code} counted in {cap} at the configured rate {rate} ([scope.currency_rates])")
+    return Check(
+        "cap_currency", False,
+        f"this entity is in {code}, but the daily and session totals and the spend "
+        f"limits are counted in {cap}; mixing them would add {code} amounts to {cap} "
+        f"ones. No conversion is configured, and none is guessed: add a rate under "
+        f"[scope.currency_rates] in guardrails.toml, or make this change elsewhere",
     )
 
 

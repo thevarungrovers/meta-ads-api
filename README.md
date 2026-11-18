@@ -466,6 +466,29 @@ default is "the one account in `.env`, and nothing else". Pin
 it — a machine-local override that could add accounts would defeat the committed
 file.
 
+**The totals are in one currency.** The per-change, session and daily spend
+limits and totals are counted in the *cap currency*: `cap_currency` under
+`[scope]` if set, otherwise the first entry of `allowed_currencies`. A change to
+an entity whose account is in another currency is **refused at preview**
+(`FAIL cap_currency`), because adding JPY amounts to CAD ones makes every total
+meaningless. The one exception is a conversion you configure yourself; no rate is
+ever looked up or guessed:
+
+```toml
+[scope]
+allowed_currencies = ["CAD", "JPY"]
+cap_currency       = "CAD"          # optional; default: the first allowed currency
+
+[scope.currency_rates]               # 1 unit of the key = this many cap-currency units
+JPY = "0.0091"
+```
+
+With a rate, the preview still shows the projection in the entity's currency, and
+a warning says what it is counted as; the token, the counters and the ledger
+carry the converted amount. Anything that can restore spend -- an activation, a
+targeting widening, a schedule extension, a revert that lifts a restriction --
+also checks the entity's currency is in `allowed_currencies`.
+
 ### 4. The stop button
 
 ```bash

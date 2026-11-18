@@ -70,3 +70,12 @@ allowed_campaign_ids = []
 # because the API integer behind it is 50000 on a USD account and 500 on a JPY
 # one.
 allowed_currencies = ["CAD"]
+
+# The per-change, session and daily totals above are counted in ONE currency:
+# cap_currency if set (it must be in allowed_currencies), otherwise the first
+# entry of allowed_currencies. A change to an entity in any other currency is
+# REFUSED at preview unless a rate below converts it -- none is ever guessed.
+# cap_currency = "CAD"
+#
+# [scope.currency_rates]   # 1 unit of the key = this many cap-currency units
+# JPY = "0.0091"
