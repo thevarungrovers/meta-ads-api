@@ -31,6 +31,12 @@ EffectiveStatus = Literal[
     "DISAPPROVED",
 ]
 
+Breakdown = Literal[
+    "age", "gender", "country", "region", "dma",
+    "publisher_platform", "platform_position", "device_platform",
+    "impression_device", "hourly_stats_aggregated_by_advertiser_time_zone",
+]
+
 # ALL FOUR HINTS, ALWAYS, ON EVERY TOOL. A hint left unset is published as
 # absent, and a client that cannot see one falls back on the spec's default --
 # which for `destructiveHint` is TRUE. So an omitted hint does not mean
@@ -288,6 +294,10 @@ def register(mcp, state) -> None:
             list[str] | None,
             Field(description="Keep only these action types in actions/action_values, e.g. ['purchase']"),
         ] = None,
+        breakdowns: Annotated[
+            list[Breakdown] | None,
+            Field(description="Override the report's breakdowns, e.g. ['age', 'gender']"),
+        ] = None,
     ) -> dict[str, Any]:
         """Account, campaign, ad set or ad performance from the insights edge.
 
@@ -320,6 +330,7 @@ def register(mcp, state) -> None:
         if since or until:
             query = definition.build(
                 since=since, until=until, filtering=filters, time_increment=increment,
+                breakdowns=tuple(breakdowns) if breakdowns else None,
             )
         else:
             tz = (client.account() or {}).get("timezone_name")
@@ -330,6 +341,7 @@ def register(mcp, state) -> None:
                 until=window.get("until"),
                 filtering=filters,
                 time_increment=increment,
+                breakdowns=tuple(breakdowns) if breakdowns else None,
             )
 
         rows = client.insight_rows(query, node_id=node_id, max_items=max_rows + 1)
@@ -347,6 +359,7 @@ def register(mcp, state) -> None:
         return {
             "report": report,
             "level": definition.level,
+            "breakdowns": list(query.breakdowns),
             "window": query.describe_window(),
             "aggregate": aggregate,
             "attribution_windows": list(query.attribution_windows),

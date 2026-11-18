@@ -121,6 +121,15 @@ EXCLUSIVE_BREAKDOWNS = (
     frozenset({"country", "region", "dma"}),
 )
 
+#: Breakdowns a report may ask for. Not every combination is valid -- Meta
+#: rules on the rest -- but a name outside this set is a typo, refused here.
+ALLOWED_BREAKDOWNS = frozenset({
+    "age", "gender", "country", "region", "dma",
+    "publisher_platform", "platform_position", "device_platform",
+    "impression_device", "hourly_stats_aggregated_by_advertiser_time_zone",
+    "hourly_stats_aggregated_by_audience_time_zone",
+})
+
 
 def validate_level(level: str) -> str:
     """Return a valid level, or raise.
@@ -397,6 +406,15 @@ def _check_breakdowns(breakdowns: Sequence[str]) -> None:
     """
     if len(set(breakdowns)) != len(breakdowns):
         raise InsightsError(f"Duplicate breakdown in {list(breakdowns)}.")
+    unknown = sorted(set(breakdowns) - ALLOWED_BREAKDOWNS)
+    if unknown:
+        raise InsightsError(
+            f"Unknown breakdown {', '.join(unknown)}. Known: "
+            f"{', '.join(sorted(ALLOWED_BREAKDOWNS))}."
+        )
+    hourly = [b for b in breakdowns if b.startswith("hourly_stats")]
+    if hourly and len(breakdowns) > 1:
+        raise InsightsError("An hourly breakdown cannot be combined with another breakdown.")
     for group in EXCLUSIVE_BREAKDOWNS:
         clash = sorted(group.intersection(breakdowns))
         if len(clash) > 1:

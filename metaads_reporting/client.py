@@ -361,7 +361,10 @@ class ReadOnlyMetaAdsClient:
             query, node_id=node_id, account_id=account_id, max_pages=max_pages,
             max_items=max_items,
         )
-        columns = tuple(query.fields) + ("date_start", "date_stop")
+        # Breakdown dimensions come back as keys of their own (age, gender,
+        # publisher_platform ...); without them in the columns a broken-down
+        # report would be a list of unlabelled rows.
+        columns = tuple(query.fields) + tuple(query.breakdowns) + ("date_start", "date_stop")
         return [object_to_row(row, columns, code) for row in rows]
 
     # -- rate limit -------------------------------------------------------

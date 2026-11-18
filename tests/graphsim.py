@@ -49,6 +49,10 @@ class GraphSim:
         #: Creates that really happened, and the multipart fields of the last call.
         self.created: list[dict[str, Any]] = []
         self.last_files: dict[str, Any] = {}
+        #: Canned answers for the edges that are not lists of stored objects
+        #: (/search, delivery_estimate, ads_archive ...), keyed by "node/edge"
+        #: or "edge" alone. A callable gets the GET params.
+        self.canned: dict[str, Any] = {}
         #: What /debug_token answers: a never-expiring System User token.
         self.token_debug: dict[str, Any] = {
             "type": "SYSTEM_USER", "is_valid": True, "expires_at": 0,
@@ -90,6 +94,14 @@ class GraphSim:
 
         node, edge = segments[0], (segments[1] if len(segments) > 1 else None)
         fields = [f for f in (params.get("fields") or "").split(",") if f]
+
+        for key in (f"{node}/{edge}" if edge else node, edge or "", node):
+            if key and key in self.canned:
+                answer = self.canned[key]
+                answer = answer(params) if callable(answer) else answer
+                if isinstance(answer, FakeResponse):
+                    return answer
+                return FakeResponse(answer)
 
         if edge == "insights":
             return FakeResponse({"data": list(self.insights)})

@@ -73,6 +73,7 @@ class Report:
         filtering: tuple[Filter, ...] = (),
         time_increment: int | None = -1,
         limit: int = 500,
+        breakdowns: tuple[str, ...] | None = None,
     ) -> InsightsQuery:
         """Assemble this report's :class:`~metaads_reporting.insights.InsightsQuery`.
 
@@ -95,7 +96,7 @@ class Report:
             time_increment=(
                 self.time_increment if time_increment == -1 else time_increment
             ),
-            breakdowns=self.breakdowns,
+            breakdowns=tuple(breakdowns) if breakdowns is not None else self.breakdowns,
             filtering=tuple(filtering),
             attribution_windows=self.attribution_windows,
             sort=self.sort,
@@ -107,11 +108,21 @@ class Report:
 from .accounts import ACCOUNT  # noqa: E402  (import after Report is defined)
 from .ads import ADS, CREATIVE_FATIGUE  # noqa: E402
 from .adsets import ADSETS  # noqa: E402
+from .breakdowns import (  # noqa: E402
+    CONVERSIONS_BY_ACTION,
+    DEMOGRAPHICS,
+    GEO,
+    HOUR_OF_DAY,
+    PLACEMENTS,
+)
 from .campaigns import CAMPAIGNS  # noqa: E402
 
 REGISTRY: dict[str, Report] = {
     report.name: report
-    for report in (ACCOUNT, CAMPAIGNS, ADSETS, ADS, CREATIVE_FATIGUE)
+    for report in (
+        ACCOUNT, CAMPAIGNS, ADSETS, ADS, CREATIVE_FATIGUE,
+        PLACEMENTS, DEMOGRAPHICS, GEO, HOUR_OF_DAY, CONVERSIONS_BY_ACTION,
+    )
 }
 
 

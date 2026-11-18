@@ -90,3 +90,26 @@ def test_a_range_is_computed_in_the_accounts_zone():
     window = window_for_days(10, "Pacific/Kiritimati")
     yesterday = dt.datetime.now(ZoneInfo("Pacific/Kiritimati")).date() - dt.timedelta(days=1)
     assert window["until"] == yesterday.isoformat()
+
+
+def test_a_breakdown_report_keeps_its_dimension_columns(monkeypatch):
+    from tests.fakes import insights_row
+
+    sim = make_sim()
+    sim.insights = [insights_row(age="25-34", gender="female"), insights_row(age="35-44", gender="male")]
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    out = registrar.tools["run_report"](report="demographics")
+    assert out["breakdowns"] == ["age", "gender"]
+    assert [r["age"] for r in out["rows"]] == ["25-34", "35-44"]
+    sent = [c["payload"] for c in sim.calls if c["url"].endswith("/insights")][-1]
+    assert sent["breakdowns"] == "age,gender"
+
+
+def test_an_hourly_breakdown_cannot_be_combined():
+    import pytest
+
+    from metaads_reporting.insights import InsightsError, InsightsQuery
+
+    with pytest.raises(InsightsError):
+        InsightsQuery(fields=("spend",), breakdowns=(
+            "hourly_stats_aggregated_by_advertiser_time_zone", "age"))
