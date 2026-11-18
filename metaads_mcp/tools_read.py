@@ -474,8 +474,12 @@ def register(mcp, state) -> None:
             str, Field(description="'custom', 'saved' or 'all'")
         ] = "all",
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
+        unused_only: Annotated[
+            bool,
+            Field(description="Only custom audiences no ad set includes or excludes"),
+        ] = False,
     ) -> dict[str, Any]:
-        """Audiences that already exist, for picking a lookalike source.
+        """Audiences that already exist: sizes, status, usability, and use.
 
         Reading a customer-list audience is fine and often necessary — you need
         to see one to build a lookalike from it. CREATING one is what is
@@ -487,14 +491,24 @@ def register(mcp, state) -> None:
         wanted = (kind or "all").strip().lower()
         out: dict[str, Any] = {}
         if wanted in ("custom", "all"):
-            out["custom"] = audiences.list_custom(shim, limit=limit)
+            custom = audiences.list_custom(shim, limit=limit + 1)
+            used, complete = state.audience_usage()
+            for row in custom:
+                row["used_by_ad_sets"] = len(used.get(row["audience_id"], []))
+            if unused_only:
+                custom = [r for r in custom if not r["used_by_ad_sets"]]
+            out["custom"] = custom[:limit]
+            out["custom_truncated"] = len(custom) > limit
+            out["usage_scan_complete"] = complete
         if wanted in ("saved", "all"):
             out["saved"] = audiences.list_saved(shim, limit=limit)
         out["rate_limit"] = headroom()
         out["note"] = (
-            "Only 'saved' and 'lookalike' audiences can be CREATED here. A "
-            "customer-list audience must be made in Ads Manager, where a "
-            "person accepts the data terms."
+            "`usable` says whether Meta can deliver to a custom audience yet "
+            "(None: an unmapped status, quoted verbatim). Audiences are never "
+            "deleted here; an unused one changes nothing. A customer-list "
+            "audience must be made in Ads Manager, where a person accepts the "
+            "data terms."
         )
         return out
 

@@ -109,8 +109,13 @@ FIELDS = (
     "approximate_count_lower_bound",
     "approximate_count_upper_bound",
     "operation_status",
-    "time_created",
     "delivery_status",
+    "time_created",
+    "time_updated",
+    "retention_days",
+    "rule",
+    "lookalike_spec",
+    "data_source",
 )
 
 #: Probed against the live API, not taken from the docs: `approximate_count`
@@ -141,19 +146,45 @@ def list_custom(
     the same as creating one, and you need to see them to pick a lookalike
     source.
     """
+    from ..audience_status import usability
+
     target = account_path(client.resolve_account_id(account_id))
     rows = client.read.edge(target, CUSTOM_EDGE, FIELDS, limit=limit, max_items=limit)
-    return [
-        {
+    out = []
+    for r in rows:
+        lookalike = r.get("lookalike_spec") or {}
+        out.append({
             "audience_id": str(r.get("id")),
             "name": r.get("name"),
             "subtype": r.get("subtype"),
             "approx_size": _approx_size(r),
             "status": (r.get("operation_status") or {}).get("description"),
+            "delivery_status": r.get("delivery_status"),
+            "operation_status": r.get("operation_status"),
+            "retention_days": r.get("retention_days"),
+            "rule": _rule_summary(r.get("rule")),
+            "lookalike": (
+                {
+                    "source": lookalike.get("origin") or lookalike.get("origin_audience_id"),
+                    "ratio": lookalike.get("ratio"),
+                    "country": lookalike.get("country"),
+                }
+                if lookalike else None
+            ),
+            "data_source": (r.get("data_source") or {}).get("type") if isinstance(r.get("data_source"), dict) else r.get("data_source"),
             "created": r.get("time_created"),
-        }
-        for r in rows
-    ]
+            "updated": r.get("time_updated"),
+            **{f"usable{'_' + k if k != 'usable' else ''}": v for k, v in usability(r).items()},
+        })
+    return out
+
+
+def _rule_summary(rule: Any) -> str | None:
+    """A rule (JSON string or dict), shortened for a listing."""
+    if not rule:
+        return None
+    text = rule if isinstance(rule, str) else json.dumps(rule)
+    return text if len(text) <= 300 else text[:300] + "..."
 
 
 def list_saved(

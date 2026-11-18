@@ -33,6 +33,9 @@ READ_TOOLS = frozenset(
         "get_ad",
         "verify_ad",
         "get_ad_previews",
+        "get_audience",
+        "search_targeting",
+        "estimate_reach",
     }
 )
 

@@ -296,8 +296,148 @@ def register(mcp, state, client, *, headroom, money, read_only, local_only) -> N
                     headroom=headroom, money=money, read_only=read_only, local_only=local_only)
 
 
-def register_assets(mcp, state, client, **helpers) -> None:
-    """Audiences, targeting search, assets and diagnostics. See below."""
+TargetingType = Literal[
+    "interest", "interest_suggestion", "behaviors", "demographics", "life_events",
+    "industries", "income", "family_statuses", "geo", "locale",
+    "education_school", "work_employer",
+]
+
+#: search_targeting type -> Meta /search params.
+_SEARCH = {
+    "interest": {"type": "adinterest"},
+    "interest_suggestion": {"type": "adinterestsuggestion"},
+    "behaviors": {"type": "adTargetingCategory", "class": "behaviors"},
+    "demographics": {"type": "adTargetingCategory", "class": "demographics"},
+    "life_events": {"type": "adTargetingCategory", "class": "life_events"},
+    "industries": {"type": "adTargetingCategory", "class": "industries"},
+    "income": {"type": "adTargetingCategory", "class": "income"},
+    "family_statuses": {"type": "adTargetingCategory", "class": "family_statuses"},
+    "geo": {"type": "adgeolocation"},
+    "locale": {"type": "adlocale"},
+    "education_school": {"type": "adeducationschool"},
+    "work_employer": {"type": "adworkemployer"},
+}
+
+
+def audience_usage(client, *, max_pages: int = 10) -> tuple[dict[str, list[dict]], bool]:
+    """audience id -> the ad sets that include or exclude it, and whether the
+    scan reached the end of the account."""
+    rows = client.edge(
+        account_path(client.resolve_account_id()), "adsets",
+        ("id", "name", "targeting", "effective_status"),
+        limit=200, max_items=200 * max_pages, max_pages=max_pages,
+        effective_status=json.dumps(
+            ["ACTIVE", "PAUSED", "CAMPAIGN_PAUSED", "IN_PROCESS", "WITH_ISSUES"]
+        ),
+    )
+    used: dict[str, list[dict]] = {}
+    for row in rows:
+        targeting = row.get("targeting") or {}
+        for mode, key in (("include", "custom_audiences"), ("exclude", "excluded_custom_audiences")):
+            for audience in targeting.get(key) or []:
+                aid = str(audience.get("id") if isinstance(audience, dict) else audience)
+                used.setdefault(aid, []).append(
+                    {"ad_set_id": str(row.get("id")), "name": row.get("name"), "mode": mode,
+                     "effective_status": row.get("effective_status")}
+                )
+    return used, len(rows) < 200 * max_pages
+
+
+def register_assets(mcp, state, client, *, listing, edge, account, headroom, money,
+                    read_only, local_only) -> None:  # noqa: C901
+    """Audiences, targeting search, reach, assets and diagnostics."""
+    from metaads_reporting import reach
+    from metaads_reporting.audience_status import approx_size, usability
+    from metaads_reporting.write.audiences import FIELDS as AUDIENCE_FIELDS
+
+    state.audience_usage = lambda: audience_usage(client)
+
+    @mcp.tool(title="Read one audience in full, and who uses it", annotations=read_only)
+    @refusals_reach_the_caller
+    def get_audience(
+        audience_id: Annotated[str, Field(description="From list_audiences")],
+    ) -> dict[str, Any]:
+        """One custom or lookalike audience: its rule or source, lookalike
+        country and ratio, approximate size, status and whether it is usable
+        yet, and every ad set that includes or excludes it.
+
+        A rule-based audience takes hours to populate after creation; `usable`
+        says whether Meta can deliver to it now.
+        """
+        row = client.node(str(audience_id), AUDIENCE_FIELDS)
+        used, complete = audience_usage(client)
+        return {
+            **row,
+            "approx_size": approx_size(row),
+            **{("usable" if k == "usable" else f"usable_{k}"): v for k, v in usability(row).items()},
+            "used_by": used.get(str(audience_id), []),
+            "used_by_complete": complete,
+            "rate_limit": headroom(),
+        }
+
+    @mcp.tool(title="Search targeting options: interests, places, behaviours", annotations=read_only)
+    @refusals_reach_the_caller
+    def search_targeting(
+        type: Annotated[TargetingType, Field(description="What to search")],
+        q: Annotated[str | None, Field(description="Search text (an interest name for interest_suggestion)")] = None,
+        location_types: Annotated[
+            list[Literal["country", "region", "city", "zip", "geo_market", "electoral_district"]] | None,
+            Field(description="For type=geo: which kinds of place"),
+        ] = None,
+        limit: Annotated[int, Field(ge=1, le=200)] = 25,
+    ) -> dict[str, Any]:
+        """Ids ready to paste into a targeting spec, with Meta's audience-size
+        bounds and path. Interests, behaviours and demographics go in
+        `flexible_spec`; places in `geo_locations` (by `key`); locales in
+        `locales`.
+
+        Category types (behaviors, demographics, life_events, industries,
+        income, family_statuses) list the whole class; `q` then filters it by
+        name here.
+        """
+        params = dict(_SEARCH[type])
+        if type == "interest_suggestion":
+            if not q:
+                raise ValueError("interest_suggestion needs q: an interest name to expand.")
+            params["interest_list"] = json.dumps([q])
+        elif params.get("type") != "adTargetingCategory":
+            if not q:
+                raise ValueError(f"type={type} needs q.")
+            params["q"] = q
+        if type == "geo":
+            params["location_types"] = json.dumps(location_types or ["country", "region", "city"])
+        params["limit"] = min(limit + 1, 500)
+        rows = client.get("search", **params).get("data") or []
+        if q and params.get("type") == "adTargetingCategory":
+            folded = q.casefold()
+            rows = [r for r in rows if folded in str(r.get("name", "")).casefold()]
+        return listing(rows, limit, lambda r: {
+            "id": r.get("id") or r.get("key"),
+            "key": r.get("key"),
+            "name": r.get("name"),
+            "type": r.get("type") or type,
+            "path": r.get("path"),
+            "audience_size_lower_bound": r.get("audience_size_lower_bound"),
+            "audience_size_upper_bound": r.get("audience_size_upper_bound"),
+            "country_code": r.get("country_code"),
+        })
+
+    @mcp.tool(title="Estimate the reach of a targeting spec", annotations=read_only)
+    @refusals_reach_the_caller
+    def estimate_reach(
+        targeting: Annotated[dict[str, Any], Field(description="A Meta targeting spec")],
+        optimization_goal: Annotated[
+            str, Field(description="The ad set's optimization goal, e.g. REACH or OFFSITE_CONVERSIONS")
+        ] = "REACH",
+    ) -> dict[str, Any]:
+        """Monthly active people the spec can reach: Meta's rounded lower and
+        upper bounds, from act_/delivery_estimate. Custom audiences may be part
+        of the spec. `ready: false` means Meta is still computing -- ask again
+        shortly. These are estimates, not counts.
+        """
+        out = reach.estimate(client, targeting, optimization_goal)
+        out["rate_limit"] = headroom()
+        return out
 
 
 class _Shim:
