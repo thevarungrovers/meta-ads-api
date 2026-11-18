@@ -95,6 +95,9 @@ class LowRiskChange(NodeFieldKind):
             raise ValueError("A created label is harmless and is not deleted; detach it instead.")
         plan = super().inverse(ctx, entry)
         plan.entity_type = inverse["graph_type"]
+        # A revert restores the previous name VERBATIM, never through naming:
+        # it may predate the prefix.
+        plan.allow_unprefixed_name = True
         return plan
 
     def revert_projection(self, ctx, entry):

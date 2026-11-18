@@ -122,6 +122,29 @@ def check_create_paused(edge: str, payload: dict[str, Any]) -> None:
         )
 
 
+#: Edges whose objects carry a NAME this package stamps with the owner/agent
+#: prefix (metaads_reporting.naming). ``copies`` is not here: a copy's names
+#: arrive in the renames that follow it.
+NAMED_EDGES = frozenset({"campaigns", "adsets", "ads", "adcreatives", "customaudiences",
+                         "saved_audiences", "ad_studies", "adlabels"})
+#: Entity types whose ``name`` an update may set (a rename).
+NAMED_TYPES = frozenset({"campaign", "adset", "ad"})
+
+
+def check_name_prefix(prefix: str, name: Any, what: str) -> None:
+    """Refuse a name without the configured prefix, below every tool.
+
+    The second guard, after the engine's ``name_prefix`` check: a create path
+    that forgot to stamp cannot send an unprefixed name. No prefix
+    configured: nothing to require.
+    """
+    if prefix and not str(name or "").startswith(prefix):
+        raise MutationError(
+            f"Refusing {what} named {str(name or '')!r}: everything this server names "
+            f"starts with {prefix!r} (the owner/agent prefix from .env). Nothing was sent."
+        )
+
+
 #: Budget above which a write is refused unless explicitly overridden. Not a
 #: security control -- it is a typo catch, in the account's MAJOR units. The
 #: failure it exists for is an amount entered in minor units by mistake, which
@@ -237,6 +260,10 @@ class MutatingMetaAdsClient:
         from ..client import ReadOnlyMetaAdsClient
 
         self._read = ReadOnlyMetaAdsClient(transport, settings)
+        #: The owner/agent prefix every name this client creates must start
+        #: with. Set by the MCP server (the agent's) and scripts/manage.py
+        #: (the CLI's); empty when no identity is configured.
+        self.required_name_prefix = ""
 
     @classmethod
     def from_env(
@@ -280,6 +307,7 @@ class MutatingMetaAdsClient:
         payload: dict[str, Any],
         apply: bool = False,
         account_id: str | None = None,
+        allow_unprefixed_name: bool = False,
     ) -> MutationResult:
         """Write ``payload`` to one object, validating unless ``apply`` is True.
 
@@ -294,6 +322,10 @@ class MutatingMetaAdsClient:
         if not payload:
             raise MutationError("Nothing to write: the payload is empty.")
         check_writable(entity_type, payload)
+        if "name" in payload and entity_type in NAMED_TYPES and not allow_unprefixed_name:
+            # A rename keeps the prefix. Only a revert, putting back a name
+            # exactly as it was, passes allow_unprefixed_name.
+            check_name_prefix(self.required_name_prefix, payload["name"], f"renaming {entity_type} {node_id}")
         if "status" in payload:
             payload = dict(payload, status=check_status(payload["status"]))
 
@@ -364,6 +396,8 @@ class MutatingMetaAdsClient:
         if not payload:
             raise MutationError("Nothing to create: the payload is empty.")
         check_create_paused(edge, payload)
+        if edge in NAMED_EDGES:
+            check_name_prefix(self.required_name_prefix, payload.get("name"), f"creating on {edge}")
         target = self.resolve_account_id(account_id)
         # Same JSON encoding as `update`. A creative's object_story_spec and an
         # audience's lookalike_spec are both dicts, and handing one to requests
