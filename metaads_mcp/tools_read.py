@@ -549,6 +549,9 @@ def register(mcp, state) -> None:
             "writes_disabled": writes_disabled(),
             "read_only_server": read_only,
             "pending_previews": state.previews.pending_count,
+            # Who names what this server creates, from the repo's .env only.
+            # Each part is used only when set; both empty means plain names.
+            "identity": state.identity.describe(),
             "note": (
                 "THIS SERVER IS READ-ONLY: it published no apply_* tools and no "
                 "revert_change, so nothing here can change the account. The "

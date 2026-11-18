@@ -22,7 +22,7 @@ import pathlib
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 # Launched by absolute path, sys.path[0] is this package's directory, so the
@@ -37,6 +37,7 @@ from metaads_mcp import __version__, tools_read, tools_write  # noqa: E402
 from metaads_mcp.guardrails import Limits, SessionCounters, load_limits  # noqa: E402
 from metaads_mcp.previews import PreviewStore  # noqa: E402
 from metaads_reporting import logdb  # noqa: E402
+from metaads_reporting.naming import Identity  # noqa: E402
 
 SERVER_NAME = "meta-ads"
 
@@ -150,6 +151,9 @@ class ServerState:
     headroom: Any = None
     audience_usage: Any = None
     default_account_id: str = ""
+    #: Who names what this server creates: from the repo's .env ONLY (see
+    #: metaads_reporting.naming). Read once, at startup.
+    identity: Identity = field(default_factory=Identity.from_env)
 
 
 def build_state() -> ServerState:
@@ -158,7 +162,18 @@ def build_state() -> ServerState:
         limits=limits,
         counters=SessionCounters(limits),
         previews=PreviewStore(),
+        identity=Identity.from_env(),
     )
+
+
+def identity_warnings(state: ServerState) -> list[str]:
+    """What is worth saying about the naming identity at startup."""
+    identity = state.identity
+    out = list(identity.warnings)
+    if identity.problem:
+        out.append(f"naming identity refused ({identity.problem}); creating and renaming "
+                   "are refused at preview until it is fixed")
+    return out
 
 
 # Built once at import, and the lifespan hands out THIS object rather than
@@ -213,6 +228,8 @@ def budget_cap_warnings(state: ServerState) -> list[str]:
 
 
 def main() -> None:
+    for warning in identity_warnings(STATE):
+        print(f"meta-ads: WARNING {warning}", file=sys.stderr)
     try:
         for warning in budget_cap_warnings(STATE):
             print(f"meta-ads: WARNING {warning}", file=sys.stderr)

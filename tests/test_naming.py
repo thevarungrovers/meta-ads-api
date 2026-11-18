@@ -220,3 +220,31 @@ def test_a_process_value_with_no_file_is_still_ignored(tmp_path, monkeypatch):
     monkeypatch.setenv(naming.OWNER_KEY, "CD")
     identity = Identity.from_env([tmp_path / "missing.env"])
     assert identity.prefix == "" and identity.warnings
+
+
+# --- the server reads it once, from .env -----------------------------------------
+
+
+def test_the_suite_runs_as_the_placeholder_identity(monkeypatch):
+    from tests.harness import build_tools
+    from tests.test_mcp_write_path import make_sim
+
+    registrar, state = build_tools(make_sim(), monkeypatch=monkeypatch)
+    assert state.identity.prefix == "AB-max-"
+    shown = registrar.tools["get_guardrails"]()["identity"]
+    assert shown["prefix"] == "AB-max-" and shown["parts_set"] == ["owner_initials", "agent_name"]
+
+
+def test_startup_warns_about_a_process_value_and_a_bad_one(tmp_path, monkeypatch):
+    from metaads_mcp.server import ServerState, identity_warnings
+    from metaads_mcp.guardrails import DEFAULTS, Limits, SessionCounters
+    from metaads_mcp.previews import PreviewStore
+
+    env = _write(tmp_path / ".env", "a1", "max")
+    monkeypatch.setenv(naming.AGENT_KEY, "bot")
+    limits = Limits(**DEFAULTS)
+    state = ServerState(limits=limits, counters=SessionCounters(limits), previews=PreviewStore(),
+                        identity=Identity.from_env([env]))
+    warnings = identity_warnings(state)
+    assert any(naming.AGENT_KEY in w and "IGNORED" in w for w in warnings)
+    assert any(naming.OWNER_KEY in w for w in warnings)

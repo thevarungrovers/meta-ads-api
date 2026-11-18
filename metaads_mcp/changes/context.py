@@ -50,6 +50,16 @@ class WriteContext:
         return self.state.previews
 
     @property
+    def identity(self):
+        """The owner/agent prefix this server stamps (metaads_reporting.naming)."""
+        identity = getattr(self.state, "identity", None)
+        if identity is None:
+            from metaads_reporting.naming import Identity
+
+            identity = Identity()
+        return identity
+
+    @property
     def default_account(self) -> str:
         return self.state.default_account_id
 
