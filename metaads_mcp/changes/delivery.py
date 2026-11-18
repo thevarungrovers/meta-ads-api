@@ -91,6 +91,7 @@ class CampaignStatus(StatusKind):
             metrics=metrics,
             warnings=warnings,
             campaign_id=str(row["id"]),
+            account_id=row.get("account_id"),
             note=(
                 "Pausing cannot increase spend, so its projected delta is 0. "
                 "Activating is bounded by the budget, not by past spend."
@@ -160,6 +161,7 @@ class AdSetStatus(StatusKind):
             metrics=metrics,
             warnings=warnings,
             campaign_id=str(row.get("campaign_id")),
+            account_id=row.get("account_id"),
             note="Pausing cannot increase spend, so its projected delta is 0.",
         )
 
@@ -231,6 +233,7 @@ class AdStatus(StatusKind):
             metrics=metrics,
             warnings=warnings,
             campaign_id=str(row.get("campaign_id")),
+            account_id=row.get("account_id"),
             note=(
                 "The projected delta is 0 in both directions: the ad set's "
                 "budget is the cap, and it does not move when one ad inside it "
@@ -346,6 +349,7 @@ class CampaignDailyBudget(_MoneyKind):
             metrics=metrics,
             warnings=warnings,
             campaign_id=str(row["id"]),
+            account_id=row.get("account_id"),
             items=[],
             note=(
                 f"{pct_change(before, after) or 'n/a'} change. Compare the delta "
@@ -419,6 +423,7 @@ class AdSetDailyBudget(_MoneyKind):
             metrics=metrics,
             warnings=budget_warnings(before, after, "ad set"),
             campaign_id=str(row.get("campaign_id")),
+            account_id=row.get("account_id"),
             note=(
                 f"{pct_change(before, after) or 'n/a'} change. Compare the delta "
                 "with the last 7 days' spend: if the ad set never reached the "
@@ -509,6 +514,7 @@ class AdSetBidAmount(_MoneyKind):
             metrics=metrics,
             warnings=warnings,
             campaign_id=str(row.get("campaign_id")),
+            account_id=row.get("account_id"),
             note=(
                 "The projected delta assumes the same click volume at the new "
                 "bid. It is a bound to reason with, not a forecast -- and a cap "

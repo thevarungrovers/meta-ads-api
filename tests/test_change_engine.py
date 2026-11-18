@@ -163,3 +163,24 @@ def test_the_inverse_is_machine_readable_in_the_ledger(tools):
     entry = ledger.find_entry(result.entry_id)
     assert entry["inverse"]["kind"] == "campaign_daily_budget"
     assert entry["inverse"]["before_amount"] == "250.00"
+
+
+@pytest.mark.parametrize(
+    "tool_name, args, node",
+    [
+        ("preview_campaign_status", {"campaign_id": "120200000000001", "new_status": "PAUSED"},
+         "120200000000001"),
+        ("preview_ad_set_status", {"ad_set_id": "120200000000002", "new_status": "PAUSED"},
+         "120200000000002"),
+        ("preview_ad_status", {"ad_id": AD_ID, "new_status": "PAUSED"}, AD_ID),
+        ("preview_duplicate_ad", {"ad_id": AD_ID, "headline": "x"}, AD_ID),
+    ],
+)
+def test_an_entity_in_another_account_is_out_of_scope(monkeypatch, tool_name, args, node):
+    """The check used to compare the default account with itself."""
+    sim = make_sim()
+    sim.objects[node]["account_id"] = "9876543210"
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    preview = registrar.tools[tool_name](**args)
+    assert preview.blocked is True
+    assert any(c.startswith("FAIL account_in_scope") and "9876543210" in c for c in preview.checks)

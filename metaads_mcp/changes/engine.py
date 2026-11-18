@@ -132,11 +132,15 @@ class Engine:
         proposal: Proposal = kind.propose(ctx, **args)
         items = proposal.ledger_items()
 
+        # The ENTITY's account, not the default compared with itself: one
+        # token routinely reaches several accounts, and before this any
+        # campaign id the token could see was writable. Something not yet
+        # created has no account of its own; it goes to the write client's.
         checks: list[Check] = [
             check_writes_enabled(),
             check_account_in_scope(
                 ctx.limits,
-                str(proposal.account_id or ctx.target_account()),
+                str(proposal.account_id or ctx.target_account()).replace("act_", ""),
                 ctx.default_account,
             ),
         ]

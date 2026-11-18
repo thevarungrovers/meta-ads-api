@@ -28,6 +28,9 @@ EDGE = "ads"
 FIELDS = (
     "id",
     "name",
+    # The account the object belongs to: the write scope check compares THIS,
+    # not the server's default with itself.
+    "account_id",
     "status",
     "effective_status",
     "adset_id",

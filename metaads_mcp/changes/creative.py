@@ -104,6 +104,7 @@ class _CreativeKind(ChangeKind):
             metrics=ctx.metrics_7d(str(row["id"]), "ad"),
             warnings=list(plan.warnings),
             campaign_id=str(row.get("campaign_id")),
+            account_id=row.get("account_id"),
             note=note,
             verify={
                 "adset_id": str(row.get("adset_id")),
