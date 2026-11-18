@@ -34,6 +34,20 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   deleted -- the undo for attaching one is detaching it.
 - **Created things start PAUSED** (`write/client.py:check_create_paused`
   enforces it below every tool) and cost 3 applies.
+- **Names go through `metaads_reporting/naming.py`, and nowhere else.** A kind
+  asks the write context (`ctx.name_for_create` / `name_for_copy` /
+  `name_for_rename`) and folds the decision into its Proposal; it holds no
+  prefix logic. The identity (`META_ADS_MCP_OWNER_INITIALS`,
+  `META_ADS_MCP_AGENT_NAME`) is read from the repo's `.env` only -- one identity
+  per checkout; the process env is ignored. Empty parts are skipped, a
+  malformed one refuses naming. A creating kind declares `creates_named`; the
+  engine builds the request and fails `name_prefix` on any name it would send
+  without the prefix, and `MutatingMetaAdsClient.required_name_prefix` refuses
+  it again below every tool, next to `check_create_paused`. Renames are only of
+  the agent's own entities. Names over 400 are refused, never truncated.
+- **Never write real owner initials or agent names** anywhere in the repo:
+  tests and docs use `AB` / `max` (and `CD` / `bot`); the suite runs as AB /
+  max from a temporary `.env` (`tests/conftest.py`).
 - **Customer-list audiences and lead-form creation stay human-only.** Do not
   add a path to either.
 - **Only `metaads_reporting/write/` may mutate.** `tests/test_readonly_guard.py`

@@ -60,7 +60,9 @@ git clone <this repo> meta-ads-api && cd meta-ads-api
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 
-# 2. Fill in your credentials
+# 2. Fill in your credentials (and, optionally, the naming identity:
+#    META_ADS_MCP_OWNER_INITIALS / META_ADS_MCP_AGENT_NAME -- see
+#    "Naming what the agent creates"; leave them empty for plain names)
 cp .env.example .env && chmod 600 .env
 $EDITOR .env
 
@@ -136,7 +138,11 @@ something slightly different per client:
 python3 install.py --agent cursor --read-only
 python3 install.py --agent claude-code --no-read-only --yes
 python3 install.py --agent codex --dry-run
+python3 install.py --agent claude-code --owner-initials AB --agent-name max   # into .env only
 ```
+
+`--owner-initials` / `--agent-name` are validated and written into `.env`, the
+only place the naming identity is read from; never into a client config.
 
 ## Three things about Meta that will bite you
 
@@ -264,6 +270,93 @@ Entities are addressable **by name**: exact match wins, then case-insensitive
 substring, and ambiguity is refused with the candidates listed rather than
 resolved for you.
 
+What the CLI creates is named `<OWNER>-cli-<base>` when the owner initials are
+set in `.env` (`--name "QC 25-54"` becomes `AB-cli-QC 25-54`), and the plain
+base when they are not. It prints the prefix before anything is sent.
+
+## Naming what the agent creates
+
+Every name the server creates starts with the owner's initials and the agent's
+name, so a month later anyone can tell what came through this server from what
+was made by hand in Ads Manager, and filter by it:
+
+```
+<OWNER>-<agent>-<base name>
+AB-max-spring_promo_week_12          (placeholder values)
+```
+
+The prefix goes **first**, before any house-style name you use as the base. The
+base keeps whatever separators the agent chose; only the two `-` after the
+initials and the agent name are the delimiter.
+
+**Where it comes from: the repo's `.env`, and nothing else.**
+
+| Key | Format | Example |
+|---|---|---|
+| `META_ADS_MCP_OWNER_INITIALS` | 2-4 uppercase letters | `AB` |
+| `META_ADS_MCP_AGENT_NAME` | a lowercase slug, 2-24 characters, a letter first, then letters, digits or `_` (no `-`); `cli` and `manual` are reserved | `max` |
+
+`config.env` is read too when present; `.env` wins, and an empty value never
+overrides a set one. A value in the process environment (an MCP client's `env`
+block) is **ignored**, with a startup warning when it disagrees, so there is
+**one identity per checkout**: a second agent needs its own checkout with its own
+`.env`. `get_guardrails` shows which parts are set.
+
+**Empty is not an error.** Each part is used only when it is set:
+
+| Set in `.env` | A campaign named `spring_promo` is created as |
+|---|---|
+| both | `AB-max-spring_promo` |
+| initials only | `AB-spring_promo` |
+| agent only | `max-spring_promo` |
+| neither | `spring_promo`, exactly as given |
+
+A value that is set but malformed (`a1`, `max-1`) refuses every create and
+rename at preview, naming the `.env` key to fix.
+
+**What is prefixed.** Every name the agent creates: campaigns, ad sets, ads,
+creatives (the top-level, internal `name` only -- never the headline viewers
+see, `link_data.name`), audiences, A/B tests (not their cell names) and labels.
+Images and videos have no name here and are not stamped. A copy or duplicate
+(`duplicate_ad`, `duplicate_ad_set`, `duplicate_campaign`) gets our prefix on the
+source's base, any other prefix stripped; `/copies` takes no name, so each
+object it creates is renamed right after, one ledger entry each, within
+`max_entities_per_call`. With no identity, Meta's copy naming is kept. A
+creative made by a copy edit is named from the ad's base; the ad keeps its name.
+
+**Limits.** A name is at most **400 characters, prefix included**, for every
+type above. An over-long name is **refused, never truncated**; the preview says
+how long the base may be. The preview always shows the exact final name (the
+`naming` block). A duplicate name only warns -- Meta allows them. Control and
+invisible characters, a doubled prefix, and another agent's or the CLI's prefix
+are refused. `url_tags` that use `{{campaign.name}}`, `{{adset.name}}` or
+`{{ad.name}}` warn that UTM values will carry the prefix.
+
+**Renames.** The agent may rename **only its own entities**: the live name
+carries its prefix, or the ledger shows this server created it. A manual entity
+or another agent's (the same owner's included) is refused; there is no override.
+The prefix is kept (restored, on a ledger-owned entity whose prefix was removed
+in Ads Manager); a revert puts the old name back exactly.
+
+**Filtering.** `find_campaigns`, `find_ad_sets`, `find_ads`, `list_audiences`
+and `list_labels` take `origin` (`agent` / `cli` / `manual`), `agent_name`,
+`owner` and `mine` (this server's own prefix), and every row says what its name
+claims (`origin`, `owner`, `agent`, `base`); the `find_*` rows add
+`ledger_created`, whether the ledger shows this server made it. The name is a
+convention; the ledger is the proof.
+
+**`reconcile_ledger`**, with a prefix configured, adds a `naming` section:
+`prefix_lost` (something this server created whose name no longer carries the
+prefix, `pre_feature` when it was created before naming existed),
+`prefix_without_ledger` (named with our prefix, but no ledger row), and a count
+of other prefixes. It is information only; existing entities are never renamed
+for you.
+
+Two safety nets hold the rule below the tools: the engine builds each request
+in the preview and fails `name_prefix` if any name it would send lacks the
+prefix, and the write client refuses such a create or rename before anything
+leaves the process.
+
 ## What the agent can do
 
 106 tools: 35 read, 35 `preview_*`/`apply_*` pairs, and `revert_change`.
@@ -273,18 +366,18 @@ resolved for you.
 | Tools | Give you |
 |---|---|
 | `list_ad_accounts`, `get_account` | Accounts; currency, time zone, status, token health, rate limit |
-| `find_campaigns`, `find_ad_sets`, `find_ads` | Ids, `budget_level`, budgets, bids, `effective_status`, and `truncated` when cut off |
+| `find_campaigns`, `find_ad_sets`, `find_ads` | Ids, `budget_level`, budgets, bids, `effective_status`, and `truncated` when cut off; who made it (`origin`, `ledger_created`), filterable by `origin` / `agent_name` / `owner` / `mine` |
 | `get_campaign`, `get_ad_set`, `get_ad` | One entity in full: special ad categories, the whole targeting spec, placements, learning stage, review feedback, preview links, 7/30-day totals |
 | `run_report`, `get_report_run` | Performance: ten reports (incl. placements, demographics, geo, hour of day, conversions by action), any breakdown, a real `max_rows`, async runs |
 | `get_ad_creative`, `verify_ad`, `get_ad_previews` | What an ad says; whether it was approved and still matches what was approved; preview links per placement |
-| `list_audiences`, `get_audience` | Audiences with size, `usable`, and which ad sets use them |
+| `list_audiences`, `get_audience` | Audiences with size, `usable`, and which ad sets use them; the same naming filters |
 | `search_targeting`, `estimate_reach` | Targeting ids (interests, behaviours, places, locales ...); reach bounds |
-| `list_ad_images`, `list_ad_videos`, `list_labels` | Media to reuse; labels |
+| `list_ad_images`, `list_ad_videos`, `list_labels` | Media to reuse; labels (with the naming filters) |
 | `list_pixels`, `get_pixel_health`, `list_custom_conversions` | Tracking diagnostics |
 | `list_connected_identities`, `list_lead_forms` | Pages, Instagram accounts, apps; form metadata (never leads) |
 | `list_ad_rules`, `list_ab_tests`, `get_ab_test`, `list_catalogs`, `list_product_sets` | Rules (money rules flagged), studies, catalogs |
 | `list_recent_changes`, `search_ad_library` | Ads Manager's activity log; Meta's Ad Library |
-| `get_guardrails`, `list_my_changes`, `reconcile_ledger` | Bounds and today's budget; what it changed; whether the account still matches |
+| `get_guardrails`, `list_my_changes`, `reconcile_ledger` | Bounds, today's budget and the naming identity; what it changed; whether the account still matches, names included |
 
 ### Can change (needs your yes)
 
@@ -304,7 +397,7 @@ caps, a two-phase ledger, Meta's `validate_only` in the preview.
 | `duplicate_ad`, `update_ad_copy`, `url_tags`, `advantage_creative_options`, `attach_lead_form`, `replace_ad_creative` | What an ad says, via a new creative |
 | `create_creative`, `create_ad`, `create_campaign`, `create_ad_set`, `duplicate_ad_set`, `duplicate_campaign` | New things, always **PAUSED**, 3 applies each |
 | `create_ab_test` | A split test between PAUSED cells |
-| `low_risk_change` | Names and ad labels only, on a closed allowlist |
+| `low_risk_change` | Names (of the agent's own entities only) and ad labels, on a closed allowlist |
 | `revert_change` | Undo one ledger entry or a whole batch |
 
 Every ad change is **verified**: the preview fetches preview links for the

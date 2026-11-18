@@ -134,18 +134,18 @@ treating the gap as a bug.
 | Tool | Gives you |
 |---|---|
 | `list_ad_accounts`, `get_account` | Accounts; **currency, time zone**, status, token health, rate limit |
-| `find_campaigns` / `find_ad_sets` / `find_ads` | Ids, `budget_level`, budgets, bids, `effective_status`; `truncated` when cut off |
+| `find_campaigns` / `find_ad_sets` / `find_ads` | Ids, `budget_level`, budgets, bids, `effective_status`; `truncated` when cut off; `origin` / `ledger_created`, filter with `origin`, `agent_name`, `owner`, `mine` |
 | `get_campaign` / `get_ad_set` / `get_ad` | One entity in full: special ad categories, the **whole targeting spec**, placements, review feedback, 7/30-day totals, preview links |
 | `run_report` | Performance. Reports: `account`, `campaigns`, `adsets`, `ads`, `creative_fatigue`, `placements`, `demographics`, `geo`, `hour_of_day`, `conversions_by_action`; `breakdowns`, `max_rows`, `aggregate`, `action_types`, `run_async` |
 | `get_report_run` | Polls an async report |
 | `get_ad_creative` | What an ad **says**, its shape, and the social proof at stake |
 | `verify_ad` / `get_ad_previews` | Review state, field diff against what was approved, preview links per placement |
-| `list_audiences` / `get_audience` | Audiences with size, `usable`, and which ad sets use them (`unused_only`) |
+| `list_audiences` / `get_audience` | Audiences with size, `usable`, and which ad sets use them (`unused_only`); the naming filters |
 | `search_targeting` / `estimate_reach` | Interest, behaviour, place, locale ids; reach bounds for a spec |
 | `list_ad_images` / `list_ad_videos` | Media to reuse, with dimensions and length |
 | `list_pixels` / `get_pixel_health` / `list_custom_conversions` | Tracking diagnostics, read-only |
 | `list_connected_identities` / `list_lead_forms` | Pages, Instagram accounts, apps; existing forms (never leads) |
-| `list_labels`, `list_ad_rules`, `list_ab_tests` / `get_ab_test`, `list_catalogs` / `list_product_sets` | Account assets; money-changing rules are flagged |
+| `list_labels` (naming filters), `list_ad_rules`, `list_ab_tests` / `get_ab_test`, `list_catalogs` / `list_product_sets` | Account assets; money-changing rules are flagged |
 | `list_recent_changes` | Who changed what in Ads Manager -- the usual reason a preview is stale |
 | `search_ad_library` | Meta's Ad Library (political/issue ads only outside the EU) |
 | `get_guardrails` | The bounds, the session and **today's** remaining budget, token health |
@@ -275,8 +275,8 @@ PAUSED on the old (or `preview_multi_ad_status`).
 `get_guardrails` -> one `preview_ad_set_daily_budget` cut and one raise, shown
 together; the cut projects negative and refunds nothing from the caps.
 
-**Launching a campaign.** `preview_create_campaign` (ask the human for
-`special_ad_categories`) -> `preview_create_ad_set` (targeting from
+**Launching a campaign.** `preview_create_campaign` with a BASE name (ask the
+human for `special_ad_categories`; the prefix is added) -> `preview_create_ad_set` (targeting from
 `search_targeting`, `estimate_reach` first) -> `preview_create_creative` ->
 `preview_create_ad` -> everything is PAUSED; the human activates with the
 status tools, campaign last.
@@ -298,18 +298,38 @@ rendering you did not open.
 `estimate_reach` -> `preview_ad_set_targeting(audiences_include=[...])`, and
 read the overlap and exclusion warnings.
 
-**A/B test.** `preview_duplicate_ad_set` (PAUSED copy) -> change ONE variable
+**A/B test.** `preview_duplicate_ad_set` (PAUSED copy, renamed with your
+prefix) -> change ONE variable
 on the copy (`ad_set_targeting`, `ad_set_placements` or a creative change) ->
 `preview_create_ab_test(variable=...)` -> the human activates the cells.
 
 **Audiences cannot be deleted here.** An unused one just sits there and
 changes nothing; `list_audiences(unused_only=True)` shows them.
 
+## Naming
+
+Everything you create is named `<OWNER>-<agent>-<base>` (e.g. `AB-max-spring`,
+placeholders), from the repo's `.env`; each part only when it is set, and with
+neither set the name is used as given. `get_guardrails` shows the identity.
+
+- **Pass the base name only.** The prefix is added; passing it already is fine,
+  passing another agent's (`CD-bot-...`) or the CLI's (`AB-cli-...`) is refused.
+- The preview's `naming` block shows the EXACT final name; read it to the human.
+- A creative's top-level name is stamped; the headline (`link_data.name`) is
+  your text, never touched.
+- Copies and duplicates take your prefix on the source's base; `/copies` are
+  renamed right after, one ledger entry each.
+- Renames: only your own entities (your prefix, or the ledger shows you made
+  it). A manual entity or another agent's is refused -- say so and leave it.
+- Over 400 characters (prefix included) is refused, never truncated: shorten.
+- `find_*(mine=True)` finds yours; `reconcile_ledger` reports lost prefixes.
+
 ## Reading the preview
 
 | Field | Why it matters |
 |---|---|
-| `entity_name` / `path` | `Brand - Prospecting` reads differently from `120200000000001` |
+| `entity_name` / `path` | `AB-max-Brand - Prospecting` reads differently from `120200000000001` |
+| `naming` | For a create, copy or rename: the requested and EXACT final name, its prefix, base, length and rule |
 | `currency` | A ceiling of 500 means nothing until you know 500 of what |
 | `before` / `after` | In major units, already converted out of minor ones |
 | `status` vs `effective_status` | The second is whether it is actually running |

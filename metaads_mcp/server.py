@@ -96,6 +96,18 @@ one changes nothing, and detaching is the undo for attaching.
 preview_create_campaign's special_ad_categories is a legal declaration with no
 default: ask the human.
 
+NAMING. Everything you create is named <OWNER>-<agent>-<base>, from the repo's
+.env (each part only when set; neither set: the name as given). Pass the BASE
+name only: the prefix is added, and another agent's or the CLI's prefix is
+refused. The preview's `naming` block is the exact final name. Only a
+creative's internal name is stamped, never its headline. Copies take your
+prefix on the source's base. You may rename ONLY your own entities (your
+prefix, or the ledger shows you made it): a manual entity or another agent's
+is refused, and renames keep the prefix. Names over 400 characters are
+refused, never truncated. find_* (and list_audiences, list_labels) filter by
+origin / agent_name / owner / mine; get_guardrails shows the identity; a
+malformed identity refuses creating until .env is fixed.
+
 AD VERIFICATION. Every ad-changing apply returns `verification`: the live ad
 re-read and diffed against what was approved, its review state, and fresh
 preview links. passed=false reverts nothing; say what differs. Review usually
