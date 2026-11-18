@@ -31,6 +31,16 @@ EffectiveStatus = Literal[
     "DISAPPROVED",
 ]
 
+#: The naming filters every find_* / list_* tool takes (metaads_reporting.naming).
+OriginFilter = Annotated[
+    Literal["any", "agent", "cli", "manual"],
+    Field(description="Who the NAME says made it: agent (an OWNER-agent- prefix), cli "
+                      "(OWNER-cli-, a human with scripts/manage.py), manual (no prefix)"),
+]
+AgentFilter = Annotated[str | None, Field(description="Only names with this agent part, e.g. max")]
+OwnerFilter = Annotated[str | None, Field(description="Only names with these owner initials, e.g. AB")]
+MineFilter = Annotated[bool, Field(description="Only names with THIS server's own prefix")]
+
 Breakdown = Literal[
     "age", "gender", "country", "region", "dma",
     "publisher_platform", "platform_position", "device_platform",
@@ -124,21 +134,50 @@ def register(mcp, state) -> None:
         return summary
 
     def found(rows, truncated, render, limit) -> dict[str, Any]:
+        from metaads_mcp import ledger
+        from metaads_reporting.naming import attribution
+
+        made = ledger.created_ids()
+
+        def annotated(r):
+            # Who the NAME says made it (a convention), and whether the
+            # ledger shows this server did (the proof).
+            return {**render(r), **attribution(state.identity, r.get("name")),
+                    "ledger_created": str(r.get("id")) in made}
+
         return {
-            "rows": [render(r) for r in rows[:limit]],
+            "rows": [annotated(r) for r in rows[:limit]],
             "count": min(len(rows), limit),
             "truncated": truncated,
             "rate_limit": headroom(),
         }
 
-    def _search(module, parent, needle, limit, status):
+    def name_filter(origin="any", agent_name=None, owner=None, mine=False):
+        from metaads_reporting.naming import NameFilter
+
+        return NameFilter.build(state.identity, origin=origin, agent_name=agent_name,
+                                owner=owner, mine=mine)
+
+    def _search(module, parent, needle, limit, status, names=None):
         from metaads_reporting.write.lookup import edge_search
 
-        return edge_search(
+        if names is None or not names.active:
+            return edge_search(
+                _as_write_shim(client), parent, module.EDGE, module.FIELDS,
+                needle=needle, limit=limit,
+                statuses=[status] if status else list(module.DEFAULT_STATUSES),
+            )
+        # A server-side prefix pre-filter where one exists, then the exact
+        # local parse; read deeper, since the local filter drops rows.
+        rows, truncated = edge_search(
             _as_write_shim(client), parent, module.EDGE, module.FIELDS,
-            needle=needle, limit=limit,
+            needle=needle or names.needle, limit=200,
             statuses=[status] if status else list(module.DEFAULT_STATUSES),
         )
+        if needle and names.needle:
+            rows = [r for r in rows if names.needle in (r.get("name") or "")]
+        kept = [r for r in rows if names.matches(r.get("name"))]
+        return kept[:limit], truncated or len(kept) > limit
 
     def _account() -> str:
         from metaads_reporting.account_id import account_path
@@ -157,6 +196,10 @@ def register(mcp, state) -> None:
             Field(description="Filter on effective_status, e.g. ACTIVE"),
         ] = None,
         limit: Annotated[int, Field(description="Max rows", ge=1, le=200)] = 50,
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> dict[str, Any]:
         """Campaigns with their ids, status, objective and budget.
 
@@ -171,11 +214,17 @@ def register(mcp, state) -> None:
         `truncated: true` means more matched than `limit` returned -- narrow
         the search or raise the limit. `status` filters on effective_status,
         which is what is actually delivering.
+
+        Every row says who its NAME says made it (`origin` agent / cli /
+        manual, `owner`, `agent`, `base`) and whether the ledger shows this
+        server created it (`ledger_created`); filter with origin, agent_name,
+        owner or mine.
         """
         from metaads_reporting.write import campaigns as campaign_writes
 
+        names = name_filter(origin, agent_name, owner, mine)
         currency = client.currency()
-        rows, truncated = _search(campaign_writes, _account(), name_contains_text, limit, status)
+        rows, truncated = _search(campaign_writes, _account(), name_contains_text, limit, status, names)
         return found(rows, truncated, lambda r: {
             "campaign_id": str(r.get("id")),
             "name": r.get("name"),
@@ -200,6 +249,10 @@ def register(mcp, state) -> None:
             EffectiveStatus | None, Field(description="Filter on effective_status")
         ] = None,
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> dict[str, Any]:
         """Ad sets with their ids, status, budget, bid and parent campaign.
 
@@ -213,8 +266,9 @@ def register(mcp, state) -> None:
         """
         from metaads_reporting.write import adsets as adset_writes
 
+        names = name_filter(origin, agent_name, owner, mine)
         parent = str(campaign_id) if campaign_id else _account()
-        rows, truncated = _search(adset_writes, parent, name_contains_text, limit, status)
+        rows, truncated = _search(adset_writes, parent, name_contains_text, limit, status, names)
         # Each row in ITS account's currency: a campaign_id can name a campaign
         # in another allowed account, and a JPY budget read as CAD is a
         # hundredfold error.
@@ -258,6 +312,10 @@ def register(mcp, state) -> None:
             EffectiveStatus | None, Field(description="Filter on effective_status")
         ] = None,
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> dict[str, Any]:
         """Ads with their ids, status and parents.
 
@@ -267,8 +325,9 @@ def register(mcp, state) -> None:
         """
         from metaads_reporting.write import ads as ad_writes
 
+        names = name_filter(origin, agent_name, owner, mine)
         parent = str(ad_set_id or campaign_id or "") or _account()
-        rows, truncated = _search(ad_writes, parent, name_contains_text, limit, status)
+        rows, truncated = _search(ad_writes, parent, name_contains_text, limit, status, names)
         return found(rows, truncated, lambda r: {
             "ad_id": str(r.get("id")),
             "name": r.get("name"),
@@ -493,6 +552,10 @@ def register(mcp, state) -> None:
             bool,
             Field(description="Only custom audiences no ad set includes or excludes"),
         ] = False,
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> dict[str, Any]:
         """Audiences that already exist: sizes, status, usability, and use.
 
@@ -502,11 +565,21 @@ def register(mcp, state) -> None:
         """
         from metaads_reporting.write import audiences
 
+        from metaads_reporting.naming import attribution
+
+        names = name_filter(origin, agent_name, owner, mine)
         shim = _as_write_shim(client)
         wanted = (kind or "all").strip().lower()
+        # A naming filter drops rows locally, so it reads deeper first.
+        depth = 200 if names.active else limit + 1
+
+        def named(rows):
+            rows = [{**r, **attribution(state.identity, r.get("name"))} for r in rows]
+            return [r for r in rows if names.matches(r.get("name"))]
+
         out: dict[str, Any] = {}
         if wanted in ("custom", "all"):
-            custom = audiences.list_custom(shim, limit=limit + 1)
+            custom = named(audiences.list_custom(shim, limit=depth))
             used, complete = state.audience_usage()
             for row in custom:
                 row["used_by_ad_sets"] = len(used.get(row["audience_id"], []))
@@ -516,7 +589,7 @@ def register(mcp, state) -> None:
             out["custom_truncated"] = len(custom) > limit
             out["usage_scan_complete"] = complete
         if wanted in ("saved", "all"):
-            out["saved"] = audiences.list_saved(shim, limit=limit)
+            out["saved"] = named(audiences.list_saved(shim, limit=depth))[:limit]
         out["rate_limit"] = headroom()
         out["note"] = (
             "`usable` says whether Meta can deliver to a custom audience yet "

@@ -418,3 +418,86 @@ def rename(identity: Identity, current: str, requested: str, *, entity_type: str
     elif identity.configured:
         stamped.rule = "kept_prefix"
     return stamped
+
+
+# ---------------------------------------------------------------------------
+# Attribution and filtering, for the find_* and list_* tools
+# ---------------------------------------------------------------------------
+
+
+def attribution(identity: Identity, name: str | None) -> dict[str, Any]:
+    """``origin``, ``owner``, ``agent`` and ``base`` for a row's name.
+
+    The full ``OWNER-agent-`` form is read for anyone; a partial prefix
+    (``AB-``, ``max-``) only as THIS identity's, since only then is it known.
+    """
+    parsed = parse(name)
+    if parsed is None and identity.owns(name):
+        return {"origin": "agent", "owner": identity.owner or None,
+                "agent": identity.agent or None, "base": (name or "")[len(identity.prefix):]}
+    return origin_of(name)
+
+
+ORIGINS = ("any", "agent", "cli", "manual")
+
+
+@dataclass(frozen=True)
+class NameFilter:
+    """origin / agent_name / owner / mine, validated before any request."""
+
+    origin: str = "any"
+    agent_name: str | None = None
+    owner: str | None = None
+    mine: bool = False
+    identity: Identity = field(default_factory=Identity)
+
+    @classmethod
+    def build(cls, identity: Identity, *, origin: str = "any", agent_name: str | None = None,
+              owner: str | None = None, mine: bool = False) -> "NameFilter":
+        origin = (origin or "any").strip().lower()
+        if origin not in ORIGINS:
+            raise ValueError(f"origin must be one of {', '.join(ORIGINS)}, got {origin!r}.")
+        agent_name = (agent_name or "").strip() or None
+        owner = (owner or "").strip() or None
+        # Validated with the same rules as the identity, so a filter value can
+        # never inject into a Graph filter.
+        if agent_name and not AGENT_RE.match(agent_name):
+            raise ValueError(f"agent_name {agent_name!r} is not an agent name: a lowercase slug "
+                             "of 2-24 characters (letters, digits, _), e.g. max or cli.")
+        if owner and not OWNER_RE.match(owner):
+            raise ValueError(f"owner {owner!r} is not owner initials: 2-4 uppercase letters, e.g. AB.")
+        if mine and not identity.configured:
+            raise ValueError(
+                f"mine=True needs a naming identity, and none is configured ({OWNER_KEY} and "
+                f"{AGENT_KEY} in .env are empty). Filter by owner or agent_name instead."
+            )
+        return cls(origin=origin, agent_name=agent_name, owner=owner, mine=mine, identity=identity)
+
+    @property
+    def active(self) -> bool:
+        return self.origin != "any" or bool(self.agent_name or self.owner or self.mine)
+
+    @property
+    def needle(self) -> str | None:
+        """A server-side name pre-filter (Graph CONTAIN), exact match after."""
+        if self.mine:
+            return self.identity.prefix
+        if self.owner and self.agent_name:
+            return f"{self.owner}-{self.agent_name}-"
+        if self.owner:
+            return f"{self.owner}-"
+        if self.agent_name:
+            return f"-{self.agent_name}-"
+        return None
+
+    def matches(self, name: str | None) -> bool:
+        info = attribution(self.identity, name)
+        if self.mine and not self.identity.owns(name):
+            return False
+        if self.origin != "any" and info["origin"] != self.origin:
+            return False
+        if self.owner and info["owner"] != self.owner:
+            return False
+        if self.agent_name and info["agent"] != self.agent_name:
+            return False
+        return True

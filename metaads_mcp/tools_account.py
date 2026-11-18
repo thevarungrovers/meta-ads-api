@@ -16,6 +16,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field
 
 from metaads_mcp.errors import refusals_reach_the_caller
+from metaads_mcp.tools_read import AgentFilter, MineFilter, OriginFilter, OwnerFilter
 from metaads_reporting.account_id import account_path
 from metaads_reporting.insights import InsightsQuery
 
@@ -495,9 +496,27 @@ def register_more(mcp, state, client, *, listing, edge, account, headroom, money
 
     @mcp.tool(title="List ad labels", annotations=read_only)
     @refusals_reach_the_caller
-    def list_labels(limit: Annotated[int, Field(ge=1, le=500)] = 100) -> dict[str, Any]:
-        """The account's ad labels (act_/adlabels), for organising and filtering."""
-        return listing(edge(account(), "adlabels", ("id", "name", "created_time"), limit), limit)
+    def list_labels(
+        limit: Annotated[int, Field(ge=1, le=500)] = 100,
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
+    ) -> dict[str, Any]:
+        """The account's ad labels (act_/adlabels), for organising and filtering.
+
+        Each says who its NAME says made it (origin, owner, agent, base);
+        filter with origin, agent_name, owner or mine.
+        """
+        from metaads_reporting.naming import NameFilter, attribution
+
+        names = NameFilter.build(state.identity, origin=origin, agent_name=agent_name,
+                                 owner=owner, mine=mine)
+        rows = edge(account(), "adlabels", ("id", "name", "created_time"),
+                    500 if names.active else limit)
+        rows = [{**r, **attribution(state.identity, r.get("name"))} for r in rows
+                if names.matches(r.get("name"))]
+        return listing(rows, limit)
 
     @mcp.tool(title="List custom conversions", annotations=read_only)
     @refusals_reach_the_caller

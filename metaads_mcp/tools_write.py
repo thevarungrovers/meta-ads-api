@@ -127,7 +127,10 @@ def register(mcp, state) -> None:
         Also lists `unknown_outcome` (an intent with no outcome: the write left
         this process and nothing recorded how it ended) and `pending_review`
         (an ad change whose verification said review was still pending -- call
-        verify_ad on it). Reads only.
+        verify_ad on it). With a naming prefix configured, `naming` lists
+        ledger-created entities that lost it (`prefix_lost`) and live ones
+        that carry it with no ledger row (`prefix_without_ledger`), and counts
+        other agents' prefixes. Reads only.
         """
         reverted = ledger.reverted_entry_ids()
         rows = ledger.entries()[-limit:]
@@ -177,11 +180,72 @@ def register(mcp, state) -> None:
             "unknown_outcome": unknown,
             "pending_review": pending,
             "unchecked": unchecked,
+            "naming": naming_section(rows),
             "note": (
                 "Drift is not an error to fix blindly: the live value is what the "
                 "account does now. Show the human, and let them decide whether to "
                 "change it back with a preview_* tool or leave it."
             ),
+        }
+
+    def naming_section(rows) -> dict:
+        """What the names say against what the ledger says, for OUR prefix.
+
+        Only when a prefix is configured. ``prefix_lost``: something the
+        ledger shows this server created whose live name no longer carries the
+        prefix (renamed elsewhere, or created before naming existed --
+        ``pre_feature``). ``prefix_without_ledger``: a live campaign, ad set
+        or ad named with our prefix that no ledger row created (another
+        checkout, a copied name). Other prefixes are only COUNTED: their
+        ledgers live elsewhere. Information only; nothing is changed.
+        """
+        from metaads_reporting.naming import attribution
+        from metaads_reporting.write import ads as ad_writes
+        from metaads_reporting.write import adsets as adset_writes
+        from metaads_reporting.write import campaigns as campaign_writes
+
+        identity = state.identity
+        if not identity.configured:
+            return {"skipped": "no naming identity configured: names are used as given, "
+                               "so there is no prefix to check"}
+        made: dict[str, bool] = {}
+        for entry in rows:
+            for created in ledger.created_ids([entry]):
+                inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+                made[created] = made.get(created, False) or bool(inverse.get("identity"))
+        lost = []
+        for entity_id, stamped in sorted(made.items()):
+            try:
+                live = ctx.client.node(entity_id, ("id", "name")).get("name") or ""
+            except Exception as exc:  # noqa: BLE001 - reported per entity
+                lost.append({"entity_id": entity_id, "unreadable": str(exc).splitlines()[0]})
+                continue
+            if not identity.owns(live):
+                lost.append({"entity_id": entity_id, "live_name": live, "pre_feature": not stamped})
+        everything = ledger.created_ids()
+        without, others, truncated = [], {}, False
+        for module, noun in ((campaign_writes, "campaign"), (adset_writes, "ad set"), (ad_writes, "ad")):
+            try:
+                found = module.search(ctx.client, None, limit=200)
+            except Exception:  # noqa: BLE001 - the scan is best effort
+                continue
+            truncated = truncated or len(found) >= 200
+            for row in found:
+                name = row.get("name") or ""
+                if identity.owns(name):
+                    if str(row.get("id")) not in everything:
+                        without.append({"entity_type": noun, "entity_id": str(row.get("id")), "name": name})
+                    continue
+                info = attribution(identity, name)
+                if info["origin"] in ("agent", "cli"):
+                    key = f"{info['owner']}-{info['agent']}-"
+                    others[key] = others.get(key, 0) + 1
+        return {
+            "prefix": identity.prefix,
+            "prefix_lost": lost,
+            "prefix_without_ledger": without,
+            "other_prefixes": others,
+            "scan_truncated": truncated,
         }
 
     @apply_tool(
