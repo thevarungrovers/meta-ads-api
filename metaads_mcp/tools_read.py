@@ -213,23 +213,38 @@ def register(mcp, state) -> None:
         """
         from metaads_reporting.write import adsets as adset_writes
 
-        currency = client.currency()
         parent = str(campaign_id) if campaign_id else _account()
         rows, truncated = _search(adset_writes, parent, name_contains_text, limit, status)
-        return found(rows, truncated, lambda r: {
-            "ad_set_id": str(r.get("id")),
-            "name": r.get("name"),
-            "status": r.get("status"),
-            "effective_status": r.get("effective_status"),
-            "campaign_id": str(r.get("campaign_id")),
-            "daily_budget": money(r.get("daily_budget"), currency),
-            "lifetime_budget": money(r.get("lifetime_budget"), currency),
-            "bid_amount": money(r.get("bid_amount"), currency),
-            "bid_strategy": r.get("bid_strategy"),
-            "optimization_goal": r.get("optimization_goal"),
-            "billing_event": r.get("billing_event"),
-            "currency": currency,
-        }, limit)
+        # Each row in ITS account's currency: a campaign_id can name a campaign
+        # in another allowed account, and a JPY budget read as CAD is a
+        # hundredfold error.
+        currencies: dict[str, str] = {}
+
+        def currency_of(r) -> str:
+            account = str(r.get("account_id") or "") or None
+            key = account or ""
+            if key not in currencies:
+                currencies[key] = client.currency(account)
+            return currencies[key]
+
+        def shape(r):
+            currency = currency_of(r)
+            return {
+                "ad_set_id": str(r.get("id")),
+                "name": r.get("name"),
+                "status": r.get("status"),
+                "effective_status": r.get("effective_status"),
+                "campaign_id": str(r.get("campaign_id")),
+                "daily_budget": money(r.get("daily_budget"), currency),
+                "lifetime_budget": money(r.get("lifetime_budget"), currency),
+                "bid_amount": money(r.get("bid_amount"), currency),
+                "bid_strategy": r.get("bid_strategy"),
+                "optimization_goal": r.get("optimization_goal"),
+                "billing_event": r.get("billing_event"),
+                "currency": currency,
+            }
+
+        return found(rows, truncated, shape, limit)
 
     @mcp.tool(title="Find ads by name", annotations=READ_ONLY)
     @refusals_reach_the_caller

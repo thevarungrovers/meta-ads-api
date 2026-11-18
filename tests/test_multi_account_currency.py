@@ -64,3 +64,24 @@ def test_an_activation_in_another_account_projects_in_its_currency(monkeypatch):
     preview = tools["preview_ad_set_status"](ad_set_id=JPY_ADSET, new_status="ACTIVE")
     assert preview.projected_daily_spend_delta == "3000.00", preview.projected_daily_spend_delta
     assert preview.currency == "JPY"
+
+
+# --- the read paths use the entity's account currency --------------------------
+
+
+def test_find_ad_sets_in_another_accounts_campaign_reads_its_currency(monkeypatch):
+    tools, _ = two_accounts(monkeypatch)
+    out = tools["find_ad_sets"](campaign_id=JPY_CAMPAIGN)
+    row = out["rows"][0]
+    assert row["currency"] == "JPY", row
+    assert row["daily_budget"].startswith("3000") or row["daily_budget"].startswith("3,000"), row
+
+
+def test_get_campaign_and_get_ad_set_read_their_own_accounts_currency(monkeypatch):
+    tools, sim = two_accounts(monkeypatch)
+    sim.objects[JPY_CAMPAIGN]["daily_budget"] = "5000"
+    campaign = tools["get_campaign"](campaign_id=JPY_CAMPAIGN)
+    assert campaign["currency"] == "JPY" and "5000" in campaign["daily_budget"].replace(",", ""), campaign
+    adset = tools["get_ad_set"](ad_set_id=JPY_ADSET)
+    adset = adset if isinstance(adset, dict) else adset.model_dump()
+    assert adset["currency"] == "JPY" and "3000" in adset["daily_budget"].replace(",", ""), adset

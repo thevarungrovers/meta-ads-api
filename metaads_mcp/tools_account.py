@@ -112,8 +112,9 @@ def register(mcp, state, client, *, headroom, money, read_only, local_only) -> N
         """
         from metaads_reporting.write import campaigns as campaign_writes
 
-        currency = client.currency()
         row = client.node(str(campaign_id), CAMPAIGN_DETAIL)
+        # The campaign's OWN account's currency, not the default account's.
+        currency = client.currency(str(row["account_id"]) if row.get("account_id") else None)
         adsets = client.edge(str(campaign_id), "adsets", ("id",), limit=500, max_items=501)
         ads = client.edge(str(campaign_id), "ads", ("id",), limit=500, max_items=501)
         return {
@@ -146,8 +147,8 @@ def register(mcp, state, client, *, headroom, money, read_only, local_only) -> N
         targeting wholesale, so a change is always the current spec plus the
         edit, and the preview shows both.
         """
-        currency = client.currency()
         row = client.node(str(ad_set_id), ADSET_DETAIL)
+        currency = client.currency(str(row["account_id"]) if row.get("account_id") else None)
         try:
             sentences = client.get(f"{ad_set_id}/targetingsentencelines").get("targetingsentencelines") or []
         except Exception:  # noqa: BLE001 - a nice-to-have rendering
