@@ -267,3 +267,22 @@ def test_any_change_that_adds_spend_is_checked_against_allowed_currencies(monkey
     preview = tools["preview_ad_set_bid_amount"](ad_set_id=JPY_ADSET, new_bid_amount="120")
     assert Decimal(preview.projected_daily_spend_delta) > 0
     assert failed(preview, "currency_allowed"), preview.checks
+
+
+def test_a_cut_or_a_pause_in_a_currency_with_no_rate_is_not_refused(monkeypatch):
+    """Nothing to count: a change that can only lower spend must never be
+    stranded by the missing conversion."""
+    tools, sim = two_accounts(monkeypatch, currency_rates=())
+    sim.objects[JPY_ADSET]["status"] = "ACTIVE"
+    for name, args in (("ad_set_status", {"new_status": "PAUSED"}),
+                       ("ad_set_daily_budget", {"new_daily_budget": "1000"})):
+        preview = tools[f"preview_{name}"](ad_set_id=JPY_ADSET, **args)
+        assert Decimal(preview.projected_daily_spend_delta) <= 0
+        assert not preview.blocked, [c for c in preview.checks if not c.startswith("OK")]
+        line = next(c for c in preview.checks if " cap_currency" in c)
+        assert line.startswith("SKIP") and "cannot add spend" in line, line
+    result = tools["apply_ad_set_daily_budget"](preview_token=preview.preview_token)
+    from metaads_mcp import ledger
+
+    assert ledger.find_entry(result.entry_id)["projected_daily_spend_delta"] == "0.00", (
+        "an unconverted JPY figure is never written as if it were CAD")

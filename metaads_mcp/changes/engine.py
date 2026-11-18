@@ -164,8 +164,20 @@ class Engine:
         checks.extend(proposal.checks)
         currency = ctx.currency(account)
         # The totals are in ONE currency: count this change in it, or refuse.
-        checks.append(check_cap_currency(ctx.limits, currency))
+        # A change that can only LOWER spend has nothing to count, so a
+        # missing rate never strands a pause or a cut; it is counted as 0
+        # rather than as an unconverted figure.
+        cap_check = check_cap_currency(ctx.limits, currency)
         counted = to_cap_currency(ctx.limits, proposal.projected, currency)
+        if not cap_check.ok and proposal.projected <= 0:
+            cap_check = Check(
+                "cap_currency", True,
+                f"{currency}: no rate to {cap_currency(ctx.limits)} is configured, but this "
+                "change cannot add spend, so there is nothing to count (counted as 0)",
+                skipped=True,
+            )
+            counted = Decimal("0.00")
+        checks.append(cap_check)
         conversion_warnings = []
         if counted is None:
             counted = proposal.projected  # blocked by cap_currency anyway
