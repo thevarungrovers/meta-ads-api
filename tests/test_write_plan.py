@@ -333,7 +333,7 @@ def test_every_write_is_recorded_in_the_mutation_log(client):
     )
     rows = logdb.mutation_rows()
     assert len(rows) == 1
-    assert rows[0]["payload"] == {"status": "PAUSED"}
+    assert rows[0]["payload"] == {"status": "PAUSED", "validate_only": False}
     assert rows[0]["ok"] == 1
 
 

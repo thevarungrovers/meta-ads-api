@@ -260,7 +260,10 @@ class MutatingMetaAdsClient:
             node_id=str(node_id),
             method="POST",
             edge=None,
-            payload=payload,
+            # validate_only is recorded WITH the payload: before this, a
+            # validation and an apply wrote identical rows, and the log could
+            # not say whether an object was ever really created.
+            payload={**payload, "validate_only": not apply},
         )
 
         try:
@@ -320,7 +323,7 @@ class MutatingMetaAdsClient:
             node_id="(new)",
             method="POST",
             edge=edge,
-            payload=payload,
+            payload={**payload, "validate_only": not apply},
         )
         try:
             response = self._transport.request("POST", path, data=body)

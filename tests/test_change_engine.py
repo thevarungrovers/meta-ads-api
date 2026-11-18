@@ -184,3 +184,13 @@ def test_an_entity_in_another_account_is_out_of_scope(monkeypatch, tool_name, ar
     preview = registrar.tools[tool_name](**args)
     assert preview.blocked is True
     assert any(c.startswith("FAIL account_in_scope") and "9876543210" in c for c in preview.checks)
+
+
+def test_the_mutation_log_tells_a_validation_from_an_apply(tools):
+    from metaads_reporting import logdb
+
+    tool, state, sim = tools
+    preview = tool["preview_campaign_status"](campaign_id="120200000000001", new_status="PAUSED")
+    tool["apply_campaign_status"](preview_token=preview.preview_token)
+    flags = [row["payload"]["validate_only"] for row in reversed(logdb.mutation_rows())]
+    assert flags == [True, False]
