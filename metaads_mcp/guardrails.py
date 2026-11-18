@@ -217,6 +217,15 @@ def load_limits(path: Path | None = None) -> Limits:
             raise GuardrailConfigError(
                 f"guardrails.toml: [scope.currency_rates] {code} = {raw!r} must be above 0."
             )
+        if str(code).upper() not in currencies:
+            # A rate is how a currency's spend is COUNTED, not permission to
+            # spend in it: one for a currency outside the list is a typo or
+            # a list somebody forgot to widen, and either way it is refused.
+            raise GuardrailConfigError(
+                f"guardrails.toml: [scope.currency_rates] {code} is not one of "
+                f"allowed_currencies ({', '.join(currencies)}). Add it there too, "
+                f"or remove the rate."
+            )
         rates.append((str(code).upper(), rate))
 
     # An env var can narrow the scope further but never widen it: a

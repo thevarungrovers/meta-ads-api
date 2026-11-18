@@ -162,12 +162,7 @@ class Engine:
         if proposal.campaign_id is not None:
             checks.append(check_campaign_in_scope(ctx.limits, str(proposal.campaign_id)))
         checks.extend(proposal.checks)
-        # Anything that can restore or add spend (an activation, a widening,
-        # an extension) is in an allowed currency, whether or not the kind
-        # checked it itself.
         currency = ctx.currency(account)
-        if proposal.is_activation and not any(c.name == "currency_allowed" for c in checks):
-            checks.append(check_currency(ctx.limits, currency))
         # The totals are in ONE currency: count this change in it, or refuse.
         checks.append(check_cap_currency(ctx.limits, currency))
         counted = to_cap_currency(ctx.limits, proposal.projected, currency)
@@ -179,6 +174,12 @@ class Engine:
                 f"{proposal.projected:.2f} {currency} is counted against the totals as "
                 f"{counted:.2f} {cap_currency(ctx.limits)} at the configured rate"
             )
+        # Anything that can restore or add spend (an activation, a widening,
+        # an increase of any kind) is in an allowed currency, whether or not
+        # the kind checked it itself.
+        if ((proposal.is_activation or counted > 0)
+                and not any(c.name == "currency_allowed" for c in checks)):
+            checks.append(check_currency(ctx.limits, currency))
         if proposal.batch:
             checks.append(check_count(ctx.limits, len(items)))
         if proposal.is_activation:

@@ -20,6 +20,11 @@ JPY_ADSET = "120200000000092"
 
 
 def two_accounts(monkeypatch, **extra):
+    tools, _, sim = two_accounts_with_state(monkeypatch, **extra)
+    return tools, sim
+
+
+def two_accounts_with_state(monkeypatch, **extra):
     sim = make_sim()
     sim.accounts[f"act_{JPY}"] = account(currency="JPY", id=f"act_{JPY}", account_id=JPY)
     sim.objects[JPY_CAMPAIGN] = campaign(JPY_CAMPAIGN, daily_budget=None, account_id=JPY)
@@ -36,8 +41,8 @@ def two_accounts(monkeypatch, **extra):
                        # The totals are in CAD: a JPY change is counted only
                        # through a configured rate (made up for the test).
                        "currency_rates": (("JPY", Decimal("0.01")),), **extra})
-    registrar, _ = build_tools(sim, limits=limits, monkeypatch=monkeypatch)
-    return registrar.tools, sim
+    registrar, state = build_tools(sim, limits=limits, monkeypatch=monkeypatch)
+    return registrar.tools, state, sim
 
 
 def test_a_budget_in_another_account_uses_that_accounts_currency(monkeypatch):
@@ -229,3 +234,36 @@ def test_conversion_to_the_cap_currency_ceils_increases_and_floors_cuts():
     assert to_cap_currency(limits, Decimal("0"), "JPY") == Decimal("0.00")
     assert to_cap_currency(limits, Decimal("-1"), "JPY") == Decimal("-0.01")
     assert to_cap_currency(limits, Decimal("-5"), "JPY") == Decimal("-0.03")
+
+
+def test_rates_for_a_currency_that_is_not_allowed_are_refused_at_load(tmp_path):
+    import pytest
+
+    from metaads_mcp.guardrails import GuardrailConfigError, load_limits
+
+    path = tmp_path / "guardrails.toml"
+    path.write_text('[scope]\nallowed_currencies = ["CAD"]\n'
+                    '[scope.currency_rates]\nJPY = "0.0091"\n')
+    with pytest.raises(GuardrailConfigError) as caught:
+        load_limits(path)
+    assert "JPY" in str(caught.value) and "allowed_currencies" in str(caught.value)
+
+
+def test_any_change_that_adds_spend_is_checked_against_allowed_currencies(monkeypatch):
+    """Not only activations: a kind that forgets its own currency check and
+    projects added spend is still refused in a currency outside the list."""
+    from tests.kindkit import failed
+
+    tools, state, _ = two_accounts_with_state(monkeypatch, allowed_currencies=("CAD",))
+    kind = state.engine.kinds["ad_set_bid_amount"]
+    original = kind.propose
+
+    def forgetful(ctx, **args):
+        proposal = original(ctx, **args)
+        proposal.checks = [c for c in proposal.checks if c.name != "currency_allowed"]
+        return proposal
+
+    monkeypatch.setattr(kind, "propose", forgetful)
+    preview = tools["preview_ad_set_bid_amount"](ad_set_id=JPY_ADSET, new_bid_amount="120")
+    assert Decimal(preview.projected_daily_spend_delta) > 0
+    assert failed(preview, "currency_allowed"), preview.checks
