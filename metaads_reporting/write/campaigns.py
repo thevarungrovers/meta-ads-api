@@ -29,7 +29,8 @@ from typing import Any
 
 from ..currency import format_money, from_minor_units, to_minor_units
 from .client import MutatingMetaAdsClient, MutationError, check_status
-from .lookup import Candidate, NotFound, match_by_name
+from ..graph import GraphAPIError
+from .lookup import Candidate, NotFound, is_not_found, match_by_name
 from .plan import FieldChange, PlannedChange
 
 ENTITY = "campaign"
@@ -99,7 +100,11 @@ def find(
     if campaign_id is not None:
         try:
             return client.node(str(campaign_id), FIELDS)
-        except Exception as exc:
+        except GraphAPIError as exc:
+            if not is_not_found(exc):
+                # A rate limit or an expired token is NOT "no such object":
+                # reporting it as one sends the agent hunting for a typo.
+                raise
             raise NotFound(
                 f"No campaign {campaign_id} this token can see. On Meta a "
                 f"missing object and a missing permission are the same error, "

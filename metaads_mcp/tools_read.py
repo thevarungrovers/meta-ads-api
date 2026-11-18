@@ -7,38 +7,15 @@ from here regardless of what is asked for.
 
 from __future__ import annotations
 
-import functools
 from typing import Annotated, Any
 
-from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from metaads_mcp.errors import refusals_reach_the_caller
 from metaads_reporting.client import ReadOnlyMetaAdsClient
-from metaads_reporting.currency import CurrencyError
-from metaads_reporting.graph import GraphError
 from metaads_reporting.insights import InsightsError, name_contains, summarise
 from metaads_reporting.reports import get_report, report_names
-
-
-def refusals_reach_the_caller(fn):
-    """Re-raise a deliberate refusal as ToolError so its message survives.
-
-    The MCP runtime carries a ToolError's text through to the caller but
-    replaces every other exception with a bare "Error executing tool <name>".
-    An unknown report name should say which names exist, not nothing.
-    """
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except ToolError:
-            raise
-        except (ValueError, LookupError, GraphError, CurrencyError) as exc:
-            raise ToolError(str(exc)) from exc
-
-    return wrapper
 
 
 # ALL FOUR HINTS, ALWAYS, ON EVERY TOOL. A hint left unset is published as

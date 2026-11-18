@@ -50,6 +50,18 @@ class NotFound(MutationError):
     """Nothing matched the search."""
 
 
+def is_not_found(exc: BaseException) -> bool:
+    """Whether a Graph error means "no such object (that this token can see)".
+
+    Code 100 with subcode 33 is Meta's answer for both a missing object and a
+    missing permission on it; code 803 is "some of the aliases you requested do
+    not exist". Anything else -- a rate limit, an expired token -- is not.
+    """
+    code = getattr(exc, "code", None)
+    subcode = getattr(exc, "subcode", None)
+    return (code == 100 and subcode == 33) or code == 803
+
+
 class AmbiguousMatch(MutationError):
     """Several things matched, and choosing between them is not ours to do."""
 

@@ -68,8 +68,29 @@ ACCOUNT_STATUS = {
 }
 
 
-class MetaAdsReportingError(RuntimeError):
-    """A read failed. Wraps the Graph error with the request's context."""
+class MetaAdsReportingError(GraphAPIError):
+    """A read failed. Carries the Graph error's code, subcode and messages.
+
+    It used to be a bare RuntimeError holding only the text, which threw away
+    the one thing a caller needs to tell an expired token from a rate limit
+    from a bad id. Now it IS a GraphAPIError (so ``code``/``is_rate_limit``
+    work on it) and keeps the original as ``cause``.
+    """
+
+    def __init__(self, exc: GraphAPIError) -> None:
+        super().__init__(
+            str(exc),
+            status=exc.status,
+            code=exc.code,
+            subcode=exc.subcode,
+            error_type=exc.error_type,
+            fbtrace_id=exc.fbtrace_id,
+            user_title=exc.user_title,
+            user_message=exc.user_message,
+            path=exc.path,
+        )
+        self.cause = exc
+        self.retry_after = getattr(exc, "retry_after", None)
 
 
 def build_transport(settings: Settings, *, session: Any | None = None) -> GraphTransport:
@@ -138,14 +159,14 @@ class ReadOnlyMetaAdsClient:
         try:
             return self._transport.get(path, **params)
         except GraphAPIError as exc:
-            raise MetaAdsReportingError(str(exc)) from exc
+            raise MetaAdsReportingError(exc) from exc
 
     def _paged(self, path: str, **params: Any) -> Iterator[dict[str, Any]]:
         assert_read_method("GET")
         try:
             yield from self._transport.paged(path, **params)
         except GraphAPIError as exc:
-            raise MetaAdsReportingError(str(exc)) from exc
+            raise MetaAdsReportingError(exc) from exc
 
     # NOTE: `limit` is the page size, `max_items` is how many you actually
     # want, and `max_pages` is the runaway guard. See GraphTransport.paged.

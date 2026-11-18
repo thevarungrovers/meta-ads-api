@@ -46,10 +46,8 @@ undocumented. ``tests/test_mcp_surface.py`` pins the registered tool names.
 
 from __future__ import annotations
 
-import functools
 from typing import Annotated
 
-from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from metaads_mcp.changes import all_kinds
@@ -62,47 +60,12 @@ from metaads_mcp.changes.base import (  # noqa: F401 - re-exported for callers
 )
 from metaads_mcp.changes.context import WriteContext
 from metaads_mcp.changes.engine import Engine, register_pair
-from metaads_mcp.guardrails import WritesDisabled, read_only_mode
-from metaads_mcp.previews import ApplyResult, PreviewExpired, PreviewStale
-from metaads_reporting.currency import CurrencyError
-from metaads_reporting.graph import GraphError
+# One mapper for read and write tools -- see metaads_mcp/errors.py.
+from metaads_mcp.errors import refusals_reach_the_caller  # noqa: F401
+from metaads_mcp.guardrails import read_only_mode
+from metaads_mcp.previews import ApplyResult
 from metaads_reporting.write import MutatingMetaAdsClient
-from metaads_reporting.write.audiences import CustomerDataRefused
-from metaads_reporting.write.client import MutationError
 from metaads_reporting.write.plan import execute, execute_chain
-
-#: Exceptions that mean "the tool refused on purpose", as opposed to "the tool
-#: crashed". The distinction is load-bearing: the MCP runtime carries a
-#: ToolError's message through to the caller as
-#: "Error executing tool <name>: <message>", but replaces every other exception
-#: with a bare "Error executing tool <name>" and keeps the detail server-side.
-DELIBERATE_REFUSALS = (
-    ValueError,
-    LookupError,
-    PreviewExpired,
-    PreviewStale,
-    MutationError,
-    CustomerDataRefused,
-    WritesDisabled,
-    GraphError,
-    CurrencyError,
-)
-
-
-def refusals_reach_the_caller(fn):
-    """Re-raise a deliberate refusal as ToolError so its message survives."""
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except ToolError:
-            raise
-        except DELIBERATE_REFUSALS as exc:
-            raise ToolError(str(exc)) from exc
-
-    return wrapper
-
 
 def parse_decimal(raw: str, name: str, currency: str = ""):
     """Kept for callers of the old name; see changes.base.parse_money."""
