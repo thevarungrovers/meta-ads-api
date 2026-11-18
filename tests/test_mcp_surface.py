@@ -89,6 +89,7 @@ PREVIEW_TOOLS = frozenset(
         "preview_create_ad_set",
         "preview_duplicate_ad_set",
         "preview_duplicate_campaign",
+        "preview_create_ab_test",
     }
 )
 
@@ -128,6 +129,7 @@ APPLY_TOOLS = frozenset(
         "apply_create_ad_set",
         "apply_duplicate_ad_set",
         "apply_duplicate_campaign",
+        "apply_create_ab_test",
     }
 )
 
@@ -258,6 +260,7 @@ SPENDS = {
     "apply_create_ad_set",
     "apply_duplicate_ad_set",
     "apply_duplicate_campaign",
+    "apply_create_ab_test",
 }
 
 

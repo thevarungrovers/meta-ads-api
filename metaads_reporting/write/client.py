@@ -72,6 +72,8 @@ WRITABLE_FIELDS: dict[str, frozenset[str]] = {
     # attached. The value is {"creative_id": "..."} -- a dict, which `update`
     # JSON-encodes on the way out.
     "ad": frozenset({"status", "name", "creative"}),
+    # An A/B test is never deleted; undoing one ends it early.
+    "adstudy": frozenset({"end_time"}),
 }
 
 #: Statuses this package will set. DELETED and ARCHIVED are absent on purpose:
