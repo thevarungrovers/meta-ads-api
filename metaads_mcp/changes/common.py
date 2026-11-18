@@ -95,6 +95,10 @@ class StatusKind(ChangeKind):
             ctx.client, status=entry["before"], **{self.id_arg: entry["entity_id"]}
         )
 
+    def revert_row_inverse(self, ctx, entry: dict[str, Any]) -> dict[str, Any] | None:
+        # A status revert is fully described by its before/after strings.
+        return {}
+
     def activation_bound(self, ctx, row: dict[str, Any], currency: str):  # pragma: no cover
         raise NotImplementedError
 
@@ -286,6 +290,21 @@ class NodeFieldKind(ChangeKind):
             )
         return self._plan(entry["entity_id"], entry.get("entity_name") or "",
                           previous, entry["after"], entry["before"])
+
+    def revert_row_inverse(self, ctx, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """The live values of the keys the revert sends: the original's after."""
+        inverse = entry.get("inverse") or {}
+        previous = inverse.get("previous")
+        if not previous:
+            return None
+        live = ctx.client.node(str(entry["entity_id"]), ("id", *previous))
+        replaced = {k: as_obj(live.get(k)) for k in previous if live.get(k) is not None}
+        if not replaced:
+            return None
+        extra = {k: v for k, v in inverse.items()
+                 if k not in ("previous", "kind", "weight", "batch_id", "revert_row",
+                              "undoes_projected", "not_revertible")}
+        return {**extra, "previous": replaced}
 
 
 def previous_values(row: dict[str, Any], keys) -> dict[str, Any]:

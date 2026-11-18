@@ -7,7 +7,14 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from metaads_mcp.changes.base import APPLY_REVERSIBLE, APPLY_SPENDS, ChangeKind, Proposal, parse_money
+from metaads_mcp.changes.base import (
+    APPLY_REVERSIBLE,
+    APPLY_SPENDS,
+    ChangeKind,
+    Proposal,
+    amount_from_stored,
+    parse_money,
+)
 from metaads_mcp.changes.common import (
     StatusKind,
     ad_activation_bound,
@@ -289,6 +296,14 @@ class _MoneyKind(ChangeKind):
 
     def inverse(self, ctx, entry: dict[str, Any]):
         return self.plan(ctx, entry["entity_id"], stored_amount(entry))
+
+    def revert_row_inverse(self, ctx, entry: dict[str, Any]) -> dict[str, Any] | None:
+        # The revert replaces the original's AFTER amount; that is what a
+        # revert of the revert puts back.
+        try:
+            return {"before_amount": str(amount_from_stored(entry["after"]))}
+        except ValueError:
+            return None
 
 
 class CampaignDailyBudget(_MoneyKind):

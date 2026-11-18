@@ -467,7 +467,11 @@ class Engine:
         kind = self.kind_for_entry(entry)
         if not kind.revertible:
             kind.inverse(ctx, entry)  # raises, with the kind's own reason
+        self._revert_row_revertible(entry)
         self._not_stale(kind, entry)
+        # What the revert REPLACES, read before it is sent: the revert row's
+        # own inverse, so reverting the revert re-applies this entry.
+        row_inverse = kind.revert_row_inverse(ctx, entry)
         # Then the SPEND half, now that we know what undoing this restores.
         projected, _ = kind.revert_projection(ctx, entry)
         self._refuse_if_over_caps(projected, 1)
@@ -476,7 +480,7 @@ class Engine:
         _, _, entry_ids, _, _ = self._send_recorded(
             None,
             plan,
-            [self._inverse_item(entry)],
+            [self._inverse_item(entry, row_inverse)],
             tool="revert_change",
             projected=projected,
             weight=1,
@@ -544,10 +548,36 @@ class Engine:
             )
 
     @staticmethod
-    def _inverse_item(entry: dict[str, Any]) -> LedgerItem:
-        inverse = dict(entry.get("inverse") or {})
-        for key in ("kind", "weight", "batch_id"):
-            inverse.pop(key, None)
+    def _revert_row_revertible(entry: dict[str, Any]) -> None:
+        """A revert row can be reverted only if it recorded what it replaced."""
+        if entry.get("tool") != "revert_change":
+            return
+        inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+        if not inverse.get("revert_row"):
+            raise ValueError(
+                f"Entry {entry['entry_id']} is a revert written before reverts recorded "
+                "the value they replaced, so reverting it would re-send what is live "
+                "now. Make the change again with the matching preview_* tool."
+            )
+        if inverse.get("not_revertible"):
+            raise ValueError(
+                f"Entry {entry['entry_id']} is a revert of a change that cannot be "
+                "re-applied by reverting it. Make the change again with the matching "
+                "preview_* tool."
+            )
+
+    @staticmethod
+    def _inverse_item(entry: dict[str, Any], row_inverse: dict[str, Any] | None) -> LedgerItem:
+        # NOT a copy of the entry's inverse: that holds the value the revert
+        # puts back, and a revert of this row must put back what it replaced.
+        inverse: dict[str, Any] = {
+            "revert_row": True,
+            "undoes_projected": str(entry.get("projected_daily_spend_delta") or "0"),
+        }
+        if row_inverse is None:
+            inverse["not_revertible"] = True
+        else:
+            inverse.update(row_inverse)
         return LedgerItem(
             entity_type=entry["entity_type"],
             entity_id=str(entry["entity_id"]),
@@ -555,7 +585,7 @@ class Engine:
             field_name=entry["field"],
             before=entry["after"],
             after=entry["before"],
-            inverse=inverse or None,
+            inverse=inverse,
         )
 
     def _revert_result(self, entry: dict[str, Any], new_entry: str) -> ApplyResult:

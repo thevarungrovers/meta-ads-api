@@ -145,7 +145,12 @@ def register(mcp, state) -> None:
                 continue
             if not entry.get("applied") or entry["entry_id"] in reverted:
                 continue
-            if entry.get("tool") == "revert_change":
+            if entry.get("tool") == "revert_change" and not (
+                isinstance(entry.get("inverse"), dict) and entry["inverse"].get("revert_row")
+            ):
+                # Written before revert rows recorded what they replaced: its
+                # inverse is the ORIGINAL's, so the live comparison would lie.
+                unchecked.append({**summary, "reason": "a revert written before reverts recorded their own values"})
                 continue
             verification = entry.get("verification") or {}
             if (verification.get("review") or {}).get("state") == "pending":

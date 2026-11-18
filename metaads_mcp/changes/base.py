@@ -291,12 +291,37 @@ class ChangeKind:
         state the account already had. Kinds whose original projected 0 but
         whose revert resumes delivery (undoing a pause) override this.
         """
+        inverse = entry.get("inverse") or {}
+        if isinstance(inverse, dict) and inverse.get("revert_row") and inverse.get("undoes_projected") is not None:
+            # Reverting a REVERT re-applies the original change: it costs what
+            # the original projected, not the inverse of the revert's own.
+            try:
+                again = Decimal(str(inverse["undoes_projected"]))
+            except (InvalidOperation, ValueError):
+                again = Decimal("0")
+            again = max(again, Decimal("0"))
+            return again, again > 0
         try:
             original = Decimal(str(entry.get("projected_daily_spend_delta") or "0"))
         except (InvalidOperation, ValueError):
             original = Decimal("0")
         restored = max(-original, Decimal("0"))
         return restored, restored > 0
+
+    def revert_row_inverse(self, ctx, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """What the row a revert of ``entry`` writes keeps as ITS inverse.
+
+        It must hold the value the revert REPLACES -- ``entry``'s after, which
+        is live now (the staleness check just said so) -- so that reverting
+        the revert re-applies ``entry``'s change. Copying ``entry``'s own
+        inverse instead made a revert of a revert re-send what was already
+        live: a no-op the ledger recorded as applied.
+
+        None (the default) records that the revert row cannot be reverted, and
+        reverting it is refused with a pointer to the preview tools. Called
+        before the revert is sent.
+        """
+        return None
 
     def current_for_entry(self, ctx, entry: dict[str, Any]) -> str | None:
         """Today's value for a ledger entry's field, as the entry stored it.

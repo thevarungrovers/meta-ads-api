@@ -439,6 +439,17 @@ class AdSetTargeting(NodeFieldKind):
         shown = fingerprint(spec)
         return shown if shown != entry["after"] else f"{shown} (changed since)"
 
+    def revert_row_inverse(self, ctx, entry):
+        # The revert replaces the dimensions this entry owns with their
+        # previous values; a revert of the revert puts back what is there now.
+        touched, previous, _ = self._owned(entry)
+        live = self._spec(ctx, entry["entity_id"])
+        return {
+            "touched": touched,
+            "previous": {"targeting": {k: live[k] for k in touched if k in live}},
+            "sent": {k: previous[k] for k in touched if k in previous},
+        }
+
     def inverse(self, ctx, entry):
         touched, previous, _ = self._owned(entry)
         if not previous and not touched:

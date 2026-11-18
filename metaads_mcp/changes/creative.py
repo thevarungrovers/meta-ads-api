@@ -285,6 +285,15 @@ class UpdateAdCopy(_CreativeKind):
         live = creative_id_of(ads.find(ctx.client, ad_id=entry["entity_id"]))
         return entry["after"] if live == new else f"creative {live}"
 
+    def revert_row_inverse(self, ctx, entry: dict[str, Any]) -> dict[str, Any] | None:
+        # The revert points the ad back at the previous creative, replacing
+        # the new one: a revert of THAT points it at the new one again.
+        inverse = entry.get("inverse") or {}
+        if not (inverse.get("previous_creative_id") and inverse.get("new_creative_id")):
+            return None
+        return {"previous_creative_id": inverse["new_creative_id"],
+                "new_creative_id": inverse["previous_creative_id"]}
+
     def inverse(self, ctx, entry: dict[str, Any]):
         previous = (entry.get("inverse") or {}).get("previous_creative_id")
         if not previous:
