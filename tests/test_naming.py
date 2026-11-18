@@ -334,3 +334,24 @@ def test_a_copy_base_never_keeps_a_full_prefix(identity, prefix, source):
     parsed = parse(stamped.final)
     assert parsed is None or (parsed.owner, parsed.agent) == (identity.owner, identity.agent)
 
+# --- the ledger never overrides a live name carrying another full prefix --------
+
+
+@pytest.mark.parametrize("identity", [BOTH, OWNER_ONLY, AGENT_ONLY, NEITHER],
+                         ids=["both", "owner-only", "agent-only", "neither"])
+@pytest.mark.parametrize("current", ["AB-sam-launch", "CD-bot-launch", "AB-cli-launch"])
+def test_a_ledger_owned_entity_named_with_another_full_prefix_is_not_renamed(identity, current):
+    """After .env changes AB-sam -> AB-max, the ledger still says "ours", but
+    the live name says another agent: the name wins, and the rename is refused."""
+    with pytest.raises(NameRefused) as caught:
+        rename(identity, current, "autumn", entity_type="campaign", ledger_owned=True)
+    assert current.rsplit("-", 1)[0] + "-" in str(caught.value)
+
+
+def test_a_ledger_owned_entity_with_our_prefix_or_none_is_still_renamed():
+    assert rename(BOTH, "AB-max-launch", "autumn", entity_type="campaign",
+                  ledger_owned=True).final == "AB-max-autumn"
+    assert rename(BOTH, "launch", "autumn", entity_type="campaign",
+                  ledger_owned=True).final == "AB-max-autumn"
+    assert rename(NEITHER, "launch", "autumn", entity_type="campaign",
+                  ledger_owned=True).final == "autumn"

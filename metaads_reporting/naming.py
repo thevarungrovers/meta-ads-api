@@ -445,9 +445,14 @@ def rename(identity: Identity, current: str, requested: str, *, entity_type: str
     removed in Ads Manager); only the base can change.
     """
     _require_valid(identity)
-    ours = identity.owns(current) or ledger_owned
+    parsed = parse(current)
+    # The ledger vouches for an entity this checkout created, but never over
+    # a live name that parses as a DIFFERENT full prefix (another agent's,
+    # the CLI's, or this checkout's before .env changed AB-sam -> AB-max):
+    # renaming it would rewrite someone else's attribution.
+    foreign = parsed is not None and (parsed.owner, parsed.agent) != (identity.owner, identity.agent)
+    ours = identity.owns(current) or (ledger_owned and not foreign)
     if not ours:
-        parsed = parse(current)
         if parsed is not None:
             raise NameRefused(
                 f"this {entity_type} is named with {parsed.prefix}, "
