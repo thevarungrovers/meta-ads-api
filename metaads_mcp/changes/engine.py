@@ -39,7 +39,13 @@ from typing import Annotated, Any, Callable
 from pydantic import Field
 
 from metaads_mcp import ledger
-from metaads_mcp.changes.base import PREVIEW_SAFE, ChangeKind, LedgerItem, Proposal
+from metaads_mcp.changes.base import (
+    PREVIEW_SAFE,
+    ChangeKind,
+    LedgerItem,
+    Proposal,
+    entity_projection,
+)
 from metaads_mcp.guardrails import (
     Check,
     any_failed,
@@ -135,9 +141,13 @@ class Engine:
         ctx = self.ctx
         proposal: Proposal = kind.propose(ctx, **args)
         items = proposal.ledger_items()
-        if proposal.tightens:
-            for item in items:
-                item.inverse = {**(item.inverse or {}), "tightens": True}
+        for item in items:
+            # The projection in the ENTITY's currency: the row's own
+            # projected_daily_spend_delta is the cap-currency figure, and a
+            # revert works from this one so it is converted exactly once.
+            item.inverse = {**(item.inverse or {}), "projected_entity": str(proposal.projected)}
+            if proposal.tightens:
+                item.inverse["tightens"] = True
 
         # The ENTITY's account, not the default compared with itself: one
         # token routinely reaches several accounts, and before this any
@@ -647,8 +657,11 @@ class Engine:
         # What the revert REPLACES, read before it is sent: the revert row's
         # own inverse, so reverting the revert re-applies this entry.
         row_inverse = kind.revert_row_inverse(ctx, entry)
-        projected, _ = kind.revert_projection(ctx, entry)
-        projected = self._revert_in_cap_currency(entry, max(projected, Decimal("0")))
+        # In the ENTITY's currency (every revert_projection is), converted
+        # to the cap currency here and nowhere else.
+        own, _ = kind.revert_projection(ctx, entry)
+        own = max(own, Decimal("0"))
+        projected = self._revert_in_cap_currency(entry, own)
         return {
             "entry": entry,
             "kind": kind,
@@ -656,7 +669,8 @@ class Engine:
             "reduces": (projected == 0 and not self._tightening(entry)
                         and kind.revert_reduces_spend(ctx, entry)),
             "plan": kind.inverse(ctx, entry),
-            "item": self._inverse_item(entry, row_inverse),
+            "item": self._inverse_item(entry, row_inverse,
+                                       undoes=entity_projection(ctx, entry), projected=own),
         }
 
     def _revert_in_cap_currency(self, entry: dict[str, Any], projected: Decimal) -> Decimal:
@@ -814,12 +828,18 @@ class Engine:
             )
 
     @staticmethod
-    def _inverse_item(entry: dict[str, Any], row_inverse: dict[str, Any] | None) -> LedgerItem:
+    def _inverse_item(entry: dict[str, Any], row_inverse: dict[str, Any] | None, *,
+                      undoes: Decimal, projected: Decimal) -> LedgerItem:
         # NOT a copy of the entry's inverse: that holds the value the revert
         # puts back, and a revert of this row must put back what it replaced.
+        # ``undoes_projected`` is the cap-currency figure (its sign is what
+        # older code reads); the two *_entity keys are in the entity's
+        # currency, which is what a later revert projects from.
         inverse: dict[str, Any] = {
             "revert_row": True,
             "undoes_projected": str(entry.get("projected_daily_spend_delta") or "0"),
+            "undoes_projected_entity": str(undoes),
+            "projected_entity": str(projected),
         }
         if row_inverse is None:
             inverse["not_revertible"] = True

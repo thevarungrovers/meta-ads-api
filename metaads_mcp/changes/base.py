@@ -123,6 +123,54 @@ def amount_from_stored(stored: str) -> Decimal:
         ) from exc
 
 
+def _decimal(raw: Any) -> Decimal:
+    try:
+        return Decimal(str(raw if raw is not None else "0"))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def from_cap_currency(ctx, entry: dict[str, Any], amount: Decimal) -> Decimal:
+    """A cap-currency figure off a LEGACY row, back in the entity's currency.
+
+    Only rows written before ``projected_entity`` was recorded need this. With
+    no rate configured the row was never converted (it was blocked or already
+    in the cap currency), so it is returned as is.
+    """
+    from metaads_mcp.guardrails import cap_currency
+
+    currency = (ctx.currency(str(entry.get("account_id") or "") or None) or "").upper()
+    if not currency or currency == cap_currency(ctx.limits):
+        return amount
+    rate = dict(ctx.limits.currency_rates).get(currency)
+    if not rate:
+        return amount
+    return amount / rate
+
+
+def entity_projection(ctx, entry: dict[str, Any]) -> Decimal:
+    """What ``entry`` projected, in its ENTITY's currency.
+
+    The row's ``projected_daily_spend_delta`` is in the CAP currency (it feeds
+    the daily total); the entity's own figure is kept in the inverse as
+    ``projected_entity``. Reading the cap figure as the entity's and
+    converting it again was a double conversion.
+    """
+    inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+    if inverse.get("projected_entity") is not None:
+        return _decimal(inverse["projected_entity"])
+    return from_cap_currency(ctx, entry, _decimal(entry.get("projected_daily_spend_delta")))
+
+
+def undone_projection(ctx, entry: dict[str, Any]) -> Decimal:
+    """For a revert row: what the change it undid projected, in the entity's
+    currency -- what reverting the revert re-applies."""
+    inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+    if inverse.get("undoes_projected_entity") is not None:
+        return _decimal(inverse["undoes_projected_entity"])
+    return from_cap_currency(ctx, entry, _decimal(inverse.get("undoes_projected")))
+
+
 @dataclass
 class LedgerItem:
     """One row in the ledger: one entity, one field, one before/after.
@@ -323,7 +371,9 @@ class ChangeKind:
     # -- revert ----------------------------------------------------------
 
     def revert_projection(self, ctx, entry: dict[str, Any]) -> tuple[Decimal, bool]:
-        """(projected added daily spend, is_activation) for reverting ``entry``.
+        """(projected added daily spend, is_activation) for reverting ``entry``,
+        in the ENTITY's currency -- the engine converts it to the cap currency,
+        once.
 
         A revert is not free: reverting a budget CUT puts spend back. The
         default is the inverse of what the original change projected -- a cut
@@ -339,26 +389,17 @@ class ChangeKind:
             # its unused budget again. Counted like an activation.
             from metaads_mcp.changes.common import unused_headroom
 
-            try:
-                original = Decimal(str(entry.get("projected_daily_spend_delta") or "0"))
-            except (InvalidOperation, ValueError):
-                original = Decimal("0")
+            original = entity_projection(ctx, entry)
             lifted = max(unused_headroom(ctx, entry), -original, Decimal("0"))
             return lifted, lifted > 0
-        if isinstance(inverse, dict) and inverse.get("revert_row") and inverse.get("undoes_projected") is not None:
+        if isinstance(inverse, dict) and inverse.get("revert_row") and (
+                inverse.get("undoes_projected_entity") is not None
+                or inverse.get("undoes_projected") is not None):
             # Reverting a REVERT re-applies the original change: it costs what
             # the original projected, not the inverse of the revert's own.
-            try:
-                again = Decimal(str(inverse["undoes_projected"]))
-            except (InvalidOperation, ValueError):
-                again = Decimal("0")
-            again = max(again, Decimal("0"))
+            again = max(undone_projection(ctx, entry), Decimal("0"))
             return again, again > 0
-        try:
-            original = Decimal(str(entry.get("projected_daily_spend_delta") or "0"))
-        except (InvalidOperation, ValueError):
-            original = Decimal("0")
-        restored = max(-original, Decimal("0"))
+        restored = max(-entity_projection(ctx, entry), Decimal("0"))
         return restored, restored > 0
 
     def revert_reduces_spend(self, ctx, entry: dict[str, Any]) -> bool:
