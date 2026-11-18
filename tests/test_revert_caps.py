@@ -85,3 +85,49 @@ def test_a_spend_raising_revert_still_answers_to_the_caps(monkeypatch):
         tools["revert_change"](entry_id=result.entry_id)
     assert "session apply limit" in str(caught.value)
     assert s.objects[CAMPAIGN_ID]["status"] == "PAUSED"
+
+
+# --- a revert of a TIGHTENING change is never "reducing" -----------------------
+
+
+def test_a_mixed_edit_with_no_headroom_left_still_answers_to_the_caps(monkeypatch):
+    """A change that both added spend and tightened something (a targeting
+    edit that widens one dimension and narrows another): with 0 headroom at
+    revert time its revert projects 0, which used to read as 'can only lower
+    spend' and skipped the apply-count caps."""
+    from decimal import Decimal
+
+    from metaads_mcp import ledger
+
+    s = make_sim()
+    tools, _ = rig(monkeypatch, s, max_applies_per_session=1)
+    preview = tools["preview_campaign_daily_budget"](campaign_id=CAMPAIGN_ID, new_daily_budget="300.00")
+    result = tools["apply_campaign_daily_budget"](preview_token=preview.preview_token)
+    ledger.amend(result.entry_id, inverse_extra={"tightens": True})
+    monkeypatch.setattr("metaads_mcp.changes.common.unused_headroom", lambda ctx, entry: Decimal("0"))
+    with pytest.raises(Exception) as caught:
+        tools["revert_change"](entry_id=result.entry_id)
+    assert "session apply limit" in str(caught.value)
+
+
+def test_a_revert_of_a_revert_of_a_tightening_answers_to_the_caps(monkeypatch):
+    from tests.test_kinds_bidding import abo_sim
+
+    s = abo_sim(bid_strategy="LOWEST_COST_WITH_MIN_ROAS", bid_constraints={"roas_average_floor": 20000})
+    tools, _ = rig(monkeypatch, s, max_applies_per_session=2)
+    preview = tools["preview_ad_set_roas_floor"](ad_set_id=ADSET_ID, new_roas_floor="2.4")
+    result = tools["apply_ad_set_roas_floor"](preview_token=preview.preview_token)
+    undo = tools["revert_change"](entry_id=result.entry_id)
+    with pytest.raises(Exception) as caught:
+        tools["revert_change"](entry_id=undo.entry_id)
+    assert "session apply limit" in str(caught.value)
+
+
+def test_a_revert_of_a_revert_with_an_original_projection_of_zero_is_not_reducing():
+    from metaads_mcp.changes.base import ChangeKind
+
+    row = {"projected_daily_spend_delta": "12.00", "tool": "revert_change",
+           "inverse": {"revert_row": True, "undoes_projected": "0"}}
+    assert ChangeKind().revert_reduces_spend(None, row) is False
+    cut = {**row, "inverse": {"revert_row": True, "undoes_projected": "-5.00"}}
+    assert ChangeKind().revert_reduces_spend(None, cut) is True

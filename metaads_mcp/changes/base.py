@@ -346,7 +346,18 @@ class ChangeKind:
         switch still applies). By default: the original projected added
         spend, so undoing it takes that spend away. Kinds whose undo is a
         pause say so themselves.
+
+        A revert ROW is different: reverting it re-applies the original
+        change, so it lowers spend only when the original did (projected
+        below 0). An original projection of 0 proves nothing -- it may have
+        been a tightening, or a mix -- so that is not reducing.
         """
+        inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+        if inverse.get("revert_row"):
+            try:
+                return Decimal(str(inverse.get("undoes_projected") or "0")) < 0
+            except (InvalidOperation, ValueError):
+                return False
         try:
             return Decimal(str(entry.get("projected_daily_spend_delta") or "0")) > 0
         except (InvalidOperation, ValueError):
