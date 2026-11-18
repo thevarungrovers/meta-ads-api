@@ -276,6 +276,10 @@ class ChangeKind:
         """For ``verifies_ad``: the ad id to re-read after apply."""
         return None
 
+    def verify_creative_target(self, payload: dict[str, Any], result, created: list[str]) -> str | None:
+        """For ``verifies_ad`` kinds that make a creative but no ad."""
+        return None
+
     # -- revert ----------------------------------------------------------
 
     def revert_projection(self, ctx, entry: dict[str, Any]) -> tuple[Decimal, bool]:

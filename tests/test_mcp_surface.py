@@ -82,6 +82,9 @@ PREVIEW_TOOLS = frozenset(
         "preview_replace_ad_creative",
         "preview_ad_set_optimization_goal",
         "preview_ad_set_attribution_spec",
+        "preview_create_ad",
+        "preview_create_creative",
+        "preview_multi_ad_status",
     }
 )
 
@@ -114,6 +117,9 @@ APPLY_TOOLS = frozenset(
         "apply_replace_ad_creative",
         "apply_ad_set_optimization_goal",
         "apply_ad_set_attribution_spec",
+        "apply_create_ad",
+        "apply_create_creative",
+        "apply_multi_ad_status",
     }
 )
 
@@ -237,6 +243,9 @@ SPENDS = {
     "apply_replace_ad_creative",
     "apply_ad_set_optimization_goal",
     "apply_ad_set_attribution_spec",
+    "apply_create_ad",
+    "apply_create_creative",
+    "apply_multi_ad_status",
 }
 
 

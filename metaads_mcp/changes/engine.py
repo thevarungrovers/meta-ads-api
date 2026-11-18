@@ -284,9 +284,14 @@ class Engine:
             from metaads_mcp import verify
 
             ad_id = kind.verify_target(payload, result, created)
-            verification = verify.after_apply(
-                ctx, ad_id, kind.approved_for(ctx, payload, plan)
-            )
+            approved = kind.approved_for(ctx, payload, plan)
+            if ad_id:
+                verification = verify.after_apply(ctx, ad_id, approved)
+            else:
+                verification = verify.after_create_creative(
+                    ctx, kind.verify_creative_target(payload, result, created), approved,
+                    payload.get("adset_id"),
+                )
             ledger.set_verification(entry_ids[0], verify.for_ledger(verification))
 
         own = kind.verify_target(payload, result, created) or (
@@ -371,6 +376,8 @@ class Engine:
                 # attempt -- the first may have landed at Meta's end.
                 reverts=reverts[index] if reverts else None,
             )
+        if isinstance(plan, list):
+            return self._send_each(plan, entry_ids, batch_id, reverts)
         try:
             if kind is not None and payload is not None:
                 plan = kind.prepare_apply(ctx, plan, payload)
@@ -406,6 +413,36 @@ class Engine:
                 reverts=reverts[index] if reverts else None,
             )
         return result, created, entry_ids, batch_id, plan
+
+    def _send_each(self, plans: list, entry_ids: list[str], batch_id, reverts):
+        """A batch: one write per element, one outcome per row.
+
+        Meta's batch endpoint is not atomic and neither is this. A failure
+        stops the loop: rows already sent are recorded applied, the failing
+        one failed, the rest "not sent", and the error names which landed.
+        """
+        from metaads_reporting.write.client import MutationError
+
+        done: list[str] = []
+        result = None
+        for index, (plan, entry_id) in enumerate(zip(plans, entry_ids)):
+            try:
+                result, _ = self.ctx.send(plan, apply=True)
+                if not result.success:
+                    raise MutationError(f"Meta did not confirm: {result.response!r}")
+            except Exception as exc:
+                ledger.write_outcome(entry_id=entry_id, ok=False, error=str(exc))
+                for later in entry_ids[index + 1:]:
+                    ledger.write_outcome(entry_id=later, ok=False, error="not sent: an earlier element failed")
+                raise MutationError(
+                    f"{exc}\n\nBatch {batch_id}: {len(done)} of {len(plans)} applied before this "
+                    f"failed ({', '.join(done) or 'none'}); those are in the ledger and "
+                    "can be reverted one by one."
+                ) from exc
+            ledger.write_outcome(entry_id=entry_id, ok=True, resource_name=plan.node_id,
+                                 reverts=reverts[index] if reverts else None)
+            done.append(entry_id)
+        return result, [], entry_ids, batch_id, plans
 
     # -- revert ----------------------------------------------------------
 

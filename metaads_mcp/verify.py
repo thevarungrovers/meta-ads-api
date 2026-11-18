@@ -587,6 +587,30 @@ def after_apply(ctx, ad_id: str | None, approved: dict[str, Any]) -> dict[str, A
     }
 
 
+def after_create_creative(ctx, creative_id: str | None, approved: dict[str, Any],
+                          adset_id: str | None = None) -> dict[str, Any]:
+    """The after-apply check for a creative no ad uses yet: re-read and diff it,
+    and fetch its previews. There is no review state until an ad uses it."""
+    if not creative_id:
+        return {"passed": False, "error": "no creative id to verify", "checked_at": _now()}
+    try:
+        live = approved_from_spec(ctx.read.node(str(creative_id), CREATIVE_FIELDS))
+    except Exception as exc:  # noqa: BLE001
+        return {"creative_id": str(creative_id), "passed": False,
+                "error": f"could not re-read the creative: {str(exc).splitlines()[0]}",
+                "checked_at": _now()}
+    fields = diff_fields(approved or {}, live)
+    previews = fetch_previews(ctx, formats_for_ad_set(ctx, adset_id), creative_id=str(creative_id))
+    return {
+        "creative_id": str(creative_id),
+        "fields": fields,
+        "review": {"state": "not_reviewed", "note": "a creative is reviewed once an ad uses it"},
+        "previews": previews,
+        "passed": all(f["ok"] for f in fields),
+        "checked_at": _now(),
+    }
+
+
 def for_ledger(verification: dict[str, Any] | None) -> dict[str, Any] | None:
     """The verification without the signed preview URLs.
 

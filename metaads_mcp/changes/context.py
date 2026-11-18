@@ -91,6 +91,15 @@ class WriteContext:
             plan = build()
         except (MutationError, ValueError, LookupError) as exc:
             return Check("meta_validate_only", False, str(exc).strip())
+        if isinstance(plan, list):
+            for index, element in enumerate(plan):
+                try:
+                    self.send(element, apply=False)
+                except Exception as exc:  # noqa: BLE001 - reported on the line
+                    return Check("meta_validate_only", False,
+                                 f"element {index + 1} of {len(plan)}: {str(exc).strip()}")
+            return Check("meta_validate_only", True,
+                         f"Meta accepted all {len(plan)} elements (validate_only)")
         chained = getattr(plan, "requires", None) is not None
         first = plan.requires if chained else plan
         if PENDING_UPLOAD in json.dumps(getattr(first, "payload", {}), default=str):
