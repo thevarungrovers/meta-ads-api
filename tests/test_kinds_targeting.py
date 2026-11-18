@@ -410,3 +410,58 @@ def test_a_targeting_revert_that_did_not_land_is_not_recorded_as_applied(monkeyp
     assert "did not land" in str(caught.value)
     entry = ledger.entries()[-1]
     assert entry["tool"] == "revert_change" and not entry["applied"] and entry["error"]
+
+
+# --- widening the classifier did not see (reachable via saved_audience_id) -----
+
+from metaads_mcp.changes.targeting import reach_widening  # noqa: E402
+
+
+def test_adding_a_location_type_widens():
+    before = {"geo_locations": {"countries": ["CA"], "location_types": ["home"]}}
+    after = {"geo_locations": {"countries": ["CA"], "location_types": ["home", "travel_in"]}}
+    assert reach_widening(before, after)
+    assert not reach_widening(after, before)
+
+
+def test_dropping_location_types_reverts_to_the_wider_default():
+    before = {"geo_locations": {"countries": ["CA"], "location_types": ["home"]}}
+    after = {"geo_locations": {"countries": ["CA"]}}
+    assert reach_widening(before, after), "no location_types means home and recent"
+
+
+@pytest.mark.parametrize("setting", [{"age": 1}, {"gender": 1}, {"age": 1, "gender": 1}])
+def test_age_or_gender_expansion_widens(setting):
+    before = {**BASE, "targeting_automation": {"advantage_audience": 0}}
+    after = {**BASE, "targeting_automation": {"advantage_audience": 0, "individual_setting": setting}}
+    assert reach_widening(before, after)
+    assert fingerprint(before) != fingerprint(after)
+
+
+@pytest.mark.parametrize("key, places", [
+    ("country_groups", ["europe"]),
+    ("neighborhoods", [{"key": "N1"}]),
+    ("metro_areas", [{"key": "M1"}]),
+    ("places", [{"key": "P1", "radius": 1, "distance_unit": "kilometer"}]),
+    ("electoral_districts", [{"key": "E1"}]),
+    ("medium_geo_areas", [{"key": "G1"}]),
+])
+def test_every_geo_key_is_in_the_fingerprint_and_widens(key, places):
+    before = {**BASE}
+    after = {**BASE, "geo_locations": {**BASE["geo_locations"], key: places}}
+    assert fingerprint(before) != fingerprint(after), key
+    assert reach_widening(before, after), key
+
+
+def test_a_saved_audience_that_widens_only_by_location_type_fails_closed(monkeypatch):
+    s = sim()
+    s.objects[ADSET_ID]["targeting"] = {**BASE, "geo_locations": {"countries": ["CA"],
+                                                                  "location_types": ["home"]}}
+    s.objects["SAVED2"] = {"id": "SAVED2", "name": "Wider",
+                           "targeting": {**BASE, "geo_locations": {"countries": ["CA"],
+                                         "location_types": ["home", "travel_in"]},
+                                         "age_min": 30}}
+    s.canned["delivery_estimate"] = _broken("error")
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_ad_set_targeting"](ad_set_id=ADSET_ID, saved_audience_id="SAVED2")
+    assert failed(preview, "max_reach_change_pct"), preview.checks

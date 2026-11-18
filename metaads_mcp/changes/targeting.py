@@ -85,16 +85,17 @@ def fingerprint(spec: dict[str, Any] | None, *, where: bool = True) -> str:
     xgeo = spec.get("excluded_geo_locations") or {}
 
     def places(g):
+        # EVERY geo key (countries, regions, cities, zips, country_groups,
+        # neighborhoods, metro_areas, places, electoral_districts ...), so a
+        # change to any of them is a change. location_types is left out: Meta
+        # derives it on read (the widening check reads it instead).
         out = {}
-        if g.get("countries"):
-            out["countries"] = sorted(g["countries"])
-        for key in ("regions", "cities", "zips", "geo_markets", "custom_locations"):
-            if g.get(key):
-                out[key] = sorted(
-                    f"{p.get('key') or p.get('name') or p.get('latitude')}"
-                    + (f"@{p.get('radius')}{p.get('distance_unit', '')}" if p.get("radius") else "")
-                    for p in g[key]
-                )
+        for key in sorted(g):
+            if key == "location_types" or g[key] in (None, "", [], {}):
+                continue
+            items = g[key]
+            out[key] = (sorted(_place_ident(p) for p in items) if isinstance(items, list)
+                        else canonical(items))
         return out
 
     flex = {}
@@ -112,6 +113,8 @@ def fingerprint(spec: dict[str, Any] | None, *, where: bool = True) -> str:
         "custom_audiences": _ids(spec.get("custom_audiences")),
         "excluded_custom_audiences": _ids(spec.get("excluded_custom_audiences")),
         "advantage_audience": (spec.get("targeting_automation") or {}).get("advantage_audience"),
+        "expansion": {k: v for k, v in sorted(
+            ((spec.get("targeting_automation") or {}).get("individual_setting") or {}).items())},
     }
     if where:
         out["placements"] = {
@@ -181,7 +184,25 @@ def placement_widening(before: dict[str, Any], after: dict[str, Any]) -> list[st
     return reasons
 
 
+def _place_ident(p) -> str:
+    if isinstance(p, dict):
+        ident = p.get("key") or p.get("name") or f"{p.get('latitude')},{p.get('longitude')}"
+        radius = f"@{p.get('radius')}{p.get('distance_unit', '')}" if p.get("radius") else ""
+        return f"{ident}{radius}"
+    return str(p)
+
+
+#: What Meta uses when geo_locations names places but no location_types.
+DEFAULT_LOCATION_TYPES = ("home", "recent")
+
+
 def _place_tokens(spec: dict[str, Any], key: str) -> set[str]:
+    """Every place in ``spec[key]``, one token each, plus its location types.
+
+    The location types count as places: adding ``travel_in`` (or dropping the
+    list, which means Meta's wider default) reaches people the old spec did
+    not.
+    """
     geo = spec.get(key) or {}
     out = set()
     for kind, items in geo.items():
@@ -193,7 +214,21 @@ def _place_tokens(spec: dict[str, Any], key: str) -> set[str]:
                 out.add(f"{kind}:{ident}@{p.get('radius')}{p.get('distance_unit', '')}")
             else:
                 out.add(f"{kind}:{p}")
+    if out:
+        types = geo.get("location_types") or DEFAULT_LOCATION_TYPES
+        out |= {f"location_types:{t}" for t in types}
     return out
+
+
+def _expansion_widening(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """Advantage+ age/gender expansion (targeting_automation.individual_setting)
+    turned on for a dimension: Meta may then go past the ages or genders set."""
+    def on(spec):
+        setting = (spec.get("targeting_automation") or {}).get("individual_setting") or {}
+        return {k for k, v in setting.items() if str(v) == "1"}
+
+    added = sorted(on(after) - on(before))
+    return [f"{k} expansion turned on" for k in added]
 
 
 def _detailed_tokens(block: dict[str, Any] | None) -> set[str]:
@@ -236,6 +271,7 @@ def reach_widening(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     if ((after.get("targeting_automation") or {}).get("advantage_audience") == 1
             and (before.get("targeting_automation") or {}).get("advantage_audience") != 1):
         reasons.append("Advantage+ audience turned on")
+    reasons.extend(_expansion_widening(before, after))
     reasons.extend(placement_widening(before, after))
     others = sorted(k for k in set(before) | set(after) if k not in FINGERPRINTED
                     and canonical(before.get(k)) != canonical(after.get(k)))
