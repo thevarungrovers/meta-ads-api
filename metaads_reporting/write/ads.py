@@ -385,11 +385,7 @@ def plan_duplicate_ad(
     warnings.append(
         f"the original ad {source.get('id')} is untouched and keeps delivering"
     )
-    if creative.shape == _creatives.ASSET_FEED:
-        warnings.append(
-            f"this is a multi-locale creative ({len(before.get('headline') or [])} "
-            f"locales); a single value is applied to all of them"
-        )
+    warnings.extend(_locale_warnings(creative, edits, before))
 
     return _PlannedChange(
         action="create",
@@ -407,6 +403,23 @@ def plan_duplicate_ad(
         edge=EDGE,
         requires=creative_plan,
     )
+
+
+def _locale_warnings(creative, edits: dict[str, Any], before: dict[str, Any]) -> list[str]:
+    """A single string on a multi-locale feed lands in every language."""
+    if creative.shape != _creatives.ASSET_FEED:
+        return []
+    out = []
+    for label, value in edits.items():
+        current = before.get(label)
+        count = len(current) if isinstance(current, list) else 0
+        if isinstance(value, str) and count > 1:
+            out.append(
+                f"this ad has {count} locales and the single {label} you gave goes "
+                f"into every one of them; pass a list of {count}, one per locale "
+                f"in the order shown in `before`, to keep each language"
+            )
+    return out
 
 
 def plan_update_copy(
@@ -460,6 +473,7 @@ def plan_update_copy(
         )
 
     warnings = list(media_notes)
+    warnings.extend(_locale_warnings(creative, edits, before))
     proof = _creatives.social_proof(client, creative)
     engagement = sum(
         int(proof.get(k) or 0) for k in ("likes", "comments", "shares")

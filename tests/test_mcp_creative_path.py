@@ -392,3 +392,29 @@ def test_a_creative_change_lands_in_the_ledger(tools):
     assert rows[-1]["entry_id"] == result.entry_id
     assert rows[-1]["applied"] is True
     assert rows[-1]["field"] == "creative"
+
+
+def _bilingual(sim):
+    from tests.test_creatives import feed_creative
+
+    raw = dict(feed_creative().raw)
+    raw.update(id=CREATIVE_ID, object_story_spec={"page_id": "PAGE", "instagram_user_id": "IG"})
+    sim.objects[CREATIVE_ID] = raw
+
+
+def test_update_copy_warns_one_string_lands_in_every_language(monkeypatch):
+    # Live: a bilingual ad, one headline given -- both languages would have
+    # shown the English text, and only duplicate_ad said so.
+    sim = make_sim()
+    _bilingual(sim)
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    preview = registrar.tools["preview_update_ad_copy"](ad_id=AD_ID, headline="One title")
+    assert any("2 locales" in w and "every one of them" in w for w in preview.warnings)
+
+
+def test_a_list_per_language_raises_no_such_warning(monkeypatch):
+    sim = make_sim()
+    _bilingual(sim)
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    preview = registrar.tools["preview_update_ad_copy"](ad_id=AD_ID, headline=["Titre", "Title"])
+    assert not any("locales" in w for w in preview.warnings)
