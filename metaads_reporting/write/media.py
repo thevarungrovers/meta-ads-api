@@ -21,6 +21,7 @@ pair, and the upload happens at APPLY time because it is a write.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -185,6 +186,34 @@ def upload_image(
     raise MutationError(
         f"Meta accepted the upload but returned no image hash: {response!r}"
     )
+
+
+def image_md5(image: LocalImage) -> str:
+    """The hash Meta will give this file: the md5 of its bytes.
+
+    Known before uploading, so a preview can name the hash the apply will
+    return -- and see whether the library already holds the same file.
+    """
+    digest = hashlib.md5()  # noqa: S324 - Meta's identifier, not security
+    with image.path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class ImageUpload:
+    """A plan that puts one local file in the image library.
+
+    Not a JSON create: the file goes up as multipart, through
+    :func:`upload_image`, which logs its name and size rather than its bytes.
+    ``ctx.send`` recognises it; nothing goes out unless ``apply`` is True.
+    """
+
+    image: LocalImage
+    label: str
+    requires: None = None
+    entity_type: str = "adimage"
 
 
 def image_dimensions(head: bytes) -> tuple[int, int] | None:

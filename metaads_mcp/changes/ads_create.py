@@ -19,7 +19,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from metaads_mcp.changes.base import APPLY_SPENDS, NOTHING, ChangeKind, LedgerItem, Proposal
+from metaads_mcp.changes.base import APPLY_REVERSIBLE, APPLY_SPENDS, NOTHING, ChangeKind, LedgerItem, Proposal
 from metaads_mcp.changes.common import ad_activation_bound, wanted_status
 from metaads_mcp.changes.context import PENDING_UPLOAD
 from metaads_mcp.changes.delivery import AdStatus
@@ -390,6 +390,71 @@ class CreateCreative(ChangeKind):
         )
 
 
+class UploadImage(ChangeKind):
+    name = "upload_image"
+    adds_no_spend = True
+    preview_title = "Preview putting a local image in the ad account's image library"
+    apply_title = "Upload the image the preview described (library only; shows nowhere)"
+    apply_annotations = APPLY_REVERSIBLE
+    revertible = False
+    # There is no validate_only for an upload: the preview sends nothing.
+    validate_in_preview = False
+
+    def propose(
+        self,
+        ctx,
+        image_path: Annotated[str, Field(description="Local image file (jpg, png, gif, bmp, tiff, webp)")],
+    ) -> Proposal:
+        """Show putting a local image in the image library. Writes nothing.
+
+        The library is storage: an uploaded image is in no ad, shows nowhere
+        and spends nothing until a creative uses it. The preview names the
+        image_hash the upload will return (the md5 of the file), so the
+        creative that uses it can be previewed straight after -- with Meta's
+        validate_only and real previews, which a pending upload skips. Use it
+        for each language's image of a multi-language creative. A file the
+        library already holds is refused, with its existing hash.
+        """
+        image = media.inspect_image(image_path)
+        image_hash = media.image_md5(image)
+        answer = ctx.read.get(f"{account_path(ctx.read.resolve_account_id())}/{media.IMAGE_EDGE}",
+                              hashes=json.dumps([image_hash]), fields="hash,name")
+        existing = [r for r in (answer or {}).get("data") or [] if r.get("hash") == image_hash]
+        if existing:
+            raise ValueError(f"{image.path.name} is already in the library as "
+                             f"{existing[0].get('name')!r}: use image_hash {image_hash}.")
+        size = media.local_image_dimensions(image.path)
+        shape = f"{size[0]}x{size[1]}, " if size else ""
+        return Proposal(
+            entity_type="image", entity_id="(new)", entity_name=image.path.name,
+            path=f"account {ctx.default_account} > image library", field_name="uploaded",
+            before=NOTHING,
+            after=f"{image.path.name} ({shape}{image.describe()['size_kb']}KB {image.image_type}) "
+                  f"-> image_hash {image_hash}",
+            checks=[], projected=Decimal("0"),
+            payload={"image_path": str(image.path), "image_hash": image_hash},
+            warnings=["library only: the image shows nowhere until a creative uses it",
+                      *image.warnings],
+        )
+
+    def current(self, ctx, payload):
+        return NOTHING
+
+    def build(self, ctx, payload):
+        image = media.inspect_image(payload["image_path"])
+        if media.image_md5(image) != payload["image_hash"]:
+            raise ValueError(f"{image.path.name} changed on disk since the preview; take a fresh one.")
+        return media.ImageUpload(image=image, label=image.path.name)
+
+    def inverse_for(self, payload, result, created):
+        return {"image_hash": result.node_id}
+
+    def inverse(self, ctx, entry):
+        raise ValueError(
+            f"Entry {entry['entry_id']} uploaded an image to the library. It shows "
+            "nowhere and costs nothing, and nothing is deleted here.")
+
+
 class MultiAdStatus(AdStatus):
     name = "multi_ad_status"
     preview_title = "Preview pausing or activating several ads in one ad set"
@@ -461,4 +526,4 @@ class MultiAdStatus(AdStatus):
                 for a in payload["ad_ids"]]
 
 
-ADS_KINDS = (CreateAd, CreateCreative, MultiAdStatus)
+ADS_KINDS = (CreateAd, CreateCreative, UploadImage, MultiAdStatus)

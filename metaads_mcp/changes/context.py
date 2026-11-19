@@ -165,6 +165,17 @@ class WriteContext:
 
     def send(self, plan, *, apply: bool):
         """(result, created ids). A plan with ``requires`` goes as a chain."""
+        from metaads_reporting.write import media
+        from metaads_reporting.write.client import MutationResult
+
+        if isinstance(plan, media.ImageUpload):
+            # A file, not a JSON body. With apply False nothing is sent at all:
+            # there is no validate_only for an upload.
+            if not apply:
+                return MutationResult(validated_only=True, response={"success": True}), []
+            image_hash = media.upload_image(self.client, plan.image, apply=True)
+            return MutationResult(validated_only=False, node_id=image_hash,
+                                  response={"success": True, "hash": image_hash}), [image_hash]
         if getattr(plan, "requires", None) is not None:
             return self._execute_chain(self.client, plan, apply=apply)
         return self._execute(self.client, plan, apply=apply), []

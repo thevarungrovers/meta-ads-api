@@ -127,7 +127,7 @@ treating the gap as a bug.
 
 ## The tools
 
-106 in total: 35 read, 35 `preview_*`/`apply_*` pairs, plus `revert_change`.
+108 in total: 35 read, 36 `preview_*`/`apply_*` pairs, plus `revert_change`.
 
 ### Read — safe, call freely
 
@@ -166,6 +166,7 @@ treating the gap as a bug.
 | `create_audience` | Website, engagement (Page/IG), video viewers, lead form, app, lookalike (1-10%), saved |
 | `duplicate_ad` / `update_ad_copy` | Copy or media: a new PAUSED ad, or the same ad repointed |
 | `url_tags` / `advantage_creative_options` / `attach_lead_form` / `replace_ad_creative` | Creative-level changes, each a new creative + repoint |
+| `upload_image` | A local image into the library (shows nowhere); returns the image_hash to use, e.g. one per language |
 | `create_creative` / `create_ad` | A new creative (unattached; one language, or `locales` for a multi-language ad with copy, link and media per language), a new PAUSED ad. url_tags default to the campaign's own |
 | `create_campaign` / `create_ad_set` / `duplicate_ad_set` / `duplicate_campaign` | New or copied, always PAUSED |
 | `create_ab_test` | A split test between PAUSED cells |

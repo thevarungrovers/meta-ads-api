@@ -253,3 +253,53 @@ def test_create_creative_refuses_a_malformed_multi_language_creative(monkeypatch
     with pytest.raises(Exception) as caught:
         tools["preview_create_creative"](name="Spring", locales=[FR, en], **change.get("top", {}))
     assert message in str(caught.value)
+
+
+def _image(tmp_path, name="fr.png"):
+    path = tmp_path / name
+    path.write_bytes(png_bytes(1080, 1080))
+    return path
+
+
+def test_upload_image_names_the_hash_and_uploads_only_at_apply(monkeypatch, tmp_path):
+    import hashlib
+
+    s = sim()
+    path = _image(tmp_path)
+    tools, state = rig(monkeypatch, s)
+    preview = tools["preview_upload_image"](image_path=str(path))
+    md5 = hashlib.md5(path.read_bytes()).hexdigest()
+    assert not preview.blocked and md5 in preview.after and "1080x1080" in preview.after
+    assert not s.created and not s.validated, "a preview sends nothing"
+    result = tools["apply_upload_image"](preview_token=preview.preview_token)
+    assert [c["edge"] for c in s.created] == ["adimages"]
+    assert result.entity_id == "hash1" and state.counters.applies == 1
+    with pytest.raises(Exception) as caught:
+        tools["revert_change"](entry_id=result.entry_id)
+    assert "nothing is deleted" in str(caught.value)
+
+
+def test_upload_image_refuses_a_file_the_library_already_holds(monkeypatch, tmp_path):
+    import hashlib
+
+    s = sim()
+    path = _image(tmp_path)
+    md5 = hashlib.md5(path.read_bytes()).hexdigest()
+    s.canned["act_1234567890/adimages"] = lambda params: {
+        "data": [{"hash": md5, "name": "fr.png"}] if md5 in params.get("hashes", "") else []}
+    tools, _ = rig(monkeypatch, s)
+    with pytest.raises(Exception) as caught:
+        tools["preview_upload_image"](image_path=str(path))
+    assert f"use image_hash {md5}" in str(caught.value)
+
+
+def test_upload_image_refuses_a_file_changed_since_the_preview(monkeypatch, tmp_path):
+    s = sim()
+    path = _image(tmp_path)
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_upload_image"](image_path=str(path))
+    path.write_bytes(png_bytes(1200, 628))
+    with pytest.raises(Exception) as caught:
+        tools["apply_upload_image"](preview_token=preview.preview_token)
+    assert "changed on disk" in str(caught.value)
+    assert not s.created
