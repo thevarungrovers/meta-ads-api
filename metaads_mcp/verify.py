@@ -407,6 +407,12 @@ def cta_check(cta: Any, objective: str | None) -> Check:
 BOT_WALL_STATUSES = (401, 403, 429)
 
 
+def link_checks(link: Any, url_tags: str | None) -> list[Check]:
+    """One destination check per distinct link: a multi-locale ad has one per language."""
+    links = list(dict.fromkeys(_texts(link)))
+    return [link_check(one, url_tags) for one in links] or [link_check(None, url_tags)]
+
+
 def link_check(link: Any, url_tags: str | None) -> Check:
     links = _texts(link)
     if not links:
@@ -504,7 +510,7 @@ def before_apply(ctx, target: dict[str, Any]) -> tuple[list[Check], list[dict[st
         dims, source = _image_dimensions(ctx, fields, target.get("image_path"))
         checks.extend(ratio_checks(dims, formats, source))
     checks.append(cta_check(fields.get("call_to_action"), _objective(ctx, adset_id)))
-    checks.append(link_check(fields.get("link"), fields.get("url_tags")))
+    checks.extend(link_checks(fields.get("link"), fields.get("url_tags")))
 
     previews = fetch_previews(
         ctx, formats,
