@@ -948,8 +948,11 @@ class AdSetAttributionSpec(_AdSetKind):
         spec = [{"event_type": "CLICK_THROUGH", "window_days": int(click_days)}]
         if view_days:
             spec.append({"event_type": "VIEW_THROUGH", "window_days": int(view_days)})
+        before = self.render(ctx, row)
+        if before == canonical(spec):
+            raise ValueError(f"Ad set {row.get('name')!r} already uses this attribution window: {before}.")
         return self._proposal(
-            ctx, row, before=self.render(ctx, row), after="", fields={"attribution_spec": spec},
+            ctx, row, before=before, after="", fields={"attribution_spec": spec},
             checks=[], projected=Decimal("0"),
             warnings=["reported conversions change with the window, not with performance"],
         )

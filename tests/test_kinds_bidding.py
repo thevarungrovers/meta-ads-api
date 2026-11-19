@@ -272,3 +272,12 @@ def test_a_first_campaign_stop_time_is_refused_on_revert_not_sent_partially(monk
         tools["revert_change"](entry_id=result.entry_id)
     assert "stop_time" in str(caught.value) and "empty" in str(caught.value)
     assert len(sim.applied) == applied, "nothing sent"
+
+
+def test_an_attribution_window_already_in_place_is_refused(monkeypatch):
+    # Live: 1-day click previewed on an ad set already on 1-day click, with
+    # identical before and after and nothing to say it was a no-op.
+    sim = abo_sim(attribution_spec=[{"event_type": "CLICK_THROUGH", "window_days": 1}])
+    tools, _ = rig(monkeypatch, sim)
+    with pytest.raises(Exception, match="already"):
+        tools["preview_ad_set_attribution_spec"](ad_set_id=ADSET_ID, click_days=1, view_days=0)
