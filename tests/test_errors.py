@@ -131,3 +131,20 @@ def test_no_tool_ever_raises_a_bare_exception(monkeypatch):
             continue
         except Exception as exc:  # pragma: no cover - the failure being tested for
             pytest.fail(f"{name} raised a bare {type(exc).__name__}: {exc}")
+
+
+def test_the_ad_library_gate_names_its_own_fix():
+    from metaads_reporting.graph import GraphAPIError
+
+    err = GraphAPIError(status=400, code=10, subcode=2332002,
+                        message="Application does not have permission for this action")
+    assert "www.facebook.com/ads/library/api" in err.explain()
+    assert "assigned to this ad account" not in err.explain()
+
+
+def test_a_page_token_190_does_not_blame_the_token():
+    from metaads_reporting.graph import GraphAPIError
+
+    err = GraphAPIError(status=400, code=190,
+                        message="(#190) This method must be called with a Page Access Token")
+    assert "token is fine" in err.explain()

@@ -184,6 +184,11 @@ class GraphAPIError(GraphError):
 
     def explain(self) -> str:
         """The fix, where the code implies one. Empty when it does not."""
+        if self.code == 190 and "page access token" in str(self.args[0] if self.args else "").lower():
+            return (
+                "This call needs a Page's own token, not the System User's: "
+                "read it through the Page (the token is fine)."
+            )
         if self.code == 190:
             return {
                 458: "The person who authorised this token removed the app.",
@@ -198,6 +203,13 @@ class GraphAPIError(GraphError):
             }.get(
                 self.subcode or -1,
                 "The access token is not usable. Check scripts/token_info.py.",
+            )
+        if self.code == 10 and self.subcode == 2332002:
+            return (
+                "The Ad Library API is gated separately from ads_management: "
+                "the person who owns the app must confirm their identity at "
+                "www.facebook.com/ads/library/api. No token or account setting "
+                "fixes this."
             )
         if self.code == 200 or self.code == 10:
             return (
