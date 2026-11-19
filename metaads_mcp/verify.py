@@ -546,6 +546,21 @@ def review_state(ad: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _same(want: Any, got: Any) -> bool:
+    """Equal, with a multi-locale LIST compared as a multiset.
+
+    Meta does not keep an asset feed's list order -- entries are tied
+    together by adlabel, not position -- so the same images read back as
+    [EN, FR] after being sent as [FR, EN].
+
+    >>> _same(["fr", "en"], ["en", "fr"]), _same(["fr", "fr"], ["fr", "en"])
+    (True, False)
+    """
+    if isinstance(want, list) and isinstance(got, list):
+        return sorted(map(str, want)) == sorted(map(str, got))
+    return want == got
+
+
 def diff_fields(approved: dict[str, Any], live: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for name in VERIFIED_FIELDS:
@@ -553,7 +568,7 @@ def diff_fields(approved: dict[str, Any], live: dict[str, Any]) -> list[dict[str
         if want in (None, [], ""):
             continue
         got = live.get(name)
-        rows.append({"field": name, "approved": want, "live": got, "ok": want == got})
+        rows.append({"field": name, "approved": want, "live": got, "ok": _same(want, got)})
     return rows
 
 

@@ -538,3 +538,14 @@ def test_a_missing_page_still_blocks(monkeypatch):
     monkeypatch.setattr(verify.linkcheck, "check_link",
                         lambda url: linkcheck.LinkResult(url=url, status=404, final_url=url))
     assert not verify.link_check("https://example.com/a", None).ok
+
+
+def test_a_multi_locale_list_read_back_in_another_order_still_matches():
+    """Meta returned a feed's images [EN, FR, FR-story] after [FR, FR-story, EN] was sent."""
+    approved = {"image_hash": ["fr", "fr", "en"], "headline": ["Titre", "Title"]}
+    rows = {r["field"]: r["ok"] for r in verify.diff_fields(
+        approved, {"image_hash": ["en", "fr", "fr"], "headline": ["Titre", "Title"]})}
+    assert rows == {"image_hash": True, "headline": True}
+    rows = {r["field"]: r["ok"] for r in verify.diff_fields(
+        approved, {"image_hash": ["en", "en", "fr"], "headline": ["Titre", "Title"]})}
+    assert rows["image_hash"] is False
