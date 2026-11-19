@@ -166,7 +166,7 @@ treating the gap as a bug.
 | `create_audience` | Website, engagement (Page/IG), video viewers, lead form, app, lookalike (1-10%), saved |
 | `duplicate_ad` / `update_ad_copy` | Copy or media: a new PAUSED ad, or the same ad repointed |
 | `url_tags` / `advantage_creative_options` / `attach_lead_form` / `replace_ad_creative` | Creative-level changes, each a new creative + repoint |
-| `create_creative` / `create_ad` | A new creative (unattached), a new PAUSED ad |
+| `create_creative` / `create_ad` | A new creative (unattached; one language, or `locales` for a multi-language ad with copy, link and media per language), a new PAUSED ad. url_tags default to the campaign's own |
 | `create_campaign` / `create_ad_set` / `duplicate_ad_set` / `duplicate_campaign` | New or copied, always PAUSED |
 | `create_ab_test` | A split test between PAUSED cells |
 | `low_risk_change` | Names and ad labels only, on a closed allowlist |

@@ -17,7 +17,7 @@ from collections import Counter
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from metaads_mcp.changes.base import APPLY_SPENDS, NOTHING, ChangeKind, LedgerItem, Proposal
 from metaads_mcp.changes.common import ad_activation_bound, wanted_status
@@ -26,6 +26,7 @@ from metaads_mcp.changes.delivery import AdStatus
 from metaads_mcp.guardrails import Check
 from metaads_reporting.account_id import account_path
 from metaads_reporting.write import ads, adsets, media
+from metaads_reporting.write import creatives as creative_specs
 from metaads_reporting.write.plan import FieldChange, PlannedChange
 
 CallToAction = Literal[
@@ -181,6 +182,33 @@ def resolve_url_tags(ctx, url_tags: str | None, campaign_id: str | None,
                   "from this ad carry no URL parameters"]
 
 
+class LocaleCopy(BaseModel):
+    """One language of a multi-language creative."""
+
+    language: str = Field(description="fr or en (built-in locale ids), or any short label with locale_ids")
+    locale_ids: list[int] | None = Field(None, description="Meta locale ids, from search_targeting(type='locale'); default from language")
+    primary_text: str | None = Field(None, description="Body text in this language")
+    headline: str | None = Field(None, description="Headline in this language")
+    description: str | None = Field(None, description="Description in this language")
+    link: str = Field(description="Destination URL for this language")
+    image_hash: str | None = Field(None, description="Feed image, from list_ad_images")
+    story_image_hash: str | None = Field(None, description="Optional vertical image for Stories and Reels")
+    video_id: str | None = Field(None, description="Or a ready video, from list_ad_videos")
+    thumbnail_hash: str | None = Field(None, description="video: a thumbnail image hash")
+
+
+#: Single-language parameters that a multi-language creative takes per locale.
+SINGLE_LOCALE_FIELDS = ("primary_text", "headline", "description", "link", "image_path",
+                        "image_hash", "video_id", "thumbnail_hash")
+
+
+def _locale_line(loc: dict[str, Any], default: str) -> str:
+    mark = " (default)" if loc["language"].lower() == default.lower() else ""
+    return f"{loc['language']}{mark}: " + " | ".join(
+        f"{k}: {loc[k]!r}" for k in ("primary_text", "headline", "description", "link",
+                                     "image_hash", "story_image_hash", "video_id") if loc.get(k))
+
+
 class CreateCreative(ChangeKind):
     name = "create_creative"
     adds_no_spend = True
@@ -193,6 +221,8 @@ class CreateCreative(ChangeKind):
     creates_named = ("creative",)
 
     def _spec(self, ctx, p: dict[str, Any]) -> dict[str, Any]:
+        if p.get("locales"):
+            return self._localized_spec(ctx, p)
         media_count = sum(bool(p.get(k)) for k in ("image_path", "image_hash", "video_id"))
         if media_count != 1:
             raise ValueError("Give exactly one of image_path, image_hash or video_id.")
@@ -223,11 +253,32 @@ class CreateCreative(ChangeKind):
             spec["url_tags"] = p["url_tags"]
         return spec
 
+    def _localized_spec(self, ctx, p: dict[str, Any]) -> dict[str, Any]:
+        # An asset-feed creative carries BOTH specs: the feed holds the copy and
+        # media, object_story_spec only the Page and Instagram account.
+        given = [k for k in SINGLE_LOCALE_FIELDS if p.get(k)]
+        if given:
+            raise ValueError(f"With locales, put {', '.join(given)} inside each locale instead.")
+        for loc in p["locales"]:
+            if loc.get("video_id"):
+                media.check_video_usable(ctx.client, loc["video_id"])
+        feed = creative_specs.localized_feed(
+            p["locales"], call_to_action=p.get("call_to_action") or "LEARN_MORE",
+            default_language=p.get("default_language"))
+        story: dict[str, Any] = {"page_id": p["page_id"]}
+        if p.get("instagram_user_id"):
+            story["instagram_user_id"] = p["instagram_user_id"]
+        spec: dict[str, Any] = {"name": p["name"], "object_story_spec": story,
+                                "asset_feed_spec": feed}
+        if p.get("url_tags"):
+            spec["url_tags"] = p["url_tags"]
+        return spec
+
     def propose(
         self,
         ctx,
         name: Annotated[str, Field(description="BASE name for the creative (internal; the owner/agent prefix is added). The headline is NOT this")],
-        link: Annotated[str, Field(description="Destination URL")],
+        link: Annotated[str | None, Field(description="Destination URL (one language; with locales, each locale has its own)")] = None,
         primary_text: Annotated[str | None, Field(description="Body text")] = None,
         headline: Annotated[str | None, Field(description="Headline")] = None,
         description: Annotated[str | None, Field(description="Description")] = None,
@@ -240,14 +291,22 @@ class CreateCreative(ChangeKind):
         page_id: Annotated[str | None, Field(description="Page to publish as; default: the one most creatives use")] = None,
         instagram_user_id: Annotated[str | None, Field(description="Instagram account; default: the one most creatives use")] = None,
         ad_set_id: Annotated[str | None, Field(description="Preview on this ad set's placements (optional)")] = None,
+        locales: Annotated[list[LocaleCopy] | None, Field(description="MULTI-LANGUAGE ad: one entry per language, each with its own copy, link and media; leave the single-language fields empty")] = None,
+        default_language: Annotated[str | None, Field(description="With locales: the language everyone else sees; default the first")] = None,
     ) -> Proposal:
-        """Show a new single-image or video creative. Writes nothing.
+        """Show a new single-image or video creative, or a multi-language one. Writes nothing.
 
         Created UNATTACHED: it spends nothing and shows nowhere until
         preview_create_ad (or preview_replace_ad_creative) uses it. The image
         is uploaded only at apply. Page and Instagram identity default to the
         ones the account's existing creatives use. Previews and the ad checks
         (truncation, image shape, video length, CTA, destination) run here.
+
+        With `locales`, Meta shows each viewer the entry in their language
+        (fr = fr_FR + fr_CA, en = en_US + en_GB, or explicit locale_ids), and
+        everyone else the default_language one. Every locale uses the same
+        kind of media (all images or all videos, from the library); an image
+        locale may add story_image_hash, a vertical image for Stories and Reels.
         """
         from metaads_mcp.changes.creative_options import name_macro_warnings
 
@@ -269,6 +328,9 @@ class CreateCreative(ChangeKind):
             "thumbnail_hash": thumbnail_hash, "url_tags": url_tags,
             "page_id": page_id or default_page,
             "instagram_user_id": instagram_user_id or default_ig, "adset_id": ad_set_id,
+            "locales": [LocaleCopy.model_validate(loc).model_dump(exclude_none=True)
+                        for loc in locales] if locales else None,
+            "default_language": default_language,
         }
         if not payload["page_id"]:
             raise ValueError("No page_id given and none found on the account's creatives; "
@@ -282,7 +344,9 @@ class CreateCreative(ChangeKind):
                 ("primary_text", primary_text), ("headline", headline),
                 ("description", description), ("link", link), ("cta", call_to_action),
                 ("media", image_path or image_hash or video_id), ("page", payload["page_id"]),
-                ("instagram", payload["instagram_user_id"]), ("url_tags", url_tags)) if v),
+                ("instagram", payload["instagram_user_id"]), ("url_tags", url_tags)) if v)
+            + "".join(f" || {_locale_line(loc, default_language or payload['locales'][0]['language'])}"
+                      for loc in payload["locales"] or ()),
             checks=[], projected=Decimal("0"), payload=payload, campaign_id=campaign_id,
             warnings=["created unattached: nothing changes until an ad uses it", *tag_warnings],
             verify={"adset_id": ad_set_id, "spec": spec, "image_path": image_path,

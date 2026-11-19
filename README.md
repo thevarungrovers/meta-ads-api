@@ -421,13 +421,14 @@ caps, a two-phase ledger, Meta's `validate_only` in the preview.
 | `create_audience` | Website, engagement, video, lead-form, app, lookalike (1-10%), saved |
 | `duplicate_ad`, `update_ad_copy`, `url_tags`, `advantage_creative_options`, `attach_lead_form`, `replace_ad_creative` | What an ad says, via a new creative |
 | `create_creative`, `create_ad`, `create_campaign`, `create_ad_set`, `duplicate_ad_set`, `duplicate_campaign` | New things, always **PAUSED**, 3 applies each |
+| `create_creative` with `locales` | A multi-language ad: copy, link and library media per language (fr/en built in, or Meta locale ids), one default language; Stories/Reels may get a vertical image per language |
 | `create_ab_test` | A split test between PAUSED cells |
 | `low_risk_change` | Names (of the agent's own entities only) and ad labels, on a closed allowlist |
 | `revert_change` | Undo one ledger entry or a whole batch |
 
 Every ad change is **verified**: the preview fetches preview links for the
 placements the ad set uses and checks text truncation, image shape (from the
-file header), video length, the call to action and the destination link; the
+file header), video length, the call to action and every destination link; the
 apply re-reads the ad and diffs it against what was approved, with its review
 state. `verify_ad` repeats that after review.
 

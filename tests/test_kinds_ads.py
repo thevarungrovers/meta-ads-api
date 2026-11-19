@@ -188,3 +188,64 @@ def test_multi_ad_status_says_which_ads_it_left_out(monkeypatch):
     preview = tools["preview_multi_ad_status"](ad_set_id=ADSET_ID, ad_ids=[AD_ID, "AD2"],
                                                new_status="PAUSED")
     assert any("AD2" in w and "already PAUSED" in w for w in preview.warnings)
+
+
+FR = {"language": "fr", "primary_text": "Bonjour", "headline": "Titre",
+      "link": "https://example.com/fr", "image_hash": "frfeed", "story_image_hash": "frstory"}
+EN = {"language": "en", "primary_text": "Hello", "headline": "Title",
+      "link": "https://example.com/en", "image_hash": "enfeed"}
+
+
+def _feed(payload):
+    feed = payload["asset_feed_spec"]
+    return json.loads(feed) if isinstance(feed, str) else feed
+
+
+def test_create_creative_builds_a_multi_language_creative(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_create_creative"](name="Spring", locales=[FR, EN], url_tags="utm_source=meta")
+    assert not preview.blocked, preview.checks
+    assert "fr (default):" in preview.after and "en:" in preview.after
+    assert sum(c.split()[1].startswith("ad_destination") for c in preview.checks) == 2
+    result = tools["apply_create_creative"](preview_token=preview.preview_token)
+    payload = s.created[-1]["payload"]
+    feed = _feed(payload)
+    story = payload["object_story_spec"]
+    story = json.loads(story) if isinstance(story, str) else story
+    assert story == {"page_id": "PAGE", "instagram_user_id": "IG"}
+    assert [b["text"] for b in feed["bodies"]] == ["Bonjour", "Hello"]
+    assert [i["hash"] for i in feed["images"]] == ["frfeed", "frstory", "enfeed"]
+    rules = feed["asset_customization_rules"]
+    assert [(r["image_label"]["name"], r["customization_spec"]["locales"], r["is_default"])
+            for r in rules] == [("fr_story", [9, 44], False), ("fr_img", [9, 44], False),
+                                ("en_img", [6, 24], False), ("fr_img", [9, 44], True)]
+    assert rules[0]["customization_spec"]["instagram_positions"] == ["story", "reels"]
+    assert payload["url_tags"] == "utm_source=meta"
+    assert result.verification["passed"] is True
+
+
+def test_create_creative_default_language_picks_the_fallback_rule(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_create_creative"](name="Spring", locales=[FR, EN], default_language="en")
+    tools["apply_create_creative"](preview_token=preview.preview_token)
+    default = [r for r in _feed(s.created[-1]["payload"])["asset_customization_rules"] if r["is_default"]]
+    assert [r["customization_spec"]["locales"] for r in default] == [[6, 24]]
+
+
+@pytest.mark.parametrize("change, message", [
+    ({"en": {**EN, "image_hash": None, "video_id": "V1"}}, "same kind of media"),
+    ({"en": {**EN, "headline": None}}, "some locales and not others"),
+    ({"en": {**EN, "language": "fr"}}, "its own language"),
+    ({"en": {**EN, "language": "de"}}, "locale_ids"),
+    ({"top": {"headline": "x"}}, "inside each locale"),
+])
+def test_create_creative_refuses_a_malformed_multi_language_creative(monkeypatch, change, message):
+    s = sim()
+    s.objects["V1"] = {"id": "V1", "status": {"video_status": "ready"}}
+    tools, _ = rig(monkeypatch, s)
+    en = {k: v for k, v in change.get("en", EN).items() if v is not None}
+    with pytest.raises(Exception) as caught:
+        tools["preview_create_creative"](name="Spring", locales=[FR, en], **change.get("top", {}))
+    assert message in str(caught.value)
