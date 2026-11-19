@@ -104,6 +104,12 @@ def connect_order(addresses) -> list[str]:
     return ([a for a in unique if ":" not in a] + [a for a in unique if ":" in a])
 
 
+#: Meta's own crawler, which is what ad review fetches a landing page with.
+#: Sites behind a bot wall answer the default python-requests agent 403 and
+#: this one 200, so asking as anything else checks a page Meta never sees.
+USER_AGENT = "facebookexternalhit/1.1"
+
+
 def _new_session():
     import requests
 
@@ -159,7 +165,8 @@ def _request_pinned(session, method: str, url: str, address: str, **kwargs):
     if parsed.scheme == "https" and hasattr(session, "mount"):
         prefix = f"https://{urlparse(pinned).netloc}/"
         session.mount(prefix, _PinnedTLSAdapter(ascii_host(parsed.hostname or "")))
-    headers = {**(kwargs.pop("headers", None) or {}), "Host": host_header}
+    headers = {"User-Agent": USER_AGENT, **(kwargs.pop("headers", None) or {}),
+               "Host": host_header}
     return session.request(method, pinned, headers=headers, allow_redirects=False,
                            timeout=TIMEOUT_SECONDS, **kwargs)
 

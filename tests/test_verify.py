@@ -505,3 +505,36 @@ def test_the_tls_adapter_gets_the_punycode_name(monkeypatch):
 
     linkcheck.check_link("https://bücher.example/a", session=Mounting([(200, None)]), resolver=PUBLIC)
     assert names == ["xn--bcher-kva.example"]
+
+
+def test_the_checker_asks_as_metas_crawler():
+    # Live, a landing page behind a bot wall answered 403 to the default
+    # python-requests agent and 200 to Meta's own crawler, which is what ad
+    # review fetches with.
+    sent = []
+
+    class Recording(Scripted):
+        def request(self, method, url, **kw):
+            sent.append(kw.get("headers") or {})
+            return super().request(method, url, **kw)
+
+    linkcheck.check_link("https://example.com/a", session=Recording([(200, None)]), resolver=PUBLIC)
+    assert sent and sent[0]["User-Agent"].startswith("facebookexternalhit/")
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_a_bot_wall_warns_instead_of_blocking(monkeypatch, status):
+    from metaads_mcp import verify
+
+    monkeypatch.setattr(verify.linkcheck, "check_link",
+                        lambda url: linkcheck.LinkResult(url=url, status=status, final_url=url))
+    check = verify.link_check("https://example.com/a", None)
+    assert check.ok and check.warn and f"HTTP {status}" in check.detail
+
+
+def test_a_missing_page_still_blocks(monkeypatch):
+    from metaads_mcp import verify
+
+    monkeypatch.setattr(verify.linkcheck, "check_link",
+                        lambda url: linkcheck.LinkResult(url=url, status=404, final_url=url))
+    assert not verify.link_check("https://example.com/a", None).ok

@@ -403,6 +403,10 @@ def cta_check(cta: Any, objective: str | None) -> Check:
     return Check("ad_call_to_action", True, "no call to action", warn=True)
 
 
+#: Answers that come from a bot wall or a rate limit rather than the page.
+BOT_WALL_STATUSES = (401, 403, 429)
+
+
 def link_check(link: Any, url_tags: str | None) -> Check:
     links = _texts(link)
     if not links:
@@ -414,6 +418,12 @@ def link_check(link: Any, url_tags: str | None) -> Check:
         return Check("ad_destination", False, f"{detail}: refused to check ({result.refused})")
     if result.error:
         return Check("ad_destination", True, f"{detail}: could not check ({result.error})", warn=True)
+    if result.status in BOT_WALL_STATUSES:
+        # A bot wall or rate limit answers the checker, not the page's
+        # visitors: say so, but do not block on it.
+        return Check("ad_destination", True,
+                     f"{detail}: HTTP {result.status} to the checker -- open it in a browser",
+                     warn=True)
     if result.status is not None and result.status >= 400:
         return Check("ad_destination", False, f"{detail}: HTTP {result.status}")
     if result.changed_host:
