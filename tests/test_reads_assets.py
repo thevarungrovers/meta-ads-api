@@ -47,6 +47,7 @@ def test_recent_changes_asks_for_a_closed_window(monkeypatch):
 
 def test_lead_forms_without_permission_say_so(monkeypatch):
     sim = make_sim()
+    sim.objects["PAGE1"] = {"id": "PAGE1", "access_token": "PAGE-TOKEN-NOT-REAL"}
     sim.canned["PAGE1/leadgen_forms"] = error_response(200, message="Requires leads_retrieval")
     with pytest.raises(ToolError) as caught:
         tools(monkeypatch, sim)["list_lead_forms"](page_id="PAGE1")
@@ -94,3 +95,25 @@ def test_identities_include_the_instagram_account_linked_to_a_page(monkeypatch):
     out = tools(monkeypatch, sim)["list_connected_identities"]()
     assert out["pages"] == [{"id": "P1", "name": "Example Co"}]
     assert out["instagram_accounts"] == [{"id": "IG9", "username": "exampleco", "via_page": "P1"}]
+
+
+def test_lead_forms_are_read_with_the_pages_own_token(monkeypatch):
+    # Meta answers code 190 "must be called with a Page Access Token" to the
+    # system-user token; the Page's token is fetched with it and used instead.
+    sim = make_sim()
+    sim.objects["PAGE1"] = {"id": "PAGE1", "access_token": "PAGE-TOKEN-NOT-REAL"}
+    sim.objects["FORM1"] = {"id": "FORM1", "name": "Signup", "status": "ACTIVE"}
+    sim.edges["PAGE1"] = {"leadgen_forms": ["FORM1"]}
+    out = tools(monkeypatch, sim)["list_lead_forms"](page_id="PAGE1")
+    assert [r["id"] for r in out["rows"]] == ["FORM1"]
+    read = next(c for c in sim.calls if c["url"].endswith("PAGE1/leadgen_forms"))
+    assert read["payload"]["access_token"] == "PAGE-TOKEN-NOT-REAL"
+    assert "PAGE-TOKEN-NOT-REAL" not in str(out)
+
+
+def test_catalogs_fall_back_to_the_business_that_owns_the_ad_account(monkeypatch):
+    sim = make_sim(account={"business": {"id": "BIZ1", "name": "Example Co"}})
+    sim.objects["CAT1"] = {"id": "CAT1", "name": "Products", "product_count": 3}
+    sim.edges["BIZ1"] = {"owned_product_catalogs": ["CAT1"]}
+    out = tools(monkeypatch, sim)["list_catalogs"]()
+    assert [r["id"] for r in out["rows"]] == ["CAT1"]

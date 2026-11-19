@@ -626,8 +626,10 @@ def register_more(mcp, state, client, *, listing, edge, account, headroom, money
         it Meta answers PERMISSION. Creating a form stays in Ads Manager: it
         carries a privacy policy and legal text a person answers for.
         """
-        rows = edge(str(page_id), "leadgen_forms",
-                    ("id", "name", "status", "leads_count", "locale", "created_time"), limit)
+        page = client.for_page(str(page_id))
+        rows = page.edge(str(page_id), "leadgen_forms",
+                         ("id", "name", "status", "leads_count", "locale", "created_time"),
+                         limit=min(limit + 1, 500), max_items=limit + 1, max_pages=10)
         return listing(rows, limit)
 
     @mcp.tool(title="List automated rules", annotations=read_only)
@@ -682,8 +684,12 @@ def register_more(mcp, state, client, *, listing, edge, account, headroom, money
     @refusals_reach_the_caller
     def list_catalogs(limit: Annotated[int, Field(ge=1, le=100)] = 25) -> dict[str, Any]:
         """Product catalogs the business owns, for catalog-sales campaigns.
-        Needs META_ADS_BUSINESS_ID. Read-only: feeds are not edited here."""
+        The business is META_ADS_BUSINESS_ID, or else the one that owns the ad
+        account. Read-only: feeds are not edited here."""
         business = client.settings.business_id
+        if not business:
+            owner = client.node(account(), ("business",)).get("business") or {}
+            business = owner.get("id")
         if not business:
             raise ValueError(
                 "Catalogs belong to a business, not an ad account: set "

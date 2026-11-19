@@ -259,6 +259,29 @@ class ReadOnlyMetaAdsClient:
             for row in rows
         ]
 
+    def for_page(self, page_id: str) -> "ReadOnlyMetaAdsClient":
+        """A read-only client that speaks as one Page.
+
+        Some Page edges (``leadgen_forms``) refuse a system-user token with
+        code 190 "must be called with a Page Access Token". That token is
+        fetched with this client's own and lives only in the returned client:
+        never logged, never returned to a caller.
+        """
+        token = self.node(str(page_id), ("access_token",)).get("access_token")
+        if not token:
+            raise ValueError(
+                f"Page {page_id} gave no access token: assign the Page to the "
+                "System User in Business Settings."
+            )
+        transport = GraphTransport(
+            access_token=token,
+            api_version=self._settings.api_version,
+            base_url=self._settings.graph_base,
+            app_secret=self._settings.app_secret,
+            session=self._transport._session,
+        )
+        return ReadOnlyMetaAdsClient(transport, self._settings)
+
     # -- objects ----------------------------------------------------------
 
     def node(self, node_id: str, fields: tuple[str, ...]) -> dict[str, Any]:

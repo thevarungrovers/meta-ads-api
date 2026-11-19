@@ -21,6 +21,9 @@ from tests.test_mcp_write_path import CAMPAIGN_ID, make_sim
 
 CASES = [
     (dict(code=190, subcode=463), "AUTH_EXPIRED"),
+    # The token is fine; the call wants a different KIND of token.
+    (dict(code=190, message="(#190) This method must be called with a Page Access Token"),
+     "PERMISSION"),
     (dict(code=10), "PERMISSION"),
     (dict(code=200), "PERMISSION"),
     (dict(code=17), "RATE_LIMITED retry_after="),

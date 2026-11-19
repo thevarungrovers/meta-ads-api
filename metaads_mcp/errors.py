@@ -85,6 +85,8 @@ def classify(exc: BaseException) -> str | None:
         return None
     code, subcode, status = graph.code, graph.subcode, graph.status
     text = str(graph).lower()
+    if code == 190 and "page access token" in text:
+        return PERMISSION  # the token works; this call wants a Page's token
     if code == 190:
         return AUTH_EXPIRED
     if graph.is_rate_limit:
