@@ -564,8 +564,8 @@ midnight), so they survive restarts and are shared by every server process.
 A creation costs 3 applies. **Activating** something (and a revert that
 restores spend) is counted against the daily and session totals and exempt
 from the per-change `max_projected_delta_per_day`, so the daily total must be at
-least the largest budget you would re-activate -- the server warns at startup
-when one is larger. `scripts/manage.py` writes are not counted.
+least the largest budget you would re-activate -- `get_guardrails` lists any
+campaign that is larger under `budget_cap_check` (checked once per session). `scripts/manage.py` writes are not counted.
 
 ### 3. Scope
 

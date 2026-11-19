@@ -623,6 +623,7 @@ def register(mcp, state) -> None:
         Call this before proposing a change, so you propose something that can
         actually be applied rather than something that will be refused.
         """
+        from metaads_mcp.budget_check import budget_cap_report
         from metaads_mcp.guardrails import DailyUsage, read_only_mode, writes_disabled
         from metaads_reporting.token_health import token_health
 
@@ -638,6 +639,8 @@ def register(mcp, state) -> None:
             # Who names what this server creates, from the repo's .env only.
             # Each part is used only when set; both empty means plain names.
             "identity": state.identity.describe(),
+            # Campaigns too big for the daily total to ever re-activate.
+            "budget_cap_check": budget_cap_report(state),
             "note": (
                 "THIS SERVER IS READ-ONLY: it published no apply_* tools and no "
                 "revert_change, so nothing here can change the account. The "

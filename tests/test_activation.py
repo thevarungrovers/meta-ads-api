@@ -175,3 +175,28 @@ def test_the_startup_check_asks_only_for_the_fields_it_uses(monkeypatch):
         "id", "campaign_id", "status", "daily_budget", "lifetime_budget",
         "budget_remaining", "end_time"}
     assert "PAUSED\"" not in read["payload"]["effective_status"].replace("CAMPAIGN_PAUSED", "")
+
+
+def test_get_guardrails_reports_the_budget_check_once_per_process(monkeypatch):
+    # The check used to run at startup, spending the rate limit on every
+    # launch and printing to stderr, which the agent never sees.
+    sim = make_sim()
+    registrar, _ = build_tools(sim, limits=lim(
+        max_projected_delta_per_day_total=Decimal("100")), monkeypatch=monkeypatch)
+    sim.calls.clear()
+    first = registrar.tools["get_guardrails"]()["budget_cap_check"]
+    assert len(first["warnings"]) == 1 and "250.00/day" in first["warnings"][0]
+    reads = len(sim.calls)
+    again = registrar.tools["get_guardrails"]()["budget_cap_check"]
+    assert again == first
+    assert not [c for c in sim.calls[reads:] if c["url"].endswith(("/adsets", "/campaigns"))]
+
+
+def test_a_throttled_budget_check_does_not_fail_get_guardrails(monkeypatch):
+    from tests.fakes import error_response
+
+    sim = make_sim()
+    sim.canned["act_1234567890/adsets"] = error_response(17, message="User request limit reached")
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    check = registrar.tools["get_guardrails"]()["budget_cap_check"]
+    assert "unavailable" in check

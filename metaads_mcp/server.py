@@ -218,56 +218,13 @@ tools_read.register(_registrar, STATE)
 tools_write.register(_registrar, STATE)
 
 
-def budget_cap_warnings(state: ServerState) -> list[str]:
-    """Campaigns whose budget is over max_projected_delta_per_day_total.
-
-    An activation is counted in full against the daily total, so such a
-    campaign could never be re-activated through this server. Said at startup
-    rather than discovered at the worst moment.
-    """
-    from metaads_mcp.changes.common import campaign_activation_bound
-    from metaads_reporting.account_id import account_path
-    from metaads_reporting.write import campaigns
-    from metaads_reporting.write.lookup import edge_search
-
-    ctx = state.engine.ctx
-    currency = ctx.currency()
-    ceiling = state.limits.max_projected_delta_per_day_total
-    # One account-wide ad-set read, not one per campaign, asking only for what
-    # the bound uses and only for ad sets switched on: this runs at every
-    # start, and Meta's per-account limit is spent by CPU time per field read.
-    by_campaign: dict[str, list[dict]] = {}
-    switched_on, _ = edge_search(
-        ctx.client, account_path(ctx.client.resolve_account_id(None)), "adsets",
-        ("id", "campaign_id", "status", "daily_budget", "lifetime_budget",
-         "budget_remaining", "end_time"),
-        needle=None, limit=2000,
-        statuses=["ACTIVE", "CAMPAIGN_PAUSED", "IN_PROCESS", "WITH_ISSUES"],
-    )
-    for child in switched_on:
-        by_campaign.setdefault(str(child.get("campaign_id")), []).append(child)
-    found = []
-    for row in campaigns.search(ctx.client, None, limit=200):
-        bound, why = campaign_activation_bound(
-            ctx, row, currency, adsets=by_campaign.get(str(row.get("id")), [])
-        )
-        if bound > ceiling:
-            found.append(
-                f"campaign {row.get('id')} can spend {bound:.2f}/day ({why}), over "
-                f"max_projected_delta_per_day_total = {ceiling}; it could not be "
-                "re-activated here. Raise the total in guardrails.toml if that is wrong."
-            )
-    return found
+# Kept importable from here: the check now runs lazily, in get_guardrails.
+from metaads_mcp.budget_check import budget_cap_warnings  # noqa: E402,F401
 
 
 def main() -> None:
     for warning in identity_warnings(STATE):
         print(f"meta-ads: WARNING {warning}", file=sys.stderr)
-    try:
-        for warning in budget_cap_warnings(STATE):
-            print(f"meta-ads: WARNING {warning}", file=sys.stderr)
-    except Exception as exc:  # noqa: BLE001 - a startup check must not stop the server
-        print(f"meta-ads: could not check budgets against the daily cap: {exc}", file=sys.stderr)
     mcp.run("stdio")
 
 
