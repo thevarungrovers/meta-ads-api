@@ -8,6 +8,7 @@ means someone reviews it.
 from __future__ import annotations
 
 import asyncio
+import json
 import importlib
 
 import pytest
@@ -319,3 +320,14 @@ def test_every_creating_kind_declares_creates_named():
     for name in creating:
         assert kinds[name].creates_named, name
     assert {n for n, k in kinds.items() if k.creates_named} == creating
+
+
+@pytest.mark.parametrize("name", ["preview_update_ad_copy", "preview_duplicate_ad"])
+def test_copy_fields_take_one_text_per_locale_over_mcp(tools, name):
+    # Live: the planner kept each language of a bilingual ad given a list,
+    # but the published schema took only a string, so over MCP every
+    # language got the same text.
+    properties = tools[name].input_schema["properties"]
+    for field in ("primary_text", "headline", "description"):
+        kinds = json.dumps(properties[field])
+        assert '"array"' in kinds and '"string"' in kinds, (name, field)

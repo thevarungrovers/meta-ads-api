@@ -418,3 +418,9 @@ def test_a_list_per_language_raises_no_such_warning(monkeypatch):
     registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
     preview = registrar.tools["preview_update_ad_copy"](ad_id=AD_ID, headline=["Titre", "Title"])
     assert not any("locales" in w for w in preview.warnings)
+
+
+def test_a_list_on_a_single_language_ad_is_refused(tools):
+    tool, _, _ = tools
+    with pytest.raises(Exception, match="one language|single"):
+        tool["preview_update_ad_copy"](ad_id=AD_ID, headline=["a", "b"])

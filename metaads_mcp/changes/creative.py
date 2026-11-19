@@ -51,6 +51,15 @@ def creative_id_of(row: dict[str, Any]) -> str | None:
     return None
 
 
+
+#: Copy for one field: a string for every locale, or a list with one entry
+#: per locale of a multi-locale (asset feed) creative.
+CopyText = str | list[str] | None
+PER_LOCALE = (
+    " A multi-locale ad takes a list, one per locale in the order"
+    " get_ad_creative shows; a single string goes into every locale."
+)
+
 class _CreativeKind(ChangeKind):
     """Shared: the plan is rebuilt at apply time and compared, field by field."""
 
@@ -149,10 +158,10 @@ class DuplicateAd(_CreativeKind):
         ctx,
         ad_id: Annotated[str, Field(description="The ad to copy, from find_ads")],
         primary_text: Annotated[
-            str | None, Field(description="New body text (Ads Manager: primary text)")
+            CopyText, Field(description="New body text (Ads Manager: primary text)." + PER_LOCALE)
         ] = None,
-        headline: Annotated[str | None, Field(description="New headline")] = None,
-        description: Annotated[str | None, Field(description="New description")] = None,
+        headline: Annotated[CopyText, Field(description="New headline." + PER_LOCALE)] = None,
+        description: Annotated[CopyText, Field(description="New description." + PER_LOCALE)] = None,
         link: Annotated[str | None, Field(description="New destination URL")] = None,
         image_path: Annotated[
             str | None, Field(description="Local image file to upload and use")
@@ -255,9 +264,9 @@ class UpdateAdCopy(_CreativeKind):
         self,
         ctx,
         ad_id: Annotated[str, Field(description="The ad to change, from find_ads")],
-        primary_text: Annotated[str | None, Field(description="New body text")] = None,
-        headline: Annotated[str | None, Field(description="New headline")] = None,
-        description: Annotated[str | None, Field(description="New description")] = None,
+        primary_text: Annotated[CopyText, Field(description="New body text." + PER_LOCALE)] = None,
+        headline: Annotated[CopyText, Field(description="New headline." + PER_LOCALE)] = None,
+        description: Annotated[CopyText, Field(description="New description." + PER_LOCALE)] = None,
         link: Annotated[str | None, Field(description="New destination URL")] = None,
         image_path: Annotated[
             str | None, Field(description="Local image file to upload and use")

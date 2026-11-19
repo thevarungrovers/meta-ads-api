@@ -277,6 +277,12 @@ def build_spec(
     if creative.shape == ASSET_FEED:
         return _build_asset_feed(creative, edits, mapping)
 
+    listed = sorted(label for label, value in edits.items() if isinstance(value, (list, tuple)))
+    if listed:
+        raise MutationError(
+            f"{', '.join(listed)}: this creative is in one language, so give a single "
+            "string. A list (one per locale) is only for a multi-locale creative."
+        )
     spec = creative.story_spec
     block = dict(spec.get(creative.shape) or {})
     for label, value in edits.items():
