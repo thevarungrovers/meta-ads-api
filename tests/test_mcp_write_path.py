@@ -136,6 +136,11 @@ def test_a_token_is_not_interchangeable_between_tools(tools):
     with pytest.raises(Exception) as caught:
         tool["apply_ad_status"](preview_token=preview.preview_token)
     assert "not interchangeable" in str(caught.value)
+    # Spent, deliberately -- a refused token is never retryable -- and said so.
+    assert "now spent: take a fresh preview for preview_campaign_status" in str(caught.value)
+    with pytest.raises(Exception) as caught:
+        tool["apply_campaign_status"](preview_token=preview.preview_token)
+    assert "already used" in str(caught.value)
 
 
 def test_an_unknown_token_is_refused(tools):

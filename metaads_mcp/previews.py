@@ -202,7 +202,8 @@ class PreviewStore:
         if pending.tool != tool:
             raise PreviewExpired(
                 f"That token was minted for {pending.tool}, not {tool}. Tokens "
-                "are not interchangeable between tools."
+                "are not interchangeable between tools, and this one is now spent: "
+                f"take a fresh preview for {pending.tool.replace('apply_', 'preview_', 1)}."
             )
         if pending.blocked:
             raise PreviewExpired(
