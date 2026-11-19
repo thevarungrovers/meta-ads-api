@@ -408,12 +408,12 @@ class UploadImage(ChangeKind):
         """Show putting a local image in the image library. Writes nothing.
 
         The library is storage: an uploaded image is in no ad, shows nowhere
-        and spends nothing until a creative uses it. The preview names the
-        image_hash the upload will return (the md5 of the file), so the
-        creative that uses it can be previewed straight after -- with Meta's
-        validate_only and real previews, which a pending upload skips. Use it
-        for each language's image of a multi-language creative. A file the
-        library already holds is refused, with its existing hash.
+        and spends nothing until a creative uses it. The apply returns the
+        image_hash (its entity_id) for the creative that uses it, which can
+        then be previewed with Meta's validate_only and real previews -- both
+        skipped while an upload is pending. Use it for each language's image of
+        a multi-language creative. The preview shows the expected hash (the
+        md5 of the file) and refuses a file the library already holds under it.
         """
         image = media.inspect_image(image_path)
         image_hash = media.image_md5(image)
@@ -430,7 +430,7 @@ class UploadImage(ChangeKind):
             path=f"account {ctx.default_account} > image library", field_name="uploaded",
             before=NOTHING,
             after=f"{image.path.name} ({shape}{image.describe()['size_kb']}KB {image.image_type}) "
-                  f"-> image_hash {image_hash}",
+                  f"-> expected image_hash {image_hash} (the apply returns the real one)",
             checks=[], projected=Decimal("0"),
             payload={"image_path": str(image.path), "image_hash": image_hash},
             warnings=["library only: the image shows nowhere until a creative uses it",
