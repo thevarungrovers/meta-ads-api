@@ -286,16 +286,31 @@ def _splice_media(creative, payload: dict[str, Any], media_spec: dict[str, Any])
 
     if creative.shape == _creatives.ASSET_FEED:
         feed = dict(payload.get("asset_feed_spec") or {})
+        # One new file cannot stand in for several: a multi-language ad holds
+        # an image per language (and per placement), and writing one into
+        # every entry shows the same picture in every language, silently.
+        # Media follows the rules' adlabels, so the kind cannot change either.
+        key, other = ("videos", "images") if video_id else ("images", "videos")
+        existing = feed.get(key) or []
+        if feed.get(other):
+            raise MutationError(
+                f"This multi-language creative uses {other}, so it cannot take "
+                f"{'a video' if video_id else 'an image'}: its language rules point at "
+                f"the {other}. Build a new one with preview_create_creative and locales.")
+        if len(existing) != 1:
+            labels = [", ".join(l.get("name", "?") for l in e.get("adlabels") or []) or "?"
+                      for e in existing]
+            raise MutationError(
+                f"This multi-language creative has {len(existing)} {key} ({'; '.join(labels)}): "
+                f"one new file would replace every one of them, showing the same media in "
+                f"every language. Build a new one with preview_create_creative and locales, "
+                f"giving each language its own media.")
+        # The hash or id is filled in; adlabels are kept so the customization
+        # rules that reference the entry keep working.
         if pending is not None:
-            existing = feed.get("images") or [{}]
-            # The hash is filled in at apply time; adlabels are preserved so
-            # the customization rules that reference them keep working.
-            feed["images"] = [
-                {**dict(entry), "hash": "<pending upload>"} for entry in existing
-            ]
-        if video_id:
-            feed["videos"] = [{"video_id": video_id}]
-            feed.pop("images", None)
+            feed["images"] = [{**dict(existing[0]), "hash": "<pending upload>"}]
+        else:
+            feed["videos"] = [{**_creatives.strip_derived(dict(existing[0])), "video_id": video_id}]
         payload["asset_feed_spec"] = feed
         return payload
 

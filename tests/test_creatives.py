@@ -344,3 +344,30 @@ def test_media_only_edits_are_allowed_when_the_caller_opts_in():
     assert spec["object_story_spec"]["link_data"]["message"] == "primary text here"
     with pytest.raises(MutationError):
         creatives.build_spec(link_creative(), {})
+
+
+def _splice(creative, **media_spec):
+    from metaads_reporting.write import ads
+
+    payload = creatives.plan_payload(creative, {}, allow_empty=True)
+    return ads._splice_media(creative, payload, media_spec)["asset_feed_spec"]
+
+
+def test_a_new_image_replaces_a_feeds_only_image_and_keeps_its_adlabel():
+    feed = _splice(feed_creative(), _pending_image=object())
+    assert feed["images"] == [{"hash": "<pending upload>", "adlabels": [{"name": "img", "id": "9"}]}]
+
+
+def test_one_new_image_is_refused_on_a_feed_with_an_image_per_language():
+    """Writing one file into every entry would show it in every language."""
+    creative = feed_creative()
+    creative.raw["asset_feed_spec"]["images"] = [
+        {"hash": "fr", "adlabels": [{"name": "fr_img"}]},
+        {"hash": "en", "adlabels": [{"name": "en_img"}]}]
+    with pytest.raises(MutationError, match="2 images .*fr_img; en_img.*every language"):
+        _splice(creative, _pending_image=object())
+
+
+def test_a_video_is_refused_on_a_feed_whose_rules_point_at_images():
+    with pytest.raises(MutationError, match="uses images, so it cannot take a video"):
+        _splice(feed_creative(), video_id="V2")
