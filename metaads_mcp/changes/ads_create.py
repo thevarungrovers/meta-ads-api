@@ -412,28 +412,33 @@ class UploadImage(ChangeKind):
         image_hash (its entity_id) for the creative that uses it, which can
         then be previewed with Meta's validate_only and real previews -- both
         skipped while an upload is pending. Use it for each language's image of
-        a multi-language creative. The preview shows the expected hash (the
-        md5 of the file) and refuses a file the library already holds under it.
+        a multi-language creative.
+
+        Meta's hash is NOT the md5 of the file, so the preview cannot name it;
+        but Meta deduplicates, so uploading a file it already holds returns
+        the existing hash and adds nothing. A library image with the same file
+        name is pointed out, with its hash, in case it is this file.
         """
         image = media.inspect_image(image_path)
-        image_hash = media.image_md5(image)
-        answer = ctx.read.get(f"{account_path(ctx.read.resolve_account_id())}/{media.IMAGE_EDGE}",
-                              hashes=json.dumps([image_hash]), fields="hash,name")
-        existing = [r for r in (answer or {}).get("data") or [] if r.get("hash") == image_hash]
-        if existing:
-            raise ValueError(f"{image.path.name} is already in the library as "
-                             f"{existing[0].get('name')!r}: use image_hash {image_hash}.")
         size = media.local_image_dimensions(image.path)
         shape = f"{size[0]}x{size[1]}, " if size else ""
+        rows = ctx.read.edge(account_path(ctx.read.resolve_account_id()), media.IMAGE_EDGE,
+                             ("hash", "name"), limit=200, max_items=200)
+        same_name = [r for r in rows if r.get("name") == image.path.name and r.get("hash")]
         return Proposal(
             entity_type="image", entity_id="(new)", entity_name=image.path.name,
             path=f"account {ctx.default_account} > image library", field_name="uploaded",
             before=NOTHING,
             after=f"{image.path.name} ({shape}{image.describe()['size_kb']}KB {image.image_type}) "
-                  f"-> expected image_hash {image_hash} (the apply returns the real one)",
+                  "-> the image_hash Meta returns",
             checks=[], projected=Decimal("0"),
-            payload={"image_path": str(image.path), "image_hash": image_hash},
+            # The md5 only pins the FILE between preview and apply.
+            payload={"image_path": str(image.path), "file_md5": media.image_md5(image)},
             warnings=["library only: the image shows nowhere until a creative uses it",
+                      *([f"the library already has an image named {image.path.name}: "
+                         f"image_hash {same_name[0]['hash']}. If it is this file, use that "
+                         "hash; uploading it again returns the same one and adds nothing"]
+                        if same_name else []),
                       *image.warnings],
         )
 
@@ -442,7 +447,7 @@ class UploadImage(ChangeKind):
 
     def build(self, ctx, payload):
         image = media.inspect_image(payload["image_path"])
-        if media.image_md5(image) != payload["image_hash"]:
+        if media.image_md5(image) != payload["file_md5"]:
             raise ValueError(f"{image.path.name} changed on disk since the preview; take a fresh one.")
         return media.ImageUpload(image=image, label=image.path.name)
 

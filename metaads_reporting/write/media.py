@@ -189,10 +189,10 @@ def upload_image(
 
 
 def image_md5(image: LocalImage) -> str:
-    """The hash Meta will give this file: the md5 of its bytes.
+    """The md5 of a local file's bytes: pins the file between preview and apply.
 
-    Known before uploading, so a preview can name the hash the apply will
-    return -- and see whether the library already holds the same file.
+    NOT Meta's image_hash -- checked live on 2026-11-19, the hash Meta returned
+    for an upload differed from the file's md5 -- so it is never shown as one.
     """
     digest = hashlib.md5()  # noqa: S324 - Meta's identifier, not security
     with image.path.open("rb") as handle:

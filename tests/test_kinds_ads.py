@@ -261,15 +261,13 @@ def _image(tmp_path, name="fr.png"):
     return path
 
 
-def test_upload_image_names_the_hash_and_uploads_only_at_apply(monkeypatch, tmp_path):
-    import hashlib
-
+def test_upload_image_uploads_only_at_apply_and_returns_metas_hash(monkeypatch, tmp_path):
     s = sim()
     path = _image(tmp_path)
     tools, state = rig(monkeypatch, s)
     preview = tools["preview_upload_image"](image_path=str(path))
-    md5 = hashlib.md5(path.read_bytes()).hexdigest()
-    assert not preview.blocked and md5 in preview.after and "1080x1080" in preview.after
+    assert not preview.blocked and "1080x1080" in preview.after
+    assert "the image_hash Meta returns" in preview.after
     assert not s.created and not s.validated, "a preview sends nothing"
     result = tools["apply_upload_image"](preview_token=preview.preview_token)
     assert [c["edge"] for c in s.created] == ["adimages"]
@@ -279,18 +277,15 @@ def test_upload_image_names_the_hash_and_uploads_only_at_apply(monkeypatch, tmp_
     assert "nothing is deleted" in str(caught.value)
 
 
-def test_upload_image_refuses_a_file_the_library_already_holds(monkeypatch, tmp_path):
-    import hashlib
-
+def test_upload_image_points_out_a_library_image_with_the_same_name(monkeypatch, tmp_path):
     s = sim()
     path = _image(tmp_path)
-    md5 = hashlib.md5(path.read_bytes()).hexdigest()
-    s.canned["act_1234567890/adimages"] = lambda params: {
-        "data": [{"hash": md5, "name": "fr.png"}] if md5 in params.get("hashes", "") else []}
+    s.objects["IMG1"] = {"id": "IMG1", "hash": "abc123", "name": "fr.png"}
+    s.edges["act_1234567890"]["adimages"] = ["IMG1"]
     tools, _ = rig(monkeypatch, s)
-    with pytest.raises(Exception) as caught:
-        tools["preview_upload_image"](image_path=str(path))
-    assert f"use image_hash {md5}" in str(caught.value)
+    preview = tools["preview_upload_image"](image_path=str(path))
+    assert not preview.blocked
+    assert any("already has an image named fr.png: image_hash abc123" in w for w in preview.warnings)
 
 
 def test_upload_image_refuses_a_file_changed_since_the_preview(monkeypatch, tmp_path):
