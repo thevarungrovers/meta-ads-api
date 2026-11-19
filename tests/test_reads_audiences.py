@@ -82,3 +82,32 @@ def test_estimate_reach_reads_the_bounds(monkeypatch):
     registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
     out = registrar.tools["estimate_reach"](targeting={"geo_locations": {"countries": ["CA"]}})
     assert out["midpoint"] == 100000 and out["ready"] is True
+
+
+def test_a_throttled_usage_scan_still_lists_the_audiences(monkeypatch):
+    # The account-wide ad-set read with targeting is the one Meta throttles
+    # first; it must not take the audience list down with it.
+    from tests.fakes import error_response
+
+    sim = sim_with_audiences()
+    sim.canned["act_1234567890/adsets"] = error_response(
+        17, subcode=2446079, message="User request limit reached")
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    out = registrar.tools["list_audiences"](kind="custom")
+    assert {r["audience_id"] for r in out["custom"]} == {"AUD_READY", "AUD_NEW", "AUD_TINY"}
+    assert all(r["used_by_ad_sets"] is None for r in out["custom"])
+    assert out["usage_scan_complete"] is False and "used_by_ad_sets: null" in out["usage_unavailable"]
+    detail = registrar.tools["get_audience"](audience_id="AUD_READY")
+    assert detail["used_by"] is None and "used_by_unavailable" in detail
+
+
+def test_unused_only_refuses_when_usage_cannot_be_read(monkeypatch):
+    import pytest
+    from tests.fakes import error_response
+
+    sim = sim_with_audiences()
+    sim.canned["act_1234567890/adsets"] = error_response(
+        17, subcode=2446079, message="User request limit reached")
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    with pytest.raises(Exception, match="RATE_LIMITED"):
+        registrar.tools["list_audiences"](kind="custom", unused_only=True)

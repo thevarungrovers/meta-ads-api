@@ -369,13 +369,18 @@ def register_assets(mcp, state, client, *, listing, edge, account, headroom, mon
         says whether Meta can deliver to it now.
         """
         row = client.node(str(audience_id), AUDIENCE_FIELDS)
-        used, complete = audience_usage(client)
+        usage: dict[str, Any]
+        try:
+            used, complete = audience_usage(client)
+            usage = {"used_by": used.get(str(audience_id), []), "used_by_complete": complete}
+        except Exception as exc:  # noqa: BLE001 - the heaviest read here; often throttled
+            usage = {"used_by": None, "used_by_complete": False,
+                     "used_by_unavailable": str(exc).splitlines()[0]}
         return {
             **row,
             "approx_size": approx_size(row),
             **{("usable" if k == "usable" else f"usable_{k}"): v for k, v in usability(row).items()},
-            "used_by": used.get(str(audience_id), []),
-            "used_by_complete": complete,
+            **usage,
             "rate_limit": headroom(),
         }
 

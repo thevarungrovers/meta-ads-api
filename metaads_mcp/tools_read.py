@@ -580,14 +580,27 @@ def register(mcp, state) -> None:
         out: dict[str, Any] = {}
         if wanted in ("custom", "all"):
             custom = named(audiences.list_custom(shim, limit=depth))
-            used, complete = state.audience_usage()
+            try:
+                used, complete = state.audience_usage()
+                unavailable = None
+            except Exception as exc:  # noqa: BLE001 - the heaviest read here; often throttled
+                if unused_only:
+                    raise
+                used, complete, unavailable = None, False, str(exc).splitlines()[0]
             for row in custom:
-                row["used_by_ad_sets"] = len(used.get(row["audience_id"], []))
+                row["used_by_ad_sets"] = (
+                    None if used is None else len(used.get(row["audience_id"], []))
+                )
             if unused_only:
                 custom = [r for r in custom if not r["used_by_ad_sets"]]
             out["custom"] = custom[:limit]
             out["custom_truncated"] = len(custom) > limit
             out["usage_scan_complete"] = complete
+            if unavailable:
+                out["usage_unavailable"] = (
+                    f"{unavailable} -- the audiences are listed, but which ad sets "
+                    "use them is unknown (used_by_ad_sets: null)."
+                )
         if wanted in ("saved", "all"):
             out["saved"] = named(audiences.list_saved(shim, limit=depth))[:limit]
         out["rate_limit"] = headroom()
