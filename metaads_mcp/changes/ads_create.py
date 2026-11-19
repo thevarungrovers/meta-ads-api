@@ -79,7 +79,10 @@ class CreateAd(ChangeKind):
             payload={"adset_id": str(adset["id"]), "creative_id": str(creative_id), "name": name,
                      "approved": approved},
             campaign_id=str(adset.get("campaign_id")), account_id=adset.get("account_id"),
-            warnings=["the ad is created PAUSED; activating it is a separate, previewed step"],
+            warnings=["the ad is created PAUSED; activating it is a separate, previewed step"] + (
+                [] if ctx.client.node(str(creative_id), ("url_tags",)).get("url_tags") else
+                [f"creative {creative_id} has no url_tags: clicks from this ad carry no URL "
+                 "parameters (preview_url_tags can add them)"]),
             note="A PAUSED ad spends nothing; projected 0.",
             verify={"adset_id": str(adset["id"]), "creative_id": str(creative_id)},
         )
@@ -118,11 +121,11 @@ class CreateAd(ChangeKind):
         return ads.plan_set_status(ctx.client, ad_id=str(created), status="PAUSED")
 
 
-def default_identity(ctx) -> tuple[str | None, str | None]:
-    """The Page and Instagram account most of the account's creatives use."""
+def default_identity(ctx) -> tuple[str | None, str | None, str | None]:
+    """The Page, Instagram account and url_tags most of the account's creatives use."""
     rows = ctx.read.edge(account_path(ctx.read.resolve_account_id()), "adcreatives",
-                         ("id", "object_story_spec"), limit=25, max_items=25)
-    pages, igs = Counter(), Counter()
+                         ("id", "object_story_spec", "url_tags"), limit=25, max_items=25)
+    pages, igs, tags = Counter(), Counter(), Counter()
     for row in rows:
         spec = row.get("object_story_spec") or {}
         if isinstance(spec, str):
@@ -132,8 +135,50 @@ def default_identity(ctx) -> tuple[str | None, str | None]:
         ig = spec.get("instagram_user_id") or spec.get("instagram_actor_id")
         if ig:
             igs[str(ig)] += 1
-    return (pages.most_common(1)[0][0] if pages else None,
-            igs.most_common(1)[0][0] if igs else None)
+        if row.get("url_tags"):
+            tags[row["url_tags"]] += 1
+    return tuple(c.most_common(1)[0][0] if c else None for c in (pages, igs, tags))
+
+
+def campaign_url_tags(ctx, campaign_id: str) -> str | None:
+    """The url_tags most of a campaign's ads carry, or None.
+
+    Read per campaign because utm_campaign usually names the campaign: the
+    account's most common tags would send this ad's clicks to another
+    campaign's line in analytics.
+    """
+    rows = ctx.read.edge(str(campaign_id), "ads", ("id", "creative{url_tags}"),
+                         limit=25, max_items=25)
+    tags = Counter((r.get("creative") or {}).get("url_tags") for r in rows)
+    tags.pop(None, None)
+    return tags.most_common(1)[0][0] if tags else None
+
+
+def resolve_url_tags(ctx, url_tags: str | None, campaign_id: str | None,
+                     account_default: str | None) -> tuple[str | None, list[str]]:
+    """The url_tags a new creative gets, and what the human should be told.
+
+    None means "the default": the campaign's own, else the account's, each
+    said out loud. An empty string is an explicit "no URL parameters".
+    """
+    from metaads_mcp.changes.creative_options import check_url_tags
+
+    if url_tags is not None:
+        if not url_tags.strip():
+            return None, ["url_tags left empty on purpose: clicks from this ad carry no URL parameters"]
+        return check_url_tags(url_tags), []
+    if campaign_id:
+        tags = campaign_url_tags(ctx, campaign_id)
+        if tags:
+            return tags, [f"url_tags copied from the ads in campaign {campaign_id}: {tags}"]
+    if account_default:
+        why = (f"no ad in campaign {campaign_id} carries any" if campaign_id
+               else "no ad_set_id was given, so the campaign is unknown")
+        return account_default, [
+            f"url_tags copied from the account's most common ({why}): {account_default} -- "
+            "check that utm_campaign names the right campaign, or pass url_tags"]
+    return None, ["no url_tags: none given and none on the account's creatives, so clicks "
+                  "from this ad carry no URL parameters"]
 
 
 class CreateCreative(ChangeKind):
@@ -191,7 +236,7 @@ class CreateCreative(ChangeKind):
         image_hash: Annotated[str | None, Field(description="Or an image already in the library (list_ad_images)")] = None,
         video_id: Annotated[str | None, Field(description="Or an existing, ready video (list_ad_videos)")] = None,
         thumbnail_hash: Annotated[str | None, Field(description="video: a thumbnail image hash")] = None,
-        url_tags: Annotated[str | None, Field(description="UTM parameters, key=value&...")] = None,
+        url_tags: Annotated[str | None, Field(description="UTM parameters, key=value&...; default: the ones this campaign's ads use (pass ad_set_id), else the account's most common; \"\" for none")] = None,
         page_id: Annotated[str | None, Field(description="Page to publish as; default: the one most creatives use")] = None,
         instagram_user_id: Annotated[str | None, Field(description="Instagram account; default: the one most creatives use")] = None,
         ad_set_id: Annotated[str | None, Field(description="Preview on this ad set's placements (optional)")] = None,
@@ -204,17 +249,19 @@ class CreateCreative(ChangeKind):
         ones the account's existing creatives use. Previews and the ad checks
         (truncation, image shape, video length, CTA, destination) run here.
         """
-        from metaads_mcp.changes.creative_options import check_url_tags, name_macro_warnings
+        from metaads_mcp.changes.creative_options import name_macro_warnings
 
         if image_path:
             media.inspect_image(image_path)
-        if url_tags:
-            url_tags = check_url_tags(url_tags)
         # Only the creative's top-level, internal `name` is stamped; the
         # headline viewers see (link_data.name) is the agent's text, untouched.
         decision = ctx.name_for_create("creative", name)
         name = decision.final
-        default_page, default_ig = default_identity(ctx)
+        default_page, default_ig, default_tags = default_identity(ctx)
+        campaign_id = None
+        if ad_set_id:
+            campaign_id = str(adsets.find(ctx.client, ad_set_id=ad_set_id).get("campaign_id"))
+        url_tags, tag_warnings = resolve_url_tags(ctx, url_tags, campaign_id, default_tags)
         payload = {
             "name": name, "link": link, "primary_text": primary_text, "headline": headline,
             "description": description, "call_to_action": call_to_action,
@@ -227,9 +274,6 @@ class CreateCreative(ChangeKind):
             raise ValueError("No page_id given and none found on the account's creatives; "
                              "pass one from list_connected_identities.")
         spec = self._spec(ctx, payload)
-        campaign_id = None
-        if ad_set_id:
-            campaign_id = str(adsets.find(ctx.client, ad_set_id=ad_set_id).get("campaign_id"))
         proposal = Proposal(
             entity_type="creative", entity_id="(new)", entity_name=name,
             path=f"account {ctx.default_account}", field_name="created",
@@ -240,7 +284,7 @@ class CreateCreative(ChangeKind):
                 ("media", image_path or image_hash or video_id), ("page", payload["page_id"]),
                 ("instagram", payload["instagram_user_id"]), ("url_tags", url_tags)) if v),
             checks=[], projected=Decimal("0"), payload=payload, campaign_id=campaign_id,
-            warnings=["created unattached: nothing changes until an ad uses it"],
+            warnings=["created unattached: nothing changes until an ad uses it", *tag_warnings],
             verify={"adset_id": ad_set_id, "spec": spec, "image_path": image_path,
                     "video_id": video_id},
         )

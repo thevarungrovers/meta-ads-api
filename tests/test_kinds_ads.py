@@ -8,7 +8,7 @@ import pytest
 
 from tests.fakes import ad
 from tests.kindkit import preview_ok, rig
-from tests.test_mcp_creative_path import AD_ID, ADSET_ID, CREATIVE_ID, make_sim, png_bytes
+from tests.test_mcp_creative_path import AD_ID, ADSET_ID, CAMPAIGN_ID, CREATIVE_ID, make_sim, png_bytes
 
 
 def sim():
@@ -60,6 +60,65 @@ def test_create_creative_wants_one_media(monkeypatch):
     tools, _ = rig(monkeypatch, sim())
     with pytest.raises(Exception):
         tools["preview_create_creative"](name="x", link="https://example.com")
+
+
+CAMPAIGN_TAGS = "utm_source=meta&utm_campaign=spring"
+ACCOUNT_TAGS = "utm_source=meta&utm_campaign=other"
+
+
+def _created_spec(tools, s, **kw):
+    preview = tools["preview_create_creative"](
+        name="Spring", link="https://example.com/spring", image_hash="abc", **kw)
+    assert not preview.blocked, preview.checks
+    tools["apply_create_creative"](preview_token=preview.preview_token)
+    return preview, s.created[-1]["payload"]
+
+
+def test_create_creative_takes_url_tags_from_its_campaigns_ads(monkeypatch):
+    s = sim()
+    s.objects[CREATIVE_ID]["url_tags"] = ACCOUNT_TAGS
+    s.objects[AD_ID]["creative"] = {"id": CREATIVE_ID, "url_tags": CAMPAIGN_TAGS}
+    s.edges[CAMPAIGN_ID] = {"ads": [AD_ID]}
+    tools, _ = rig(monkeypatch, s)
+    preview, payload = _created_spec(tools, s, ad_set_id=ADSET_ID)
+    assert payload["url_tags"] == CAMPAIGN_TAGS
+    assert any("from the ads in campaign" in w for w in preview.warnings)
+
+
+def test_create_creative_falls_back_to_the_accounts_url_tags_and_says_so(monkeypatch):
+    s = sim()
+    s.objects[CREATIVE_ID]["url_tags"] = ACCOUNT_TAGS
+    tools, _ = rig(monkeypatch, s)
+    preview, payload = _created_spec(tools, s, ad_set_id=ADSET_ID)
+    assert payload["url_tags"] == ACCOUNT_TAGS
+    assert any("account's most common" in w and "utm_campaign" in w for w in preview.warnings)
+
+
+def test_create_creative_url_tags_can_be_left_empty_on_purpose(monkeypatch):
+    s = sim()
+    s.objects[CREATIVE_ID]["url_tags"] = ACCOUNT_TAGS
+    tools, _ = rig(monkeypatch, s)
+    preview, payload = _created_spec(tools, s, url_tags="")
+    assert "url_tags" not in payload
+    assert any("on purpose" in w for w in preview.warnings)
+
+
+def test_create_creative_warns_when_nothing_tags_the_clicks(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview, payload = _created_spec(tools, s)
+    assert "url_tags" not in payload
+    assert any(w.startswith("no url_tags") for w in preview.warnings)
+
+
+def test_create_ad_warns_when_its_creative_has_no_url_tags(monkeypatch):
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    preview = preview_ok(tools, "create_ad", s, ad_set_id=ADSET_ID, creative_id=CREATIVE_ID, name="New ad")
+    assert any("has no url_tags" in w for w in preview.warnings)
+    s.objects[CREATIVE_ID]["url_tags"] = CAMPAIGN_TAGS
+    preview = preview_ok(tools, "create_ad", s, ad_set_id=ADSET_ID, creative_id=CREATIVE_ID, name="Other ad")
+    assert not any("url_tags" in w for w in preview.warnings)
 
 
 def test_multi_ad_status_is_a_batch_revertible_by_batch_id(monkeypatch):
