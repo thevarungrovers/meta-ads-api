@@ -157,7 +157,8 @@ def approved_from_spec(spec: dict[str, Any] | None) -> dict[str, Any]:
         out.update(
             primary_text=[e.get("text") for e in feed.get("bodies") or []] or out["primary_text"],
             headline=[e.get("text") for e in feed.get("titles") or []] or out["headline"],
-            description=[e.get("text") for e in feed.get("descriptions") or []]
+            # Empty descriptions are a language feed's placeholders, not copy.
+            description=[e.get("text") for e in feed.get("descriptions") or [] if e.get("text")]
             or out["description"],
             link=[e.get("website_url") for e in feed.get("link_urls") or []] or out["link"],
             call_to_action=(feed.get("call_to_action_types") or [None])[0]

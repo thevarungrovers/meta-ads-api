@@ -215,6 +215,10 @@ def test_create_creative_builds_a_multi_language_creative(monkeypatch):
     story = json.loads(story) if isinstance(story, str) else story
     assert story == {"page_id": "PAGE", "instagram_user_id": "IG"}
     assert [b["text"] for b in feed["bodies"]] == ["Bonjour", "Hello"]
+    # An ad on a language feed needs a description per language: empty ones are added.
+    assert [(d["text"], d["adlabels"][0]["name"]) for d in feed["descriptions"]] == [
+        ("", "fr_description"), ("", "en_description")]
+    assert all(r["description_label"]["name"].endswith("_description") for r in feed["asset_customization_rules"])
     assert [i["hash"] for i in feed["images"]] == ["frfeed", "frstory", "enfeed"]
     rules = feed["asset_customization_rules"]
     assert [(r["image_label"]["name"], r["customization_spec"]["locales"], r["is_default"])

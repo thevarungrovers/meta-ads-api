@@ -496,6 +496,8 @@ def localized_feed(
     ...      "image_hash": "b"}], call_to_action="LEARN_MORE")
     >>> [b["text"] for b in feed["bodies"]], feed["ad_formats"]
     (['Bonjour', 'Hello'], ['SINGLE_IMAGE'])
+    >>> [(d["text"], d["adlabels"]) for d in feed["descriptions"]]
+    [('', [{'name': 'fr_description'}]), ('', [{'name': 'en_description'}])]
     >>> [(r["is_default"], r["customization_spec"]["locales"]) for r in feed["asset_customization_rules"]]
     [(True, [9, 44]), (False, [6, 24])]
     """
@@ -514,6 +516,11 @@ def localized_feed(
             raise MutationError(
                 f"{field} is given for some locales and not others; give it for every "
                 "locale or for none, or the rules point at copy that does not exist.")
+    if not any(loc.get("description") for loc in locales):
+        # An AD on a language feed needs a description per language ("Too Few
+        # News Feed Link Descriptions"), though the creative alone is accepted
+        # without. An empty one per language is what passes, as Ads Manager sends.
+        locales = [{**loc, "description": ""} for loc in locales]
     if not all(loc.get("link") for loc in locales):
         raise MutationError("Every locale needs a link.")
     kinds = set()
@@ -552,7 +559,7 @@ def localized_feed(
                 "locale_ids from search_targeting(type='locale').")
         labels: dict[str, Any] = {}
         for field, key, text_key, rule_key, suffix in _LOCALE_TEXT:
-            if loc.get(field):
+            if loc.get(field) is not None and (loc[field] or field == "description"):
                 labels[rule_key] = add(key, {text_key: loc[field]}, f"{lang}_{suffix}")
         if video:
             entry = {"video_id": str(loc["video_id"])}
