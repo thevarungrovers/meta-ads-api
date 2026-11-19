@@ -118,3 +118,14 @@ def test_a_batch_failure_part_way_says_what_landed(monkeypatch):
     assert "1 of 2 applied" in str(caught.value)
     rows = tools["list_my_changes"]()
     assert [r["applied"] for r in rows] == [True, False]
+
+
+def test_multi_ad_status_says_which_ads_it_left_out(monkeypatch):
+    # Live: two ads asked, one already PAUSED -- the preview listed one and
+    # said nothing about the other.
+    s = sim()
+    s.objects["AD2"] = ad("AD2", status="PAUSED")
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_multi_ad_status"](ad_set_id=ADSET_ID, ad_ids=[AD_ID, "AD2"],
+                                               new_status="PAUSED")
+    assert any("AD2" in w and "already PAUSED" in w for w in preview.warnings)

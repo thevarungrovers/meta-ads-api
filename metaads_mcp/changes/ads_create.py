@@ -338,7 +338,10 @@ class MultiAdStatus(AdStatus):
             items=items, batch=True, campaign_id=str(first.get("campaign_id")),
             account_id=first.get("account_id"),
             is_activation=wanted == "ACTIVE" and projected > 0,
-            warnings=[f"projected delta: {note}"] if note else [],
+            warnings=([f"projected delta: {note}"] if note else []) + (
+                [f"left out, already {wanted}: {', '.join(str(r['id']) for r in rows if r not in changing)}"]
+                if len(changing) < len(rows) else []
+            ),
         )
 
     def current(self, ctx, payload):
