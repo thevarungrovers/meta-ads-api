@@ -456,8 +456,7 @@ def summarise(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
 
     from .fields import as_decimal
 
-    totals = {"spend": Decimal(0), "impressions": Decimal(0), "clicks": Decimal(0),
-              "reach": Decimal(0)}
+    totals = {"spend": Decimal(0), "impressions": Decimal(0), "clicks": Decimal(0)}
     rows = list(rows)
     for row in rows:
         for key in totals:
@@ -476,8 +475,8 @@ def summarise(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
         )
     if totals["clicks"]:
         out["cpc"] = str((totals["spend"] / totals["clicks"]).quantize(Decimal("0.0001")))
-    # Reach is DELIBERATELY not used to derive a frequency here: reach cannot be
-    # summed across rows -- the same person reached on two days is one person,
-    # and adding the rows counts them twice. The per-row value is the only one
-    # that means anything.
+    # Reach is DELIBERATELY not totalled, nor a frequency derived from it: reach
+    # cannot be summed across rows -- the same person reached on two days is one
+    # person, and adding the rows counts them twice. The per-row value is the
+    # only one that means anything.
     return out

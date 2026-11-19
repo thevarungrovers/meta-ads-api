@@ -241,10 +241,12 @@ def test_ratios_are_recomputed_from_totals_not_averaged():
     assert totals["ctr"] == "5.0000"  # 1000 clicks / 20000 impressions
 
 
-def test_reach_is_summed_but_no_frequency_is_derived_from_it():
+def test_reach_is_not_totalled_and_no_frequency_is_derived_from_it():
     """The same person reached on two days is one person, so a summed reach is
-    already wrong and a frequency built on it would be worse."""
+    wrong and a frequency built on it would be worse. Callers already tell
+    the reader totals omit reach; a summed figure contradicted them."""
     totals = summarise([{"reach": "100"}, {"reach": "100"}])
+    assert "reach" not in totals
     assert "frequency" not in totals
 
 
