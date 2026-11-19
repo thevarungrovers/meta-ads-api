@@ -160,3 +160,18 @@ def test_the_startup_check_reads_ad_sets_once_for_the_whole_account(monkeypatch)
     assert len(warnings) == 1 and CAMPAIGN_ID in warnings[0] and "300.00/day" in warnings[0]
     adset_reads = [c for c in sim.calls if "adsets" in c["url"]]
     assert len(adset_reads) == 1
+
+
+def test_the_startup_check_asks_only_for_the_fields_it_uses(monkeypatch):
+    from metaads_mcp.server import budget_cap_warnings
+
+    sim = make_sim()
+    _, state = build_tools(sim, monkeypatch=monkeypatch)
+    sim.calls.clear()
+    budget_cap_warnings(state)
+    read = next(c for c in sim.calls if c["url"].endswith("/adsets"))
+    assert "targeting" not in read["payload"]["fields"]
+    assert set(read["payload"]["fields"].split(",")) == {
+        "id", "campaign_id", "status", "daily_budget", "lifetime_budget",
+        "budget_remaining", "end_time"}
+    assert "PAUSED\"" not in read["payload"]["effective_status"].replace("CAMPAIGN_PAUSED", "")
