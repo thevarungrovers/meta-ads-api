@@ -201,6 +201,35 @@ def ad_set_activation_bound(ctx, adset: dict[str, Any], currency: str) -> tuple[
     return ctx.limits.max_daily_budget, "no budget readable; bounded by max_daily_budget"
 
 
+def budget_headroom(ctx, row: dict[str, Any], currency: str, level: str) -> Decimal:
+    """Unused daily budget: the most any loosening of a cap or bid can add.
+
+    An ad set with no budget of its own draws on its campaign's, so the
+    bound comes from there (ad_set_activation_bound) rather than reading 0.
+    """
+    if level == "adset":
+        bound, _ = ad_set_activation_bound(ctx, row, currency)
+    else:
+        bound, _ = campaign_activation_bound(ctx, row, currency)
+    spent = ctx.spend_7d(ctx.metrics_7d(str(row["id"]), level)) / 7
+    return max(bound - spent, Decimal("0")).quantize(Decimal("0.01"))
+
+
+def bid_change_projection(ctx, row: dict[str, Any], currency: str,
+                          before: Decimal | None, after: Decimal) -> Decimal:
+    """A bid change's added spend, never more than the budget can spend.
+
+    The bid-times-volume estimate counts CLICKS, but a cost cap or bid cap is
+    priced per result, so on its own it can project several times the budget.
+    """
+    from metaads_mcp.previews import project_bid_change
+
+    estimate = project_bid_change(before, after, ctx.clicks_7d(ctx.metrics_7d(str(row["id"]), "adset")))
+    if estimate <= 0:
+        return Decimal("0")
+    return min(estimate, budget_headroom(ctx, row, currency, "adset")).quantize(Decimal("0.01"))
+
+
 def ad_activation_bound(ctx, ad: dict[str, Any], currency: str) -> tuple[Decimal, str]:
     """An ad restarts its ad set's spend only when it is the only active one."""
     from metaads_reporting.write import ads as ad_writes

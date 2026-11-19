@@ -616,3 +616,34 @@ def test_under_a_campaign_budget_the_strategy_is_read_from_the_campaign(monkeypa
     registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
     preview = registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="3.50")
     assert any("COST_CAP" in w and "TARGET" in w for w in preview.warnings)
+
+
+def _cost_cap_under_a_campaign_budget():
+    # As seen live: a COST_CAP ad set with no budget of its own, inside a
+    # campaign holding 71.42/day, with ~80 clicks a day.
+    sim = make_sim()
+    sim.objects[CAMPAIGN_ID].update(daily_budget="7142", bid_strategy="COST_CAP")
+    sim.objects[ADSET_ID].update(bid_strategy="COST_CAP", bid_amount="12500", daily_budget=None)
+    sim.insights = [insights_row(clicks="559", spend="175.28")]
+    return sim
+
+
+def test_a_bid_change_never_projects_more_than_the_budget_can_spend(monkeypatch):
+    # Live: +5.00 on a 125.00 cost cap projected 399.29/day -- the bid delta
+    # times CLICKS, under a campaign budget of 71.42/day.
+    registrar, _ = build_tools(_cost_cap_under_a_campaign_budget(), limits=Limits(**{
+        **DEFAULTS, "max_cost_cap": Decimal("500"), "max_bid_amount": Decimal("500")}),
+        monkeypatch=monkeypatch)
+    preview = registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="130.00")
+    assert Decimal(preview.projected_daily_spend_delta) <= Decimal("71.42")
+    assert all("." not in c.split(":")[-1].split()[0] or len(c.split(":")[-1].split()[0].split(".")[1]) <= 2
+               for c in preview.checks if c.split()[1].startswith("projected_delta_per_day"))
+
+
+def test_a_cost_cap_is_held_to_max_cost_cap(monkeypatch):
+    registrar, _ = build_tools(_cost_cap_under_a_campaign_budget(), limits=Limits(**{
+        **DEFAULTS, "max_cost_cap": Decimal("200"), "max_bid_amount": Decimal("50")}),
+        monkeypatch=monkeypatch)
+    preview = registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="130.00")
+    assert any(c.startswith("OK") and "max_cost_cap" in c for c in preview.checks)
+    assert not any("max_bid_amount" in c for c in preview.checks)

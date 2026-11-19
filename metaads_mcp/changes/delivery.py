@@ -16,6 +16,7 @@ from metaads_mcp.changes.base import (
     parse_money,
 )
 from metaads_mcp.changes.common import (
+    bid_change_projection,
     StatusKind,
     ad_activation_bound,
     ad_set_activation_bound,
@@ -28,7 +29,7 @@ from metaads_mcp.changes.common import (
     wanted_status,
 )
 from metaads_mcp.guardrails import check_ceiling, check_currency, check_pct_increase
-from metaads_mcp.previews import pct_change, project_bid_change, project_budget_change
+from metaads_mcp.previews import pct_change, project_budget_change
 from metaads_reporting.currency import format_money
 from metaads_reporting.write import ads, adsets, campaigns
 
@@ -513,10 +514,14 @@ class AdSetBidAmount(_MoneyKind):
 
         before = money(row, "bid_amount", currency)
         metrics = ctx.metrics_7d(str(row["id"]), "adset")
-        projected = project_bid_change(before, after, ctx.clicks_7d(metrics))
+        projected = bid_change_projection(ctx, row, currency, before, after)
+        ceiling_name, ceiling = (
+            ("max_cost_cap", ctx.limits.max_cost_cap) if strategy == "COST_CAP"
+            else ("max_bid_amount", ctx.limits.max_bid_amount)
+        )
         checks = [
             check_currency(ctx.limits, currency),
-            check_ceiling("max_bid_amount", after, ctx.limits.max_bid_amount, currency),
+            check_ceiling(ceiling_name, after, ceiling, currency),
             check_pct_increase(
                 "max_bid_increase_pct", before, after, ctx.limits.max_bid_increase_pct
             ),

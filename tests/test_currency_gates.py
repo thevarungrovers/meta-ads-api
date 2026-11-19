@@ -242,7 +242,7 @@ def test_a_lower_cap_under_the_same_strategy_needs_no_rate(monkeypatch):
 
     # No clicks to project from: the projection is 0, and only the direction
     # proves the change cannot add spend.
-    monkeypatch.setattr(bidding, "project_bid_change", lambda *a, **k: Decimal("0"))
+    monkeypatch.setattr(bidding, "bid_change_projection", lambda *a, **k: Decimal("0"))
     tools, sim = two_accounts(monkeypatch, currency_rates=())
     sim.objects[JPY_ADSET]["status"] = "ACTIVE"
     preview = tools["preview_ad_set_bid_strategy"](

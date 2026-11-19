@@ -25,19 +25,20 @@ from pydantic import Field
 
 from metaads_mcp.changes.base import APPLY_SPENDS, Proposal, parse_money
 from metaads_mcp.changes.common import (
+    bid_change_projection,
+    budget_headroom,
     CLEARED,
     OMITTED_WHEN_CLEARED,
     NodeFieldKind,
     _remaining_days,
     as_obj,
     canonical,
-    daily_bound,
     money,
     previous_values,
     rendered,
 )
 from metaads_mcp.guardrails import Check, check_ceiling, check_currency, check_pct_increase
-from metaads_mcp.previews import pct_change, project_bid_change
+from metaads_mcp.previews import pct_change
 from metaads_reporting.currency import format_money, to_minor_units
 from metaads_reporting.write import adsets, campaigns
 
@@ -120,11 +121,7 @@ def _frequency_direction(old: list[Any], max_frequency: int,
 
 def _headroom(ctx, row: dict[str, Any], currency: str, level: str, end_field: str) -> Decimal:
     """Unused daily budget: the honest bound for anything that loosens a cap."""
-    bound, _ = daily_bound(row, currency, end_field)
-    if bound is None:
-        return Decimal("0")
-    spent = ctx.spend_7d(ctx.metrics_7d(str(row["id"]), level)) / 7
-    return max(bound - spent, Decimal("0"))
+    return budget_headroom(ctx, row, currency, level)
 
 
 def parse_time(raw: str, name: str) -> dt.datetime:
@@ -422,8 +419,7 @@ class AdSetBidStrategy(_AdSetKind):
                 after_bid, ceiling, currency))
             checks.append(check_pct_increase("max_bid_increase_pct", before_bid, after_bid,
                                              ctx.limits.max_bid_increase_pct))
-            projected = project_bid_change(
-                before_bid, after_bid, ctx.clicks_7d(ctx.metrics_7d(str(row["id"]), "adset")))
+            projected = bid_change_projection(ctx, row, currency, before_bid, after_bid)
         elif strategy == "LOWEST_COST_WITH_MIN_ROAS":
             if not roas_floor:
                 raise ValueError("LOWEST_COST_WITH_MIN_ROAS needs roas_floor.")
