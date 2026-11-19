@@ -218,8 +218,8 @@ def test_create_creative_builds_a_multi_language_creative(monkeypatch):
     assert [i["hash"] for i in feed["images"]] == ["frfeed", "frstory", "enfeed"]
     rules = feed["asset_customization_rules"]
     assert [(r["image_label"]["name"], r["customization_spec"]["locales"], r["is_default"])
-            for r in rules] == [("fr_story", [9, 44], False), ("fr_img", [9, 44], False),
-                                ("en_img", [6, 24], False), ("fr_img", [9, 44], True)]
+            for r in rules] == [("fr_story", [9, 44], False), ("fr_img", [9, 44], True),
+                                ("en_img", [6, 24], False)]
     assert rules[0]["customization_spec"]["instagram_positions"] == ["story", "reels"]
     assert payload["url_tags"] == "utm_source=meta"
     assert result.verification["passed"] is True

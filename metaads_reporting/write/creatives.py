@@ -486,8 +486,8 @@ def localized_feed(
     ``asset_customization_rules`` entry per language points at those labels for
     that language's locale ids. A locale may add a ``story_image_hash``: a
     vertical image Stories and Reels show instead of the feed image. The
-    ``default_language`` rule (the first locale unless named) is what everyone
-    else sees.
+    ``default_language`` rule (the first locale unless named) is flagged
+    ``is_default``: it is what everyone else sees.
 
     >>> feed = localized_feed([
     ...     {"language": "fr", "primary_text": "Bonjour", "link": "https://example.com/fr",
@@ -497,7 +497,7 @@ def localized_feed(
     >>> [b["text"] for b in feed["bodies"]], feed["ad_formats"]
     (['Bonjour', 'Hello'], ['SINGLE_IMAGE'])
     >>> [(r["is_default"], r["customization_spec"]["locales"]) for r in feed["asset_customization_rules"]]
-    [(False, [9, 44]), (False, [6, 24]), (True, [9, 44])]
+    [(True, [9, 44]), (False, [6, 24])]
     """
     if len(locales) < 2:
         raise MutationError("A multi-locale creative needs at least two locales; "
@@ -538,7 +538,6 @@ def localized_feed(
         "call_to_action_types": [call_to_action],
     }
     rules: list[dict[str, Any]] = []
-    default_rule: dict[str, Any] = {}
 
     def add(key: str, entry: dict[str, Any], label: str) -> dict[str, str]:
         entry["adlabels"] = [{"name": label}]
@@ -567,8 +566,8 @@ def localized_feed(
             story = add("images", {"hash": loc["story_image_hash"]}, f"{lang}_story")
             rules.append({**labels, "image_label": story, "is_default": False,
                           "customization_spec": {**spec, **STORY_PLACEMENTS}})
-        rules.append({**labels, "is_default": False, "customization_spec": spec})
-        if lang == default:
-            default_rule = {**labels, "is_default": True, "customization_spec": dict(spec)}
-    feed["asset_customization_rules"] = rules + [default_rule]
+        # The default is the default language's own rule, flagged: Meta refuses
+        # an extra copy of it as "an unsupported targeting field".
+        rules.append({**labels, "is_default": lang == default, "customization_spec": spec})
+    feed["asset_customization_rules"] = rules
     return feed
