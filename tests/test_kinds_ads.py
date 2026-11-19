@@ -46,6 +46,7 @@ def test_create_creative_defaults_identity_and_uploads_at_apply(monkeypatch, tmp
     assert not preview.blocked, preview.checks
     assert "page: 'PAGE'" in preview.after and "instagram: 'IG'" in preview.after
     assert not any(c["edge"] == "adimages" for c in s.created)
+    assert any("1 local image(s) are uploaded at apply" in w for w in preview.warnings)
     result = tools["apply_create_creative"](preview_token=preview.preview_token)
     assert [c["edge"] for c in s.created] == ["adimages", "adcreatives"]
     spec = json.loads(s.created[-1]["payload"]["object_story_spec"])
@@ -298,3 +299,34 @@ def test_upload_image_refuses_a_file_changed_since_the_preview(monkeypatch, tmp_
         tools["apply_upload_image"](preview_token=preview.preview_token)
     assert "changed on disk" in str(caught.value)
     assert not s.created
+
+
+def test_a_multi_language_creative_uploads_its_local_images_at_apply(monkeypatch, tmp_path):
+    s = sim()
+    fr = _image(tmp_path, "fr.png")
+    fr_story = tmp_path / "fr_story.png"
+    fr_story.write_bytes(png_bytes(1080, 1920))
+    tools, _ = rig(monkeypatch, s)
+    locales = [{**FR, "image_hash": None, "image_path": str(fr),
+                "story_image_hash": None, "story_image_path": str(fr_story)},
+               {**EN, "image_path": str(fr), "image_hash": None}]
+    locales = [{k: v for k, v in loc.items() if v is not None} for loc in locales]
+    preview = tools["preview_create_creative"](name="Spring", locales=locales)
+    assert not preview.blocked, preview.checks
+    assert not s.created, "nothing is uploaded at preview"
+    assert any("uploaded at apply" in w for w in preview.warnings)
+    result = tools["apply_create_creative"](preview_token=preview.preview_token)
+    # Two distinct files, each uploaded once, though fr.png serves both languages.
+    assert [c["edge"] for c in s.created] == ["adimages", "adimages", "adcreatives"]
+    feed = _feed(s.created[-1]["payload"])
+    assert [i["hash"] for i in feed["images"]] == ["hash1", "hash2", "hash1"]
+    assert result.verification["passed"] is True
+
+
+def test_a_missing_local_image_is_refused_at_preview(monkeypatch, tmp_path):
+    tools, _ = rig(monkeypatch, sim())
+    with pytest.raises(Exception) as caught:
+        tools["preview_create_creative"](name="Spring", locales=[
+            {**FR, "image_hash": None, "story_image_hash": None,
+             "image_path": str(tmp_path / "nope.png")}, EN])
+    assert "No file at" in str(caught.value)

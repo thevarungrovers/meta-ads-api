@@ -191,8 +191,10 @@ class LocaleCopy(BaseModel):
     headline: str | None = Field(None, description="Headline in this language")
     description: str | None = Field(None, description="Description in this language")
     link: str = Field(description="Destination URL for this language")
-    image_hash: str | None = Field(None, description="Feed image, from list_ad_images")
-    story_image_hash: str | None = Field(None, description="Optional vertical image for Stories and Reels")
+    image_hash: str | None = Field(None, description="Feed image already in the library (list_ad_images or upload_image)")
+    image_path: str | None = Field(None, description="Or a local feed image, uploaded at apply")
+    story_image_hash: str | None = Field(None, description="Optional vertical image for Stories and Reels, from the library")
+    story_image_path: str | None = Field(None, description="Or a local vertical image, uploaded at apply")
     video_id: str | None = Field(None, description="Or a ready video, from list_ad_videos")
     thumbnail_hash: str | None = Field(None, description="video: a thumbnail image hash")
 
@@ -206,7 +208,8 @@ def _locale_line(loc: dict[str, Any], default: str) -> str:
     mark = " (default)" if loc["language"].lower() == default.lower() else ""
     return f"{loc['language']}{mark}: " + " | ".join(
         f"{k}: {loc[k]!r}" for k in ("primary_text", "headline", "description", "link",
-                                     "image_hash", "story_image_hash", "video_id") if loc.get(k))
+                                     "image_hash", "image_path", "story_image_hash",
+                                     "story_image_path", "video_id") if loc.get(k))
 
 
 class CreateCreative(ChangeKind):
@@ -305,8 +308,11 @@ class CreateCreative(ChangeKind):
         With `locales`, Meta shows each viewer the entry in their language
         (fr = fr_FR + fr_CA, en = en_US + en_GB, or explicit locale_ids), and
         everyone else the default_language one. Every locale uses the same
-        kind of media (all images or all videos, from the library); an image
-        locale may add story_image_hash, a vertical image for Stories and Reels.
+        kind of media (all images or all videos). An image is a library hash
+        (image_hash) or a local file (image_path, uploaded at apply); an image
+        locale may add a vertical Stories/Reels image the same two ways. Local
+        files leave Meta's validate_only and the previews until apply:
+        upload_image them first to have both at preview.
         """
         from metaads_mcp.changes.creative_options import name_macro_warnings
 
@@ -335,6 +341,11 @@ class CreateCreative(ChangeKind):
         if not payload["page_id"]:
             raise ValueError("No page_id given and none found on the account's creatives; "
                              "pass one from list_connected_identities.")
+        local = [image_path] if image_path else []
+        local += [loc[k] for loc in payload["locales"] or () for k in ("image_path", "story_image_path")
+                  if loc.get(k)]
+        for path in local:
+            media.inspect_image(path)
         spec = self._spec(ctx, payload)
         proposal = Proposal(
             entity_type="creative", entity_id="(new)", entity_name=name,
@@ -349,10 +360,14 @@ class CreateCreative(ChangeKind):
                       for loc in payload["locales"] or ()),
             checks=[], projected=Decimal("0"), payload=payload, campaign_id=campaign_id,
             warnings=["created unattached: nothing changes until an ad uses it", *tag_warnings],
-            verify={"adset_id": ad_set_id, "spec": spec, "image_path": image_path,
-                    "video_id": video_id},
+            verify={"adset_id": ad_set_id, "spec": spec, "image_path": image_path or
+                    next(iter(local), None), "video_id": video_id},
         )
         proposal.name(decision)
+        if local:
+            proposal.warnings.append(
+                f"{len(dict.fromkeys(local))} local image(s) are uploaded at apply, so Meta's "
+                "validate_only and the previews wait until then; upload_image first to see both now")
         if url_tags:
             proposal.warnings.extend(name_macro_warnings(url_tags))
         return proposal
@@ -372,6 +387,12 @@ class CreateCreative(ChangeKind):
             image = media.inspect_image(payload["image_path"])
             image_hash = media.upload_image(ctx.client, image, apply=True)
             plan.payload = ads._fill_uploaded_image(plan.payload, image_hash)
+        feed = plan.payload.get("asset_feed_spec")
+        if feed:
+            # Each local file once, even when a language uses it for feed and Stories.
+            hashes = {path: media.upload_image(ctx.client, media.inspect_image(path), apply=True)
+                      for path in creative_specs.pending_paths(feed)}
+            plan.payload = {**plan.payload, "asset_feed_spec": creative_specs.fill_pending(feed, hashes)}
         return plan
 
     def approved_for(self, ctx, payload, plan):

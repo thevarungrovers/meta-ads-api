@@ -476,6 +476,37 @@ _LOCALE_TEXT = (
 )
 
 
+#: A local file not uploaded yet stands in a feed's image entry as this, then
+#: its path; :func:`pending_paths` finds them and the apply swaps in the hash.
+#: It starts with the marker every preview check recognises as "no hash yet".
+PENDING_IMAGE = "<pending upload>"
+
+
+def pending_hash(path: str) -> str:
+    """The placeholder for a local file in an image entry's ``hash``."""
+    return f"{PENDING_IMAGE} {path}"
+
+
+def pending_paths(feed: dict[str, Any]) -> list[str]:
+    """The local files a feed still has to upload, each once, in order.
+
+    >>> pending_paths({"images": [{"hash": pending_hash("/a.png")}, {"hash": "h"},
+    ...                           {"hash": pending_hash("/a.png")}]})
+    ['/a.png']
+    """
+    found = (str(e.get("hash") or "") for e in feed.get("images") or [])
+    return list(dict.fromkeys(h[len(PENDING_IMAGE) + 1:] for h in found
+                              if h.startswith(PENDING_IMAGE + " ")))
+
+
+def fill_pending(feed: dict[str, Any], hashes: dict[str, str]) -> dict[str, Any]:
+    """The feed with each local file's placeholder replaced by its uploaded hash."""
+    images = [{**e, "hash": hashes.get(str(e.get("hash") or "")[len(PENDING_IMAGE) + 1:], e.get("hash"))}
+              if str(e.get("hash") or "").startswith(PENDING_IMAGE + " ") else e
+              for e in feed.get("images") or []]
+    return {**feed, "images": images} if images else feed
+
+
 def localized_feed(
     locales: list[dict[str, Any]], *, call_to_action: str, default_language: str | None = None
 ) -> dict[str, Any]:
@@ -484,8 +515,9 @@ def localized_feed(
     Built the way Ads Manager builds one: every text and media entry carries an
     adlabel named after its language (``fr_body``, ``en_img``...), and one
     ``asset_customization_rules`` entry per language points at those labels for
-    that language's locale ids. A locale may add a ``story_image_hash``: a
-    vertical image Stories and Reels show instead of the feed image. The
+    that language's locale ids. A locale may add a story image (hash or local
+    path): a vertical image Stories and Reels show instead of the feed image.
+    A local ``image_path`` goes in as a placeholder the apply uploads. The
     ``default_language`` rule (the first locale unless named) is flagged
     ``is_default``: it is what everyone else sees.
 
@@ -525,19 +557,19 @@ def localized_feed(
         raise MutationError("Every locale needs a link.")
     kinds = set()
     for lang, loc in zip(languages, locales):
-        if loc.get("image_path"):
-            raise MutationError(f"{lang}: a multi-locale creative takes images already in the "
-                                "library (image_hash, from list_ad_images), not a local file.")
-        given = [k for k in ("image_hash", "video_id") if loc.get(k)]
+        given = [k for k in ("image_hash", "image_path", "video_id") if loc.get(k)]
         if len(given) != 1:
-            raise MutationError(f"{lang}: give exactly one of image_hash or video_id.")
-        kinds.add(given[0])
-        if loc.get("story_image_hash") and given[0] != "image_hash":
-            raise MutationError(f"{lang}: story_image_hash goes with an image ad, not a video.")
+            raise MutationError(f"{lang}: give exactly one of image_hash, image_path or video_id.")
+        kinds.add("video" if given[0] == "video_id" else "image")
+        story = [k for k in ("story_image_hash", "story_image_path") if loc.get(k)]
+        if len(story) > 1:
+            raise MutationError(f"{lang}: give one of story_image_hash or story_image_path.")
+        if story and given[0] == "video_id":
+            raise MutationError(f"{lang}: a Stories image goes with an image ad, not a video.")
     if len(kinds) != 1:
         raise MutationError("Every locale must use the same kind of media: all images or "
                             "all videos. Meta builds one ad format for every language.")
-    video = kinds == {"video_id"}
+    video = kinds == {"video"}
 
     feed: dict[str, Any] = {
         "ad_formats": ["SINGLE_VIDEO" if video else "SINGLE_IMAGE"],
@@ -567,10 +599,13 @@ def localized_feed(
                 entry["thumbnail_hash"] = loc["thumbnail_hash"]
             labels["video_label"] = add("videos", entry, f"{lang}_video")
         else:
-            labels["image_label"] = add("images", {"hash": loc["image_hash"]}, f"{lang}_img")
+            labels["image_label"] = add(
+                "images", {"hash": loc.get("image_hash") or pending_hash(loc["image_path"])},
+                f"{lang}_img")
         spec = {"locales": [int(i) for i in ids]}
-        if loc.get("story_image_hash"):
-            story = add("images", {"hash": loc["story_image_hash"]}, f"{lang}_story")
+        if loc.get("story_image_hash") or loc.get("story_image_path"):
+            story = add("images", {"hash": loc.get("story_image_hash")
+                                   or pending_hash(loc["story_image_path"])}, f"{lang}_story")
             rules.append({**labels, "image_label": story, "is_default": False,
                           "customization_spec": {**spec, **STORY_PLACEMENTS}})
         # The default is the default language's own rule, flagged: Meta refuses
