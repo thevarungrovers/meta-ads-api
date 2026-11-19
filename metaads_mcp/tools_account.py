@@ -579,15 +579,32 @@ def register_more(mcp, state, client, *, listing, edge, account, headroom, money
         as, and its advertisable apps. Engagement audiences and a creative's
         identity take their ids from here."""
         out: dict[str, Any] = {}
+        # A Page's linked Instagram business account -- the identity live ads
+        # publish as -- is not on the ad account's instagram_accounts edge, so
+        # it is read with the Pages in the same request.
+        linked: list[dict] = []
         for key, name, fields in (
-            ("pages", "promote_pages", ("id", "name")),
+            ("pages", "promote_pages", ("id", "name", "instagram_business_account{id,username}")),
             ("instagram_accounts", "instagram_accounts", ("id", "username")),
             ("apps", "advertisable_applications", ("id", "name")),
         ):
             try:
-                out[key] = edge(account(), name, fields, 100)[:100]
+                rows = edge(account(), name, fields, 100)[:100]
             except Exception as exc:  # noqa: BLE001 - one edge may need a permission
                 out[key] = {"unavailable": str(exc).splitlines()[0]}
+                continue
+            if key == "pages":
+                for row in rows:
+                    ig = row.pop("instagram_business_account", None)
+                    if ig and ig.get("id"):
+                        linked.append({"id": ig["id"], "username": ig.get("username"),
+                                       "via_page": row.get("id")})
+            out[key] = rows
+        if linked:
+            direct = out.get("instagram_accounts")
+            direct = direct if isinstance(direct, list) else []
+            seen = {row.get("id") for row in direct}
+            out["instagram_accounts"] = direct + [r for r in linked if r["id"] not in seen]
         out["rate_limit"] = headroom()
         return out
 

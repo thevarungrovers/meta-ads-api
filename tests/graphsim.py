@@ -96,7 +96,7 @@ class GraphSim:
             return FakeResponse({"error": {"message": "no path", "code": 100}}, status=400)
 
         node, edge = segments[0], (segments[1] if len(segments) > 1 else None)
-        fields = [f for f in (params.get("fields") or "").split(",") if f]
+        fields = _split_fields(params.get("fields") or "")
 
         for key in (f"{node}/{edge}" if edge else node, edge or "", node):
             if key and key in self.canned:
@@ -174,7 +174,7 @@ class GraphSim:
         """
         if not fields:
             return {"id": obj.get("id")}
-        wanted = {f.split(".", 1)[0].split("(", 1)[0] for f in fields}
+        wanted = {f.split(".", 1)[0].split("(", 1)[0].split("{", 1)[0] for f in fields}
         out = {k: v for k, v in obj.items() if k in wanted}
         out.setdefault("id", obj.get("id"))
         return out
@@ -308,3 +308,19 @@ class GraphSim:
     @property
     def writes(self) -> list[dict[str, Any]]:
         return [c for c in self.calls if c["method"] == "POST"]
+
+
+def _split_fields(spec: str) -> list[str]:
+    """Split a fields list on top-level commas only, as Meta does:
+    ``a,b{c,d}`` is two fields, not three."""
+    out, depth, cur = [], 0, ""
+    for ch in spec:
+        depth += ch in "{("
+        depth -= ch in "})"
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur)
+    return [f for f in out if f]

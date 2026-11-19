@@ -81,3 +81,16 @@ def test_identities_survive_one_refused_edge(monkeypatch):
     out = tools(monkeypatch, sim)["list_connected_identities"]()
     assert out["pages"] == [{"id": "P1", "name": "Example Co"}]
     assert "unavailable" in out["instagram_accounts"]
+
+
+def test_identities_include_the_instagram_account_linked_to_a_page(monkeypatch):
+    # The ad account's own instagram_accounts edge comes back empty for a
+    # business account linked through its Page -- the identity live ads use.
+    sim = make_sim()
+    sim.objects["P1"] = {"id": "P1", "name": "Example Co",
+                         "instagram_business_account": {"id": "IG9", "username": "exampleco"}}
+    sim.edges[ACT]["promote_pages"] = ["P1"]
+    sim.edges[ACT]["instagram_accounts"] = []
+    out = tools(monkeypatch, sim)["list_connected_identities"]()
+    assert out["pages"] == [{"id": "P1", "name": "Example Co"}]
+    assert out["instagram_accounts"] == [{"id": "IG9", "username": "exampleco", "via_page": "P1"}]
