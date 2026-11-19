@@ -133,3 +133,30 @@ def test_startup_warns_about_a_budget_over_the_daily_total(monkeypatch):
         max_projected_delta_per_day_total=Decimal("100")), monkeypatch=monkeypatch)
     warnings = budget_cap_warnings(state)
     assert len(warnings) == 1 and "250.00/day" in warnings[0]
+
+
+def test_the_startup_check_reads_ad_sets_once_for_the_whole_account(monkeypatch):
+    # One ad-set request per campaign at every start burned the account's
+    # rate limit before the agent made a single call of its own.
+    from tests.fakes import campaign
+    from metaads_mcp.server import budget_cap_warnings
+
+    sim = make_sim()
+    sim.objects[CAMPAIGN_ID].pop("daily_budget")
+    sim.objects[ADSET_ID]["daily_budget"] = "30000"
+    sim.objects[ADSET_ID]["status"] = "ACTIVE"
+    for n in range(2, 7):
+        cid, aid = f"1203000000000{n}", f"ADSET_{n}"
+        sim.objects[cid] = campaign(cid, daily_budget=None)
+        sim.objects[cid].pop("daily_budget", None)
+        sim.objects[aid] = ad_set(aid, daily_budget="1000", campaign_id=cid)
+        sim.edges["act_1234567890"]["campaigns"].append(cid)
+        sim.edges["act_1234567890"]["adsets"].append(aid)
+        sim.edges[cid] = {"adsets": [aid]}
+    _, state = build_tools(sim, limits=lim(
+        max_projected_delta_per_day_total=Decimal("200")), monkeypatch=monkeypatch)
+    sim.calls.clear()
+    warnings = budget_cap_warnings(state)
+    assert len(warnings) == 1 and CAMPAIGN_ID in warnings[0] and "300.00/day" in warnings[0]
+    adset_reads = [c for c in sim.calls if "adsets" in c["url"]]
+    assert len(adset_reads) == 1

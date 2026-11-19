@@ -155,8 +155,14 @@ def daily_bound(row: dict[str, Any], currency: str, end_field: str) -> tuple[Dec
     return None, ""
 
 
-def campaign_activation_bound(ctx, campaign: dict[str, Any], currency: str) -> tuple[Decimal, str]:
-    """Upper bound on daily spend a campaign can resume."""
+def campaign_activation_bound(
+    ctx, campaign: dict[str, Any], currency: str, adsets: list[dict[str, Any]] | None = None
+) -> tuple[Decimal, str]:
+    """Upper bound on daily spend a campaign can resume.
+
+    `adsets` is the campaign's ad sets when the caller already has them (the
+    startup check reads the whole account's once); otherwise they are read.
+    """
     from metaads_reporting.write import adsets as adset_writes
 
     own, why = daily_bound(campaign, currency, "stop_time")
@@ -164,7 +170,9 @@ def campaign_activation_bound(ctx, campaign: dict[str, Any], currency: str) -> t
         return own, f"upper bound: {why}"
     total = Decimal("0")
     counted = 0
-    for child in adset_writes.search(ctx.client, None, campaign_id=str(campaign["id"]), limit=200):
+    if adsets is None:
+        adsets = adset_writes.search(ctx.client, None, campaign_id=str(campaign["id"]), limit=200)
+    for child in adsets:
         if (child.get("status") or "") != "ACTIVE":
             continue
         bound, _ = daily_bound(child, currency, "end_time")

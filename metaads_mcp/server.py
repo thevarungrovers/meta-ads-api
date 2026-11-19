@@ -226,14 +226,21 @@ def budget_cap_warnings(state: ServerState) -> list[str]:
     rather than discovered at the worst moment.
     """
     from metaads_mcp.changes.common import campaign_activation_bound
-    from metaads_reporting.write import campaigns
+    from metaads_reporting.write import adsets, campaigns
 
     ctx = state.engine.ctx
     currency = ctx.currency()
     ceiling = state.limits.max_projected_delta_per_day_total
+    # One account-wide ad-set read, not one per campaign: this runs at every
+    # start, and per-campaign reads alone can exhaust the account's rate limit.
+    by_campaign: dict[str, list[dict]] = {}
+    for child in adsets.search(ctx.client, None, limit=2000, max_pages=10):
+        by_campaign.setdefault(str(child.get("campaign_id")), []).append(child)
     found = []
     for row in campaigns.search(ctx.client, None, limit=200):
-        bound, why = campaign_activation_bound(ctx, row, currency)
+        bound, why = campaign_activation_bound(
+            ctx, row, currency, adsets=by_campaign.get(str(row.get("id")), [])
+        )
         if bound > ceiling:
             found.append(
                 f"campaign {row.get('id')} can spend {bound:.2f}/day ({why}), over "
