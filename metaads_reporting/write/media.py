@@ -5,15 +5,11 @@ An ad does not carry a file. It carries a creative, and a creative carries an
 is two steps: put the file in the account's media library, then build a
 creative that references it.
 
-IMAGES ARE SUPPORTED, VIDEO UPLOAD IS NOT, and that is a deliberate line rather
-than an oversight. The ``advideos`` edge is asynchronous: the POST returns an
-id for a video Meta has not finished processing, and an ad built on it is
-rejected until ``status.video_status`` reaches ``ready``. Doing that properly
-means chunked upload for large files and a bounded polling loop, which is its
-own feature. :func:`check_video_usable` lets an EXISTING video be reused --
-which covers duplicating a video ad with new copy, the common case on an
-account whose ads are mostly video -- and :func:`upload_video` refuses with
-that explanation rather than half-doing it.
+VIDEO IS ASYNCHRONOUS. The ``advideos`` edge returns an id for a video Meta
+has not finished processing, and an ad built on it is rejected until
+``status.video_status`` reaches ``ready``. So :func:`upload_video` uses Meta's
+resumable (chunked) upload, :func:`wait_until_ready` polls for a bounded time,
+and :func:`check_video_usable` refuses a video that is not ready yet.
 
 Nothing here is reachable from the MCP server except through a preview/apply
 pair, and the upload happens at APPLY time because it is a write.
@@ -299,20 +295,212 @@ def check_video_usable(client: MutatingMetaAdsClient, video_id: str) -> dict[str
     return video
 
 
-def upload_video(*args: Any, **kwargs: Any) -> None:
-    """Not implemented, on purpose. Reuse an existing video instead.
+#: Meta's ceiling for an ad video file.
+MAX_VIDEO_BYTES = 4 * 1024 * 1024 * 1024
 
-    The ``advideos`` edge is asynchronous and, above 50MB, chunked: the POST
-    returns an id for a video Meta has not finished encoding, and anything
-    built on it is rejected until it reports ready. Supporting that means a
-    resumable upload and a bounded polling loop, which is a feature of its own
-    rather than a few lines here.
+#: What Meta recommends for ad video: MP4 or MOV, both ISO media files whose
+#: first box is ``ftyp``. Anything else is refused locally rather than after
+#: a long upload ends in an encoding error.
+VIDEO_TYPES = {"qt  ": "mov"}
 
-    A stub that half-did it would be worse than its absence: it would create
-    ads that fail review for a reason nobody could see.
+
+@dataclass(frozen=True)
+class LocalVideo:
+    """A video file on disk, checked but not yet uploaded."""
+
+    path: Path
+    size_bytes: int
+    video_type: str
+    duration_seconds: float | None
+
+    def describe(self) -> str:
+        length = (f", {int(self.duration_seconds // 60)}:{int(self.duration_seconds % 60):02d}"
+                  if self.duration_seconds is not None else "")
+        return (f"{self.path.name} ({self.size_bytes / 1024 / 1024:.1f}MB "
+                f"{self.video_type}{length})")
+
+
+def sniff_video_type(head: bytes) -> str | None:
+    r"""mp4 or mov from a file's first bytes, or None.
+
+    >>> sniff_video_type(b"\x00\x00\x00\x18ftypmp42"), sniff_video_type(b"\x00\x00\x00\x14ftypqt  ")
+    ('mp4', 'mov')
+    >>> sniff_video_type(b"RIFF....AVI ") is None
+    True
     """
-    raise MutationError(
-        "Uploading a new video is not supported. Upload it in Ads Manager, "
-        "then reuse its video_id here -- duplicating a video ad with new copy "
-        "keeps the existing video and needs no upload at all."
+    if len(head) < 12 or head[4:8] != b"ftyp":
+        return None
+    return VIDEO_TYPES.get(head[8:12].decode("latin-1"), "mp4")
+
+
+def mp4_duration(path: Path) -> float | None:
+    """Seconds, from the ``mvhd`` box inside ``moov``; None if not found.
+
+    Reads box headers only (plus moov itself), so a 2GB file costs a few
+    seeks, not a read of the whole file.
+    """
+    import struct
+
+    def boxes(handle, end):
+        while handle.tell() + 8 <= end:
+            at = handle.tell()
+            size, kind = struct.unpack(">I4s", handle.read(8))
+            header = 8
+            if size == 1:
+                size = struct.unpack(">Q", handle.read(8))[0]
+                header = 16
+            elif size == 0:
+                size = end - at
+            if size < header:
+                return
+            yield kind, at + header, at + size
+            handle.seek(at + size)
+
+    try:
+        with path.open("rb") as handle:
+            total = path.stat().st_size
+            for kind, body, end in boxes(handle, total):
+                if kind != b"moov":
+                    continue
+                handle.seek(body)
+                for inner, inner_body, _ in boxes(handle, end):
+                    if inner != b"mvhd":
+                        continue
+                    handle.seek(inner_body)
+                    version = handle.read(4)[0]
+                    if version == 1:
+                        handle.read(16)
+                        scale, length = struct.unpack(">IQ", handle.read(12))
+                    else:
+                        handle.read(8)
+                        scale, length = struct.unpack(">II", handle.read(8))
+                    return round(length / scale, 2) if scale else None
+    except (OSError, struct.error, IndexError):
+        return None
+    return None
+
+
+def inspect_video(path: str | Path) -> LocalVideo:
+    """Check a local video WITHOUT uploading it, so a preview can describe it."""
+    resolved = Path(path).expanduser()
+    if not resolved.is_file():
+        raise MutationError(f"No file at {resolved}.")
+    size = resolved.stat().st_size
+    if size == 0:
+        raise MutationError(f"{resolved} is empty.")
+    if size > MAX_VIDEO_BYTES:
+        raise MutationError(f"{resolved.name} is {size / 1024 ** 3:.1f}GB, over Meta's 4GB limit "
+                            "for an ad video.")
+    with resolved.open("rb") as handle:
+        kind = sniff_video_type(handle.read(16))
+    if kind is None:
+        raise MutationError(f"{resolved.name} is not an MP4 or MOV file, the formats Meta "
+                            "recommends for ad video. Export it as MP4 (H.264) first.")
+    return LocalVideo(path=resolved, size_bytes=size, video_type=kind,
+                      duration_seconds=mp4_duration(resolved))
+
+
+@dataclass(frozen=True)
+class VideoUpload:
+    """A plan that puts one local video in the library (see ``ctx.send``).
+
+    ``wait_seconds`` bounds how long the apply waits for Meta to finish
+    processing it; the video is usable in an ad only once it is ready.
+    """
+
+    video: LocalVideo
+    label: str
+    wait_seconds: int = 0
+    requires: None = None
+    entity_type: str = "advideo"
+
+
+def preferred_thumbnail(client: MutatingMetaAdsClient, video_id: str) -> str | None:
+    """The cover frame Meta suggests for a video, as a URL; None if it has none yet.
+
+    A video creative needs a thumbnail. When none is given, this is the one
+    Ads Manager would pick: the preferred entry of the video's ``thumbnails``,
+    else its ``picture``.
+    """
+    try:
+        row = client.read.node(str(video_id), ("id", "picture", "thumbnails{uri,is_preferred}"))
+    except Exception:  # noqa: BLE001 - no thumbnail is a None, the caller decides
+        return None
+    thumbs = (row.get("thumbnails") or {}).get("data") or []
+    preferred = [t.get("uri") for t in thumbs if t.get("is_preferred") and t.get("uri")]
+    return (preferred or [t.get("uri") for t in thumbs if t.get("uri")] or [row.get("picture")])[0]
+
+
+def upload_video(
+    client: MutatingMetaAdsClient,
+    video: LocalVideo,
+    *,
+    apply: bool = False,
+    account_id: str | None = None,
+) -> str | None:
+    """Put a video in the account's library with Meta's resumable upload; its id.
+
+    Three phases on the ``advideos`` edge: ``start`` (the file size) answers
+    with a session and the first byte range to send, each ``transfer`` sends
+    that range and answers with the next, and ``finish`` closes the session.
+    Meta picks the chunk size, so a large file and a small one go the same way.
+    The audit log keeps the file's name and size, never its bytes.
+
+    The id comes back BEFORE Meta has processed the video: see
+    :func:`wait_until_ready`. Returns None when ``apply`` is False.
+    """
+    if not apply:
+        return None
+    target = client.resolve_account_id(account_id)
+    path = f"{account_path(target)}/{VIDEO_EDGE}"
+    correlation = client._audit.attempt(
+        account_id=target, node_id="(new video)", method="POST", edge=VIDEO_EDGE,
+        payload={"filename": video.path.name, "bytes": video.size_bytes},
     )
+    try:
+        start = client.transport.request("POST", path, data={
+            "upload_phase": "start", "file_size": str(video.size_bytes)})
+        session, video_id = start["upload_session_id"], str(start["video_id"])
+        begin, end = int(start["start_offset"]), int(start["end_offset"])
+        with video.path.open("rb") as handle:
+            while begin < end:
+                handle.seek(begin)
+                answer = client.transport.request(
+                    "POST", path,
+                    data={"upload_phase": "transfer", "upload_session_id": session,
+                          "start_offset": str(begin)},
+                    files={"video_file_chunk": (video.path.name, handle.read(end - begin))},
+                )
+                begin, end = int(answer["start_offset"]), int(answer["end_offset"])
+        finish = client.transport.request("POST", path, data={
+            "upload_phase": "finish", "upload_session_id": session, "title": video.path.name})
+        if finish.get("success") is not True:
+            raise MutationError(f"Meta did not confirm the finished upload: {finish!r}")
+    except Exception as exc:
+        client._audit.outcome(correlation, ok=False, error=str(exc))
+        raise MutationError(f"Uploading {video.path.name} failed.\n{exc}") from exc
+    client._audit.outcome(correlation, ok=True, response={"video_id": video_id})
+    return video_id
+
+
+def wait_until_ready(client: MutatingMetaAdsClient, video_id: str, *, timeout: float,
+                     interval: float = 5.0, sleep=None, clock=None) -> str:
+    """Poll a video's ``status.video_status`` until ready, error or ``timeout``.
+
+    Returns the last status seen: ``ready``, ``error``, or whatever it was
+    still doing (``processing``, ``uploading``...) when time ran out. Bounded
+    on purpose -- a tool call must not hang on Meta's encoder.
+    """
+    import time
+
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    deadline = clock() + max(0.0, timeout)
+    while True:
+        row = client.read.node(str(video_id), ("id", "status"))
+        state = (row.get("status") or {}).get("video_status") or "unknown"
+        if state in ("ready", "error") or clock() >= deadline:
+            return state
+        sleep(min(interval, max(0.0, deadline - clock())))
+
+

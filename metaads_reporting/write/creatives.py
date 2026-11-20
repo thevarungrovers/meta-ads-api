@@ -522,10 +522,10 @@ def localized_feed(
     ``is_default``: it is what everyone else sees.
 
     >>> feed = localized_feed([
-    ...     {"language": "fr", "primary_text": "Bonjour", "link": "https://example.com/fr",
-    ...      "image_hash": "a"},
-    ...     {"language": "en", "primary_text": "Hello", "link": "https://example.com/en",
-    ...      "image_hash": "b"}], call_to_action="LEARN_MORE")
+    ...     {"language": "fr", "primary_text": "Bonjour", "headline": "Titre",
+    ...      "link": "https://example.com/fr", "image_hash": "a"},
+    ...     {"language": "en", "primary_text": "Hello", "headline": "Title",
+    ...      "link": "https://example.com/en", "image_hash": "b"}], call_to_action="LEARN_MORE")
     >>> [b["text"] for b in feed["bodies"]], feed["ad_formats"]
     (['Bonjour', 'Hello'], ['SINGLE_IMAGE'])
     >>> [(d["text"], d["adlabels"]) for d in feed["descriptions"]]
@@ -555,6 +555,14 @@ def localized_feed(
         locales = [{**loc, "description": ""} for loc in locales]
     if not all(loc.get("link") for loc in locales):
         raise MutationError("Every locale needs a link.")
+    # Checked live (validate_only, 2026-11-20): Meta accepts the creative
+    # without them, then refuses every AD that uses it -- "Too Few Body Texts",
+    # "Too Few Headline Texts" -- and an empty text does not pass either.
+    missing = [f for f in ("primary_text", "headline") if not all(loc.get(f) for loc in locales)]
+    if missing:
+        raise MutationError(
+            f"Every locale needs {' and '.join(missing)}: Meta refuses an ad on a "
+            "multi-language creative without body and headline text in each language.")
     kinds = set()
     for lang, loc in zip(languages, locales):
         given = [k for k in ("image_hash", "image_path", "video_id") if loc.get(k)]
@@ -597,6 +605,8 @@ def localized_feed(
             entry = {"video_id": str(loc["video_id"])}
             if loc.get("thumbnail_hash"):
                 entry["thumbnail_hash"] = loc["thumbnail_hash"]
+            elif loc.get("thumbnail_url"):
+                entry["thumbnail_url"] = loc["thumbnail_url"]
             labels["video_label"] = add("videos", entry, f"{lang}_video")
         else:
             labels["image_label"] = add(

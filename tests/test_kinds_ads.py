@@ -247,6 +247,21 @@ def test_create_creative_default_language_picks_the_fallback_rule(monkeypatch):
     ({"top": {"headline": "x"}}, "inside each locale"),
 ])
 def test_create_creative_refuses_a_malformed_multi_language_creative(monkeypatch, change, message):
+    _malformed(monkeypatch, change, message)
+
+
+@pytest.mark.parametrize("field", ["primary_text", "headline"])
+def test_a_multi_language_creative_needs_body_and_headline_in_every_language(monkeypatch, field):
+    # Live: Meta takes the creative without them, then refuses every ad on it.
+    s = sim()
+    tools, _ = rig(monkeypatch, s)
+    strip = lambda loc: {k: v for k, v in loc.items() if k != field}
+    with pytest.raises(Exception) as caught:
+        tools["preview_create_creative"](name="Spring", locales=[strip(FR), strip(EN)])
+    assert f"Every locale needs {field}" in str(caught.value)
+
+
+def _malformed(monkeypatch, change, message):
     s = sim()
     s.objects["V1"] = {"id": "V1", "status": {"video_status": "ready"}}
     tools, _ = rig(monkeypatch, s)
@@ -330,3 +345,93 @@ def test_a_missing_local_image_is_refused_at_preview(monkeypatch, tmp_path):
             {**FR, "image_hash": None, "story_image_hash": None,
              "image_path": str(tmp_path / "nope.png")}, EN])
     assert "No file at" in str(caught.value)
+
+
+def _video(tmp_path, name="clip.mp4", payload=b"x" * 10):
+    import struct
+
+    # ftyp + moov{mvhd v0: timescale 1000, duration 32500} + a little mdat.
+    mvhd = struct.pack(">I4sB3x", 108, b"mvhd", 0) + struct.pack(">IIII", 0, 0, 1000, 32500) + b"\0" * 80
+    moov = struct.pack(">I4s", 8 + len(mvhd), b"moov") + mvhd
+    data = (struct.pack(">I4s", 16, b"ftyp") + b"isom\0\0\0\0" + moov
+            + struct.pack(">I4s", 8 + len(payload), b"mdat") + payload)
+    path = tmp_path / name
+    path.write_bytes(data)
+    return path
+
+
+def test_upload_video_sends_every_chunk_and_reports_it_ready(monkeypatch, tmp_path):
+    s = sim()
+    path = _video(tmp_path)
+    tools, state = rig(monkeypatch, s)
+    preview = tools["preview_upload_video"](video_path=str(path), wait_seconds=0)
+    assert not preview.blocked and "mp4, 0:32" in preview.after
+    assert not s.created, "a preview sends nothing"
+    result = tools["apply_upload_video"](preview_token=preview.preview_token)
+    size = path.stat().st_size
+    assert s.video_chunks[0] == (0, 4) and s.video_chunks[-1][1] == size
+    assert result.entity_id == "VIDEO1" and state.counters.applies == 1
+    assert any("is processed and ready: use it as video_id" in w for w in result.warnings)
+    assert s.objects["VIDEO1"]["title"] == "clip.mp4"
+
+
+def test_upload_video_says_when_meta_is_still_processing(monkeypatch, tmp_path):
+    s = sim()
+    s.video_status_after_upload = "processing"
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_upload_video"](video_path=str(_video(tmp_path)), wait_seconds=0)
+    result = tools["apply_upload_video"](preview_token=preview.preview_token)
+    assert any("still processing after 0s" in w and "list_ad_videos" in w for w in result.warnings)
+
+
+def test_upload_video_refuses_what_is_not_mp4_or_mov(monkeypatch, tmp_path):
+    path = tmp_path / "clip.avi"
+    path.write_bytes(b"RIFF\0\0\0\0AVI LIST")
+    tools, _ = rig(monkeypatch, sim())
+    with pytest.raises(Exception) as caught:
+        tools["preview_upload_video"](video_path=str(path))
+    assert "not an MP4 or MOV" in str(caught.value)
+
+
+def test_wait_until_ready_is_bounded():
+    from types import SimpleNamespace
+
+    from metaads_reporting.write import media
+
+    reads = []
+    client = SimpleNamespace(read=SimpleNamespace(node=lambda *_: reads.append(1) or
+                                                  {"status": {"video_status": "processing"}}))
+    now = [0.0]
+    state = media.wait_until_ready(client, "V", timeout=12, interval=5,
+                                   sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0])
+    assert state == "processing" and len(reads) == 4  # t=0, 5, 10, 12
+
+
+def _ready_video(s, thumbs):
+    s.objects["V1"] = {"id": "V1", "status": {"video_status": "ready"}, "length": 30,
+                       "picture": "https://example.com/pic.jpg",
+                       "thumbnails": {"data": thumbs}}
+
+
+def test_a_video_creative_without_a_thumbnail_uses_metas_preferred_frame(monkeypatch):
+    s = sim()
+    _ready_video(s, [{"uri": "https://example.com/t1.jpg", "is_preferred": False},
+                     {"uri": "https://example.com/t2.jpg", "is_preferred": True}])
+    tools, _ = rig(monkeypatch, s)
+    preview = tools["preview_create_creative"](name="Clip", link="https://example.com", video_id="V1")
+    tools["apply_create_creative"](preview_token=preview.preview_token)
+    story = s.created[-1]["payload"]["object_story_spec"]
+    story = json.loads(story) if isinstance(story, str) else story
+    assert story["video_data"]["image_url"] == "https://example.com/t2.jpg"
+
+
+def test_a_multi_language_video_creative_gets_a_thumbnail_per_language(monkeypatch):
+    s = sim()
+    _ready_video(s, [])
+    tools, _ = rig(monkeypatch, s)
+    video = lambda loc: {**{k: v for k, v in loc.items() if k not in ("image_hash", "story_image_hash")},
+                         "video_id": "V1"}
+    preview = tools["preview_create_creative"](name="Clip", locales=[video(FR), video(EN)])
+    tools["apply_create_creative"](preview_token=preview.preview_token)
+    feed = _feed(s.created[-1]["payload"])
+    assert [v["thumbnail_url"] for v in feed["videos"]] == ["https://example.com/pic.jpg"] * 2

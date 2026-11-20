@@ -176,6 +176,15 @@ class WriteContext:
             image_hash = media.upload_image(self.client, plan.image, apply=True)
             return MutationResult(validated_only=False, node_id=image_hash,
                                   response={"success": True, "hash": image_hash}), [image_hash]
+        if isinstance(plan, media.VideoUpload):
+            if not apply:
+                return MutationResult(validated_only=True, response={"success": True}), []
+            video_id = media.upload_video(self.client, plan.video, apply=True)
+            # Bounded: Meta encodes in the background, and a tool call must not hang on it.
+            state = media.wait_until_ready(self.client, video_id, timeout=plan.wait_seconds)
+            return MutationResult(validated_only=False, node_id=video_id,
+                                  response={"success": True, "video_id": video_id,
+                                            "video_status": state}), [video_id]
         if getattr(plan, "requires", None) is not None:
             return self._execute_chain(self.client, plan, apply=apply)
         return self._execute(self.client, plan, apply=apply), []

@@ -465,6 +465,7 @@ class Engine:
         entity_id = str(self._result_entity_id(entity, result, created))
         entity_name, warnings = self._follow_up_outcome(entity["entity_name"], entity_id,
                                                         follow_ups)
+        warnings = [*warnings, *kind.apply_warnings(payload, result)]
         return ApplyResult(
             applied=True,
             entry_id=entry_ids[0],

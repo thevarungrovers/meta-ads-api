@@ -201,6 +201,9 @@ class GraphSim:
         if edge in self.CREATE_EDGES:
             return self._create(edge, body)
 
+        if edge == "advideos":
+            return self._video_upload(body)
+
         if edge == "copies":
             return self._copy(node, dict(body))
 
@@ -240,6 +243,45 @@ class GraphSim:
         if "status" in payload:
             self.objects[node]["effective_status"] = payload["status"]
         return FakeResponse({"success": True})
+
+    #: Bytes Meta asks for per transfer in the sim, so a test file spans chunks.
+    VIDEO_CHUNK = 4
+
+    def _video_upload(self, body: dict[str, Any]) -> FakeResponse:
+        """Meta's resumable upload: start, transfer the ranges it asks for, finish.
+
+        A new video starts in ``video_status_after_upload`` (default ready),
+        as Meta's encoder would leave it. ``video_chunks`` records each range.
+        """
+        phase = body.get("upload_phase")
+        if phase == "start":
+            size = int(body["file_size"])
+            video_id = f"VIDEO{len(self.created) + 1}"
+            self.created.append({"edge": "advideos", "payload": {"file_size": size}})
+            self._upload = {"session": f"S{video_id}", "id": video_id, "size": size, "got": 0}
+            self.video_chunks: list[tuple[int, int]] = []
+            return FakeResponse({"upload_session_id": self._upload["session"], "video_id": video_id,
+                                 "start_offset": "0", "end_offset": str(min(self.VIDEO_CHUNK, size))})
+        upload = self._upload
+        if body.get("upload_session_id") != upload["session"]:
+            return FakeResponse({"error": {"message": "bad session", "code": 100}}, status=400)
+        if phase == "transfer":
+            start = int(body["start_offset"])
+            _, chunk = next(iter(self.last_files.values()))
+            if start != upload["got"]:
+                return FakeResponse({"error": {"message": "bad offset", "code": 100}}, status=400)
+            upload["got"] = start + len(chunk)
+            self.video_chunks.append((start, upload["got"]))
+            nxt = min(upload["got"] + self.VIDEO_CHUNK, upload["size"])
+            return FakeResponse({"start_offset": str(upload["got"]), "end_offset": str(nxt)})
+        if phase == "finish":
+            if upload["got"] != upload["size"]:
+                return FakeResponse({"error": {"message": "incomplete", "code": 100}}, status=400)
+            state = getattr(self, "video_status_after_upload", "ready")
+            self.objects[upload["id"]] = {"id": upload["id"], "title": body.get("title"),
+                                          "status": {"video_status": state}}
+            return FakeResponse({"success": True})
+        return FakeResponse({"error": {"message": f"phase {phase}?", "code": 100}}, status=400)
 
     def _create(self, edge: str, body: dict[str, Any]) -> FakeResponse:
         """A create on an account edge. Mirrors the real responses."""

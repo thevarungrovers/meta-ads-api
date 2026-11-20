@@ -187,8 +187,8 @@ class LocaleCopy(BaseModel):
 
     language: str = Field(description="fr or en (built-in locale ids), or any short label with locale_ids")
     locale_ids: list[int] | None = Field(None, description="Meta locale ids, from search_targeting(type='locale'); default from language")
-    primary_text: str | None = Field(None, description="Body text in this language")
-    headline: str | None = Field(None, description="Headline in this language")
+    primary_text: str | None = Field(None, description="Body text in this language (required by Meta)")
+    headline: str | None = Field(None, description="Headline in this language (required by Meta)")
     description: str | None = Field(None, description="Description in this language")
     link: str = Field(description="Destination URL for this language")
     image_hash: str | None = Field(None, description="Feed image already in the library (list_ad_images or upload_image)")
@@ -240,6 +240,13 @@ class CreateCreative(ChangeKind):
                      "call_to_action": cta}
             if p.get("thumbnail_hash"):
                 block["image_hash"] = p["thumbnail_hash"]
+            else:
+                # A video creative needs a cover: Meta's own suggested frame.
+                thumb = media.preferred_thumbnail(ctx.client, p["video_id"])
+                if not thumb:
+                    raise ValueError(f"Video {p['video_id']} has no thumbnail yet; pass "
+                                     "thumbnail_hash (an image from list_ad_images).")
+                block["image_url"] = thumb
             story_key = "video_data"
         else:
             block = {"link": p["link"], "message": p.get("primary_text") or "",
@@ -262,11 +269,22 @@ class CreateCreative(ChangeKind):
         given = [k for k in SINGLE_LOCALE_FIELDS if p.get(k)]
         if given:
             raise ValueError(f"With locales, put {', '.join(given)} inside each locale instead.")
+        locales = []
+        # Thumbnails only for an all-video feed: a mixed one is refused by the
+        # builder, with the reason, before any of this is worth a read.
+        all_video = all(loc.get("video_id") for loc in p["locales"])
         for loc in p["locales"]:
-            if loc.get("video_id"):
+            if loc.get("video_id") and all_video:
                 media.check_video_usable(ctx.client, loc["video_id"])
+                if not loc.get("thumbnail_hash"):
+                    thumb = media.preferred_thumbnail(ctx.client, loc["video_id"])
+                    if not thumb:
+                        raise ValueError(f"{loc['language']}: video {loc['video_id']} has no "
+                                         "thumbnail yet; pass thumbnail_hash.")
+                    loc = {**loc, "thumbnail_url": thumb}
+            locales.append(loc)
         feed = creative_specs.localized_feed(
-            p["locales"], call_to_action=p.get("call_to_action") or "LEARN_MORE",
+            locales, call_to_action=p.get("call_to_action") or "LEARN_MORE",
             default_language=p.get("default_language"))
         story: dict[str, Any] = {"page_id": p["page_id"]}
         if p.get("instagram_user_id"):
@@ -481,6 +499,82 @@ class UploadImage(ChangeKind):
             "nowhere and costs nothing, and nothing is deleted here.")
 
 
+class UploadVideo(ChangeKind):
+    name = "upload_video"
+    adds_no_spend = True
+    preview_title = "Preview putting a local video in the ad account's video library"
+    apply_title = "Upload the video the preview described (library only; shows nowhere)"
+    apply_annotations = APPLY_REVERSIBLE
+    revertible = False
+    # There is no validate_only for an upload: the preview sends nothing.
+    validate_in_preview = False
+
+    def propose(
+        self,
+        ctx,
+        video_path: Annotated[str, Field(description="Local MP4 or MOV file, up to 4GB")],
+        wait_seconds: Annotated[int, Field(ge=0, le=600, description="How long the apply waits for Meta to finish processing (0-600)")] = 180,
+    ) -> Proposal:
+        """Show putting a local video in the video library. Writes nothing.
+
+        The library is storage: an uploaded video is in no ad, shows nowhere
+        and spends nothing. The apply uploads it in chunks (Meta's resumable
+        upload) and returns its video_id, then waits up to wait_seconds for
+        Meta to finish processing -- a video is usable in a creative only once
+        it is ready, and create_creative refuses one that is not. The apply
+        result says which: if it is still processing, check list_ad_videos.
+        A library video with the same title (file name) is pointed out.
+        """
+        video = media.inspect_video(video_path)
+        rows = ctx.read.edge(account_path(ctx.read.resolve_account_id()), media.VIDEO_EDGE,
+                             ("id", "title"), limit=200, max_items=200)
+        same = [r for r in rows if r.get("title") == video.path.name]
+        return Proposal(
+            entity_type="video", entity_id="(new)", entity_name=video.path.name,
+            path=f"account {ctx.default_account} > video library", field_name="uploaded",
+            before=NOTHING,
+            after=f"{video.describe()} -> the video_id Meta returns; waits up to "
+                  f"{wait_seconds}s for processing",
+            checks=[], projected=Decimal("0"),
+            payload={"video_path": str(video.path), "size": video.size_bytes,
+                     "wait_seconds": wait_seconds},
+            warnings=["library only: the video shows nowhere until a creative uses it",
+                      *([f"the library already has a video titled {video.path.name}: video_id "
+                         f"{same[0]['id']}. If it is this file, use that id instead"]
+                        if same else []),
+                      *([] if video.duration_seconds is not None else
+                        ["could not read the length from the file; Meta reports it after processing"])],
+        )
+
+    def current(self, ctx, payload):
+        return NOTHING
+
+    def build(self, ctx, payload):
+        video = media.inspect_video(payload["video_path"])
+        if video.size_bytes != payload["size"]:
+            raise ValueError(f"{video.path.name} changed on disk since the preview; take a fresh one.")
+        return media.VideoUpload(video=video, label=video.path.name,
+                                 wait_seconds=int(payload["wait_seconds"]))
+
+    def inverse_for(self, payload, result, created):
+        return {"video_id": result.node_id, "video_status": result.response.get("video_status")}
+
+    def apply_warnings(self, payload, result):
+        state = (result.response or {}).get("video_status")
+        if state == "ready":
+            return [f"video {result.node_id} is processed and ready: use it as video_id"]
+        if state == "error":
+            return [f"Meta could not process video {result.node_id}: it cannot go in an ad. "
+                    "Check the file (MP4, H.264) and upload it again"]
+        return [f"video {result.node_id} is still {state} after {payload['wait_seconds']}s: "
+                "check list_ad_videos until it is ready -- create_creative refuses it until then"]
+
+    def inverse(self, ctx, entry):
+        raise ValueError(
+            f"Entry {entry['entry_id']} uploaded a video to the library. It shows "
+            "nowhere and costs nothing, and nothing is deleted here.")
+
+
 class MultiAdStatus(AdStatus):
     name = "multi_ad_status"
     preview_title = "Preview pausing or activating several ads in one ad set"
@@ -552,4 +646,4 @@ class MultiAdStatus(AdStatus):
                 for a in payload["ad_ids"]]
 
 
-ADS_KINDS = (CreateAd, CreateCreative, UploadImage, MultiAdStatus)
+ADS_KINDS = (CreateAd, CreateCreative, UploadImage, UploadVideo, MultiAdStatus)

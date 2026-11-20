@@ -435,6 +435,10 @@ class ChangeKind:
         (the reason in ``item.inverse["refused"]``), never sent or ledgered."""
         return []
 
+    def apply_warnings(self, payload: dict[str, Any], result) -> list[str]:
+        """What the human should know once the write has landed (default none)."""
+        return []
+
     def validates(self, payload: dict[str, Any]) -> bool:
         return self.validate_in_preview
 
