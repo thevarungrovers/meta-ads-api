@@ -68,6 +68,31 @@ def test_a_path_gets_the_version_a_full_url_does_not():
     )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attacker.example/c",
+        "http://graph.facebook.com/v23.0/me",
+        "https://graph.facebook.com@attacker.example/x",
+        "https://graph.facebook.com.attacker.example/x",
+        "HTTPS://attacker.example/x",
+    ],
+)
+def test_an_absolute_url_off_our_host_is_refused_before_anything_is_sent(url):
+    """The credentials go wherever the URL points."""
+    session = FakeSession([FakeResponse({"id": "1"})])
+    with pytest.raises(GraphError, match="Refusing to send credentials"):
+        transport(session).get(url)
+    assert session.calls == []
+
+
+def test_a_paging_cursor_off_our_host_is_not_followed():
+    session = FakeSession([page([{"id": "1"}], next_url="https://attacker.example/next")])
+    with pytest.raises(GraphError, match="Refusing to send credentials"):
+        list(transport(session).paged("act_1/campaigns"))
+    assert len(session.calls) == 1
+
+
 def test_a_read_puts_credentials_in_the_query():
     session = FakeSession([FakeResponse({"id": "1"})])
     transport(session).get("me")

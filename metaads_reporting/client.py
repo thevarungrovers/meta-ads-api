@@ -35,6 +35,24 @@ from .fields import object_to_row
 from .graph import GraphAPIError, GraphTransport, assert_read_method
 from .insights import InsightsQuery, node_fields
 
+
+def graph_path(path: str) -> str:
+    """``path`` as a relative Graph path, or a ValueError.
+
+    Every id a read tool takes ends up here. An id that is really a URL
+    (``https://attacker.example/x``, ``//host/x``) or carries a query or a
+    fragment is refused before a request is built, the read-side twin of the
+    write client's ``bare_segment``. ``GraphTransport.url`` pins the host as
+    well; this keeps a bad id from getting that far.
+    """
+    from urllib.parse import urlsplit
+
+    text = str(path or "")
+    parts = urlsplit(text)
+    if not text or parts.scheme or parts.netloc or parts.query or parts.fragment or "?" in text or "#" in text:
+        raise ValueError(f"Refusing Graph path {text!r}: pass an id or an id/edge path, not a URL.")
+    return text
+
 #: Fields read off the ad account itself. ``currency`` is the important one:
 #: nothing monetary in this package can be rendered without it, so it is
 #: fetched once and cached per client rather than guessed at.
@@ -156,6 +174,7 @@ class ReadOnlyMetaAdsClient:
     def _get(self, path: str, **params: Any) -> dict[str, Any]:
         """One GET. The guard is here and nowhere else."""
         assert_read_method("GET")
+        path = graph_path(path)
         try:
             return self._transport.get(path, **params)
         except GraphAPIError as exc:
@@ -163,6 +182,7 @@ class ReadOnlyMetaAdsClient:
 
     def _paged(self, path: str, **params: Any) -> Iterator[dict[str, Any]]:
         assert_read_method("GET")
+        path = graph_path(path)
         try:
             yield from self._transport.paged(path, **params)
         except GraphAPIError as exc:

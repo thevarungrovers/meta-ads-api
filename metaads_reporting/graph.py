@@ -34,7 +34,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import requests
 
@@ -389,12 +389,25 @@ class GraphTransport:
     # -- plumbing ----------------------------------------------------------
 
     def url(self, path: str) -> str:
-        """Absolute URL for a Graph path. An absolute URL passes through.
+        """Absolute URL for a Graph path. An absolute URL on our host passes through.
 
         Paging cursors come back as fully-formed URLs, so this has to accept
         one; everything else is a path like ``act_123/campaigns``.
+
+        The credentials go to whatever this returns, so an absolute URL is
+        refused unless its scheme and host are exactly ``base_url``'s. An id of
+        ``https://attacker.example/x`` handed to a read tool would otherwise
+        send the token there.
         """
-        if path.startswith("http://") or path.startswith("https://"):
+        if path.lower().startswith(("http://", "https://")):
+            ours, theirs = urlsplit(self.base_url), urlsplit(path)
+            if (theirs.scheme.lower(), theirs.netloc.lower()) != (
+                ours.scheme.lower(), ours.netloc.lower()
+            ):
+                raise GraphError(
+                    f"Refusing to send credentials to {theirs.scheme}://{theirs.netloc}: "
+                    f"only {ours.scheme}://{ours.netloc} is a Graph API host."
+                )
             return path
         return f"{self.base_url}/{self.api_version}/{path.lstrip('/')}"
 
