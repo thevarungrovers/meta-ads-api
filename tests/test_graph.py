@@ -156,6 +156,34 @@ def test_an_error_names_the_path_and_never_the_query_string():
     assert "access_token" not in message
 
 
+def test_a_connection_failure_never_carries_the_token(monkeypatch):
+    """requests puts the whole URL, query string and all, in its message."""
+    from metaads_reporting import logdb
+
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+
+    class Dead:
+        def request(self, method, url, params=None, **kwargs):
+            query = "&".join(f"{k}={v}" for k, v in (params or {}).items())
+            raise requests.ConnectionError(f"Max retries exceeded with url: /v23.0/me?{query} (refused)")
+
+    with pytest.raises(GraphAPIError) as caught:
+        transport(Dead(), app_secret="SEKRIT").get("me", fields="id")
+    message = str(caught.value)
+    assert "ConnectionError" in message and "access_token=<redacted>" in message
+    assert "TOK" not in message and appsecret_proof("TOK", "SEKRIT") not in message
+    # Nothing to show a traceback either: the raw exception is not chained.
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+    stored = [dict(r) for r in logdb.connect().execute("SELECT error FROM api_calls")]
+    assert stored and all("TOK" not in (r["error"] or "") for r in stored)
+
+
+def test_the_token_under_inspection_is_redacted_too():
+    """debug_token takes the same token as input_token."""
+    assert _redact({"input_token": "TOK"}) == {"input_token": "<redacted>"}
+
+
 # --- error mapping ----------------------------------------------------------
 
 

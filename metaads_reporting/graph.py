@@ -39,6 +39,7 @@ from urllib.parse import urlparse, urlsplit
 import requests
 
 from . import logdb
+from .redaction import redact_params, redact_text
 
 #: Methods that cannot change anything. The entire read-only guarantee of this
 #: package reduces to: nothing outside ``write/`` passes anything else.
@@ -349,11 +350,7 @@ def _redact(params: dict[str, Any]) -> dict[str, Any]:
     The token is a bearer credential with a very long life and no second
     factor. It must not reach the log database, a traceback, or a tool result.
     """
-    hidden = {"access_token", "appsecret_proof", "app_secret", "client_secret"}
-    return {
-        key: ("<redacted>" if key in hidden else value)
-        for key, value in (params or {}).items()
-    }
+    return redact_params(params)
 
 
 class GraphTransport:
@@ -515,9 +512,11 @@ class GraphTransport:
                         timeout=self.timeout,
                     )
                 except requests.RequestException as exc:
+                    # requests puts the full URL in its message, and a read's
+                    # URL carries the token in its query string.
                     last_error = GraphAPIError(
                         f"{method} {_log_path(url)} could not be sent: "
-                        f"{type(exc).__name__}: {exc}",
+                        f"{type(exc).__name__}: {redact_text(str(exc))}",
                         path=_log_path(url),
                     )
                     # A TRANSPORT failure on a write is never retried, whatever
@@ -526,8 +525,10 @@ class GraphTransport:
                     # there is no way to tell from here, and a retry would make
                     # a second change. The ledger's intent-with-no-outcome row
                     # is the honest record of that.
+                    # `from None`: the original exception still holds the
+                    # unredacted URL, and a printed traceback would show it.
                     if method in WRITE_METHODS or attempt + 1 >= attempts:
-                        raise last_error from exc
+                        raise last_error from None
                     _sleep_backoff(attempt)
                     continue
 
