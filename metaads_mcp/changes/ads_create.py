@@ -464,7 +464,7 @@ class UploadImage(ChangeKind):
         Meta's hash is NOT the md5 of the file, so the preview cannot name it;
         but Meta deduplicates, so uploading a file it already holds returns
         the existing hash (under its existing name) and adds nothing. The
-        image is named with the agent's prefix (VG-max-fr.jpg); a library
+        image is named with the agent's prefix (AB-max-fr.jpg); a library
         image with that name already is pointed out, with its hash.
         """
         image = media.inspect_image(image_path)
@@ -538,7 +538,7 @@ class UploadVideo(ChangeKind):
         Meta to finish processing -- a video is usable in a creative only once
         it is ready, and create_creative refuses one that is not. The apply
         result says which: if it is still processing, check list_ad_videos.
-        It is titled with the agent's prefix (VG-max-clip.mp4); a library video
+        It is titled with the agent's prefix (AB-max-clip.mp4); a library video
         with that title already is pointed out.
         """
         video = media.inspect_video(video_path)
