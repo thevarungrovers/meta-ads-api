@@ -24,7 +24,7 @@ max_bid_amount              = "50.00"   # bid cap / cost target ceiling
 max_bid_increase_pct        = 50.0
 max_entities_per_call       = 25
 max_projected_delta_per_day = "200.00"  # upper bound on extra daily spend
-max_cost_cap                = "50.00"   # highest COST_CAP average-cost target
+max_cost_cap                = "300.00"  # highest COST_CAP average-cost target
 min_roas_floor              = "0.50"    # lowest MIN_ROAS floor (0.50 = 50% return)
 max_audiences_per_ad_set    = 10        # included + excluded custom audiences
 overlap_warn_pct            = 50.0      # WARN: two included audiences overlap this much
