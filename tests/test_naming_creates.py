@@ -221,3 +221,53 @@ def test_a_failed_duplicate_scan_warns_it_could_not_verify(monkeypatch):
     preview = tools["preview_create_campaign"](name="spring", objective="OUTCOME_SALES",
                                                special_ad_categories=[], budget_level="adset")
     assert any(c.startswith("WARN name_is_free") and "could not verify" in c for c in preview.checks)
+
+
+def _uploaded_name(sim):
+    """The file name the last image upload was sent under (what the library shows)."""
+    files = next(c["files"] for c in reversed(sim.calls) if c["files"])
+    (key, value), = files.items()
+    return value[0] if isinstance(value, tuple) else key
+
+
+@pytest.mark.parametrize("identity, prefix", COMBOS)
+def test_an_uploaded_image_is_named_with_the_prefix(monkeypatch, tmp_path, identity, prefix):
+    from tests.test_mcp_creative_path import png_bytes
+
+    s = make_sim()
+    path = tmp_path / "fr.png"
+    path.write_bytes(png_bytes(1080, 1080))
+    tools, state = rig(monkeypatch, s)
+    as_identity(state, identity)
+    preview = tools["preview_upload_image"](image_path=str(path))
+    assert preview.entity_name == f"{prefix}fr.png" and not preview.blocked, preview.checks
+    tools["apply_upload_image"](preview_token=preview.preview_token)
+    assert _uploaded_name(s) == f"{prefix}fr.png"
+
+
+@pytest.mark.parametrize("identity, prefix", COMBOS)
+def test_an_uploaded_video_is_titled_with_the_prefix(monkeypatch, tmp_path, identity, prefix):
+    from tests.test_kinds_ads import _video
+
+    s = make_sim()
+    tools, state = rig(monkeypatch, s)
+    as_identity(state, identity)
+    preview = tools["preview_upload_video"](video_path=str(_video(tmp_path)), wait_seconds=0)
+    assert preview.entity_name == f"{prefix}clip.mp4" and not preview.blocked, preview.checks
+    result = tools["apply_upload_video"](preview_token=preview.preview_token)
+    assert s.objects[result.entity_id]["title"] == f"{prefix}clip.mp4"
+
+
+@pytest.mark.parametrize("identity, prefix", COMBOS)
+def test_a_creatives_local_image_is_uploaded_with_the_prefix(monkeypatch, tmp_path, identity, prefix):
+    from tests.test_mcp_creative_path import png_bytes
+
+    s = make_sim()
+    path = tmp_path / "hero.png"
+    path.write_bytes(png_bytes(1080, 1080))
+    tools, state = rig(monkeypatch, s)
+    as_identity(state, identity)
+    preview = tools["preview_create_creative"](name="Spring", link="https://example.com",
+                                               image_path=str(path), page_id="PAGE")
+    tools["apply_create_creative"](preview_token=preview.preview_token)
+    assert _uploaded_name(s) == f"{prefix}hero.png"

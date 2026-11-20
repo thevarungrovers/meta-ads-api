@@ -362,8 +362,12 @@ class CreateCreative(ChangeKind):
         local = [image_path] if image_path else []
         local += [loc[k] for loc in payload["locales"] or () for k in ("image_path", "story_image_path")
                   if loc.get(k)]
-        for path in local:
-            media.inspect_image(path)
+        upload_names = {}
+        for path in dict.fromkeys(local):
+            image = media.inspect_image(path)
+            # Named like an upload_image upload, so the library shows who added it.
+            upload_names[path] = ctx.name_for_create("image", image.path.name).final
+        payload["upload_names"] = upload_names
         spec = self._spec(ctx, payload)
         proposal = Proposal(
             entity_type="creative", entity_id="(new)", entity_name=name,
@@ -401,14 +405,17 @@ class CreateCreative(ChangeKind):
                              edge=ads.CREATIVE_EDGE)
 
     def prepare_apply(self, ctx, plan, payload):
+        names = payload.get("upload_names") or {}
         if payload.get("image_path"):
             image = media.inspect_image(payload["image_path"])
-            image_hash = media.upload_image(ctx.client, image, apply=True)
+            image_hash = media.upload_image(ctx.client, image, apply=True,
+                                            name=names.get(payload["image_path"]))
             plan.payload = ads._fill_uploaded_image(plan.payload, image_hash)
         feed = plan.payload.get("asset_feed_spec")
         if feed:
             # Each local file once, even when a language uses it for feed and Stories.
-            hashes = {path: media.upload_image(ctx.client, media.inspect_image(path), apply=True)
+            hashes = {path: media.upload_image(ctx.client, media.inspect_image(path), apply=True,
+                                               name=names.get(path))
                       for path in creative_specs.pending_paths(feed)}
             plan.payload = {**plan.payload, "asset_feed_spec": creative_specs.fill_pending(feed, hashes)}
         return plan
@@ -432,6 +439,7 @@ class CreateCreative(ChangeKind):
 class UploadImage(ChangeKind):
     name = "upload_image"
     adds_no_spend = True
+    creates_named = ("image",)
     preview_title = "Preview putting a local image in the ad account's image library"
     apply_title = "Upload the image the preview described (library only; shows nowhere)"
     apply_annotations = APPLY_REVERSIBLE
@@ -455,31 +463,37 @@ class UploadImage(ChangeKind):
 
         Meta's hash is NOT the md5 of the file, so the preview cannot name it;
         but Meta deduplicates, so uploading a file it already holds returns
-        the existing hash and adds nothing. A library image with the same file
-        name is pointed out, with its hash, in case it is this file.
+        the existing hash (under its existing name) and adds nothing. The
+        image is named with the agent's prefix (VG-max-fr.jpg); a library
+        image with that name already is pointed out, with its hash.
         """
         image = media.inspect_image(image_path)
+        decision = ctx.name_for_create("image", image.path.name)
+        name = decision.final
         size = media.local_image_dimensions(image.path)
         shape = f"{size[0]}x{size[1]}, " if size else ""
         rows = ctx.read.edge(account_path(ctx.read.resolve_account_id()), media.IMAGE_EDGE,
                              ("hash", "name"), limit=200, max_items=200)
-        same_name = [r for r in rows if r.get("name") == image.path.name and r.get("hash")]
-        return Proposal(
-            entity_type="image", entity_id="(new)", entity_name=image.path.name,
+        same_name = [r for r in rows if r.get("name") == name and r.get("hash")]
+        proposal = Proposal(
+            entity_type="image", entity_id="(new)", entity_name=name,
             path=f"account {ctx.default_account} > image library", field_name="uploaded",
             before=NOTHING,
             after=f"{image.path.name} ({shape}{image.describe()['size_kb']}KB {image.image_type}) "
                   "-> the image_hash Meta returns",
             checks=[], projected=Decimal("0"),
             # The md5 only pins the FILE between preview and apply.
-            payload={"image_path": str(image.path), "file_md5": media.image_md5(image)},
+            payload={"image_path": str(image.path), "file_md5": media.image_md5(image),
+                     "name": name},
             warnings=["library only: the image shows nowhere until a creative uses it",
-                      *([f"the library already has an image named {image.path.name}: "
+                      *([f"the library already has an image named {name}: "
                          f"image_hash {same_name[0]['hash']}. If it is this file, use that "
                          "hash; uploading it again returns the same one and adds nothing"]
                         if same_name else []),
                       *image.warnings],
         )
+        proposal.name(decision)
+        return proposal
 
     def current(self, ctx, payload):
         return NOTHING
@@ -488,7 +502,7 @@ class UploadImage(ChangeKind):
         image = media.inspect_image(payload["image_path"])
         if media.image_md5(image) != payload["file_md5"]:
             raise ValueError(f"{image.path.name} changed on disk since the preview; take a fresh one.")
-        return media.ImageUpload(image=image, label=image.path.name)
+        return media.ImageUpload(image=image, label=image.path.name, name=payload["name"])
 
     def inverse_for(self, payload, result, created):
         return {"image_hash": result.node_id}
@@ -502,6 +516,7 @@ class UploadImage(ChangeKind):
 class UploadVideo(ChangeKind):
     name = "upload_video"
     adds_no_spend = True
+    creates_named = ("video",)
     preview_title = "Preview putting a local video in the ad account's video library"
     apply_title = "Upload the video the preview described (library only; shows nowhere)"
     apply_annotations = APPLY_REVERSIBLE
@@ -523,28 +538,33 @@ class UploadVideo(ChangeKind):
         Meta to finish processing -- a video is usable in a creative only once
         it is ready, and create_creative refuses one that is not. The apply
         result says which: if it is still processing, check list_ad_videos.
-        A library video with the same title (file name) is pointed out.
+        It is titled with the agent's prefix (VG-max-clip.mp4); a library video
+        with that title already is pointed out.
         """
         video = media.inspect_video(video_path)
+        decision = ctx.name_for_create("video", video.path.name)
+        name = decision.final
         rows = ctx.read.edge(account_path(ctx.read.resolve_account_id()), media.VIDEO_EDGE,
                              ("id", "title"), limit=200, max_items=200)
-        same = [r for r in rows if r.get("title") == video.path.name]
-        return Proposal(
-            entity_type="video", entity_id="(new)", entity_name=video.path.name,
+        same = [r for r in rows if r.get("title") == name]
+        proposal = Proposal(
+            entity_type="video", entity_id="(new)", entity_name=name,
             path=f"account {ctx.default_account} > video library", field_name="uploaded",
             before=NOTHING,
             after=f"{video.describe()} -> the video_id Meta returns; waits up to "
                   f"{wait_seconds}s for processing",
             checks=[], projected=Decimal("0"),
             payload={"video_path": str(video.path), "size": video.size_bytes,
-                     "wait_seconds": wait_seconds},
+                     "wait_seconds": wait_seconds, "name": name},
             warnings=["library only: the video shows nowhere until a creative uses it",
-                      *([f"the library already has a video titled {video.path.name}: video_id "
+                      *([f"the library already has a video titled {name}: video_id "
                          f"{same[0]['id']}. If it is this file, use that id instead"]
                         if same else []),
                       *([] if video.duration_seconds is not None else
                         ["could not read the length from the file; Meta reports it after processing"])],
         )
+        proposal.name(decision)
+        return proposal
 
     def current(self, ctx, payload):
         return NOTHING
@@ -554,7 +574,7 @@ class UploadVideo(ChangeKind):
         if video.size_bytes != payload["size"]:
             raise ValueError(f"{video.path.name} changed on disk since the preview; take a fresh one.")
         return media.VideoUpload(video=video, label=video.path.name,
-                                 wait_seconds=int(payload["wait_seconds"]))
+                                 wait_seconds=int(payload["wait_seconds"]), name=payload["name"])
 
     def inverse_for(self, payload, result, created):
         return {"video_id": result.node_id, "video_status": result.response.get("video_status")}

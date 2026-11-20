@@ -173,13 +173,13 @@ class WriteContext:
             # there is no validate_only for an upload.
             if not apply:
                 return MutationResult(validated_only=True, response={"success": True}), []
-            image_hash = media.upload_image(self.client, plan.image, apply=True)
+            image_hash = media.upload_image(self.client, plan.image, apply=True, name=plan.name or None)
             return MutationResult(validated_only=False, node_id=image_hash,
                                   response={"success": True, "hash": image_hash}), [image_hash]
         if isinstance(plan, media.VideoUpload):
             if not apply:
                 return MutationResult(validated_only=True, response={"success": True}), []
-            video_id = media.upload_video(self.client, plan.video, apply=True)
+            video_id = media.upload_video(self.client, plan.video, apply=True, name=plan.name or None)
             # Bounded: Meta encodes in the background, and a tool call must not hang on it.
             state = media.wait_until_ready(self.client, video_id, timeout=plan.wait_seconds)
             return MutationResult(validated_only=False, node_id=video_id,

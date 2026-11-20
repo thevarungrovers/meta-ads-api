@@ -319,7 +319,8 @@ def test_every_creating_kind_declares_creates_named():
     creating = {"create_campaign", "create_ad_set", "create_ad", "create_creative",
                 "create_audience", "create_ab_test", "duplicate_ad", "duplicate_ad_set",
                 "duplicate_campaign", "update_ad_copy", "url_tags",
-                "advantage_creative_options", "attach_lead_form"}
+                "advantage_creative_options", "attach_lead_form", "upload_image",
+                "upload_video"}
     kinds = {k.name: k for k in all_kinds()}
     for name in creating:
         assert kinds[name].creates_named, name

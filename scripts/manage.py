@@ -363,7 +363,8 @@ def cmd_creative(client, args, *, duplicate: bool) -> int:
     if args.image:
         image = media.inspect_image(args.image)
         print(f"  uploading {image.path.name} ({image.describe()['size_kb']}KB) ...")
-        image_hash = media.upload_image(client, image, apply=True)
+        image_hash = media.upload_image(client, image, apply=True, name=stamp(
+            identity, image.path.name, entity_type="image").final)
         print(f"  image_hash {image_hash}")
         plan.requires.payload = ads._fill_uploaded_image(plan.requires.payload, image_hash)
 

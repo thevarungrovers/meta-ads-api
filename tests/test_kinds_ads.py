@@ -296,12 +296,15 @@ def test_upload_image_uploads_only_at_apply_and_returns_metas_hash(monkeypatch, 
 def test_upload_image_points_out_a_library_image_with_the_same_name(monkeypatch, tmp_path):
     s = sim()
     path = _image(tmp_path)
-    s.objects["IMG1"] = {"id": "IMG1", "hash": "abc123", "name": "fr.png"}
-    s.edges["act_1234567890"]["adimages"] = ["IMG1"]
+    # The agent's own earlier upload carries its prefix; a person's plain fr.png does not match.
+    s.objects["IMG1"] = {"id": "IMG1", "hash": "abc123", "name": "AB-max-fr.png"}
+    s.objects["IMG2"] = {"id": "IMG2", "hash": "def456", "name": "fr.png"}
+    s.edges["act_1234567890"]["adimages"] = ["IMG2", "IMG1"]
     tools, _ = rig(monkeypatch, s)
     preview = tools["preview_upload_image"](image_path=str(path))
     assert not preview.blocked
-    assert any("already has an image named fr.png: image_hash abc123" in w for w in preview.warnings)
+    assert any("already has an image named AB-max-fr.png: image_hash abc123" in w
+               for w in preview.warnings)
 
 
 def test_upload_image_refuses_a_file_changed_since_the_preview(monkeypatch, tmp_path):
@@ -372,7 +375,7 @@ def test_upload_video_sends_every_chunk_and_reports_it_ready(monkeypatch, tmp_pa
     assert s.video_chunks[0] == (0, 4) and s.video_chunks[-1][1] == size
     assert result.entity_id == "VIDEO1" and state.counters.applies == 1
     assert any("is processed and ready: use it as video_id" in w for w in result.warnings)
-    assert s.objects["VIDEO1"]["title"] == "clip.mp4"
+    assert s.objects["VIDEO1"]["title"] == "AB-max-clip.mp4"
 
 
 def test_upload_video_says_when_meta_is_still_processing(monkeypatch, tmp_path):

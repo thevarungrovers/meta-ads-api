@@ -421,8 +421,8 @@ caps, a two-phase ledger, Meta's `validate_only` in the preview.
 | `create_audience` | Website, engagement, video, lead-form, app, lookalike (1-10%), saved |
 | `duplicate_ad`, `update_ad_copy`, `url_tags`, `advantage_creative_options`, `attach_lead_form`, `replace_ad_creative` | What an ad says, via a new creative |
 | `create_creative`, `create_ad`, `create_campaign`, `create_ad_set`, `duplicate_ad_set`, `duplicate_campaign` | New things, always **PAUSED**, 3 applies each |
-| `upload_video` | A local MP4/MOV into the video library (chunked upload), then waits a bounded time for Meta's processing; 1 apply, shows nowhere. A video creative without a thumbnail uses Meta's suggested frame |
-| `upload_image` | A local image into the image library, ready for a creative; 1 apply, shows nowhere |
+| `upload_video` | A local MP4/MOV into the video library (chunked upload), titled with the agent prefix (`AB-max-clip.mp4`), then waits a bounded time for Meta's processing; 1 apply, shows nowhere. A video creative without a thumbnail uses Meta's suggested frame |
+| `upload_image` | A local image into the image library, named with the agent prefix (`AB-max-fr.jpg`), ready for a creative; 1 apply, shows nowhere |
 | `create_creative` with `locales` | A multi-language ad: copy, link and media per language (a library hash or a local file, uploaded at apply; fr/en built in, or Meta locale ids), one default language; Stories/Reels may get a vertical image per language |
 | `create_ab_test` | A split test between PAUSED cells |
 | `low_risk_change` | Names (of the agent's own entities only) and ad labels, on a closed allowlist |

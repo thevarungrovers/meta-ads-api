@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..account_id import account_path
-from .client import MutatingMetaAdsClient, MutationError
+from .client import MutatingMetaAdsClient, MutationError, check_name_prefix
 
 IMAGE_EDGE = "adimages"
 VIDEO_EDGE = "advideos"
@@ -139,6 +139,7 @@ def upload_image(
     *,
     apply: bool = False,
     account_id: str | None = None,
+    name: str | None = None,
 ) -> str | None:
     """Put an image in the account's library and return its ``image_hash``.
 
@@ -152,6 +153,8 @@ def upload_image(
     if not apply:
         return None
 
+    name = name or image.path.name
+    check_name_prefix(client.required_name_prefix, name, f"uploading {image.path.name}")
     target = client.resolve_account_id(account_id)
     path = f"{account_path(target)}/{IMAGE_EDGE}"
 
@@ -160,12 +163,13 @@ def upload_image(
         node_id="(new image)",
         method="POST",
         edge=IMAGE_EDGE,
-        payload={"filename": image.path.name, "bytes": image.size_bytes},
+        payload={"filename": image.path.name, "name": name, "bytes": image.size_bytes},
     )
     try:
         with image.path.open("rb") as handle:
+            # The library names an image after the file name in the upload.
             response = client.transport.request(
-                "POST", path, files={image.path.name: handle}
+                "POST", path, files={name: (name, handle)}
             )
     except Exception as exc:
         client._audit.outcome(correlation, ok=False, error=str(exc))
@@ -208,8 +212,16 @@ class ImageUpload:
 
     image: LocalImage
     label: str
+    #: The name the library shows: the file name, with the agent's prefix.
+    name: str = ""
     requires: None = None
     entity_type: str = "adimage"
+    edge: str = IMAGE_EDGE
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """What the engine's naming backstop reads: the name this upload sends."""
+        return {"name": self.name or self.image.path.name}
 
 
 def image_dimensions(head: bytes) -> tuple[int, int] | None:
@@ -411,8 +423,16 @@ class VideoUpload:
     video: LocalVideo
     label: str
     wait_seconds: int = 0
+    #: The title the library shows: the file name, with the agent's prefix.
+    name: str = ""
     requires: None = None
     entity_type: str = "advideo"
+    edge: str = VIDEO_EDGE
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """What the engine's naming backstop reads: the title this upload sends."""
+        return {"name": self.name or self.video.path.name}
 
 
 def preferred_thumbnail(client: MutatingMetaAdsClient, video_id: str) -> str | None:
@@ -437,6 +457,7 @@ def upload_video(
     *,
     apply: bool = False,
     account_id: str | None = None,
+    name: str | None = None,
 ) -> str | None:
     """Put a video in the account's library with Meta's resumable upload; its id.
 
@@ -451,11 +472,13 @@ def upload_video(
     """
     if not apply:
         return None
+    name = name or video.path.name
+    check_name_prefix(client.required_name_prefix, name, f"uploading {video.path.name}")
     target = client.resolve_account_id(account_id)
     path = f"{account_path(target)}/{VIDEO_EDGE}"
     correlation = client._audit.attempt(
         account_id=target, node_id="(new video)", method="POST", edge=VIDEO_EDGE,
-        payload={"filename": video.path.name, "bytes": video.size_bytes},
+        payload={"filename": video.path.name, "name": name, "bytes": video.size_bytes},
     )
     try:
         start = client.transport.request("POST", path, data={
@@ -473,7 +496,7 @@ def upload_video(
                 )
                 begin, end = int(answer["start_offset"]), int(answer["end_offset"])
         finish = client.transport.request("POST", path, data={
-            "upload_phase": "finish", "upload_session_id": session, "title": video.path.name})
+            "upload_phase": "finish", "upload_session_id": session, "title": name, "name": name})
         if finish.get("success") is not True:
             raise MutationError(f"Meta did not confirm the finished upload: {finish!r}")
     except Exception as exc:

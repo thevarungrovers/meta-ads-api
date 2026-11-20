@@ -396,7 +396,8 @@ class Engine:
             if getattr(step, "requires", None) is not None:
                 stack.append(step.requires)
             body = getattr(step, "payload", None) or {}
-            if step.edge in NAMED_EDGES or (step.edge is None and step.entity_type in NAMED_TYPES
+            # Media uploads are named too (media.ImageUpload / VideoUpload).
+            if step.edge in NAMED_EDGES or step.edge in ("adimages", "advideos") or (step.edge is None and step.entity_type in NAMED_TYPES
                                             and "name" in body
                                             and not getattr(step, "allow_unprefixed_name", False)):
                 out.append(str(body.get("name") or ""))

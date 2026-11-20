@@ -86,7 +86,8 @@ class _CreativeKind(ChangeKind):
         image_path = payload.get("image_path")
         if image_path:
             image = media.inspect_image(image_path)
-            image_hash = media.upload_image(ctx.client, image, apply=True)
+            name = ctx.name_for_create("image", image.path.name).final
+            image_hash = media.upload_image(ctx.client, image, apply=True, name=name)
             plan.requires.payload = ads._fill_uploaded_image(plan.requires.payload, image_hash)
         return plan
 
