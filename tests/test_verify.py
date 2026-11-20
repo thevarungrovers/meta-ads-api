@@ -549,3 +549,19 @@ def test_a_multi_locale_list_read_back_in_another_order_still_matches():
     rows = {r["field"]: r["ok"] for r in verify.diff_fields(
         approved, {"image_hash": ["en", "en", "fr"], "headline": ["Titre", "Title"]})}
     assert rows["image_hash"] is False
+
+
+def test_metas_copies_of_the_approved_videos_still_match():
+    """Live: a multi-language creative came back with new video ids -- copies,
+    same title and length -- of the two videos it was built from."""
+    from types import SimpleNamespace
+
+    videos = {"A": ("fr.mp4", 32), "B": ("en.mp4", 30.6), "A2": ("fr.mp4", 32),
+              "B2": ("en.mp4", 30.634), "X": ("other.mp4", 32)}
+    ctx = SimpleNamespace(read=SimpleNamespace(
+        node=lambda vid, _f: {"id": vid, "title": videos[vid][0], "length": videos[vid][1]}))
+    approved = {"video_id": ["A", "B"]}
+    copies = verify._video_copies(ctx, approved, {"video_id": ["B2", "A2"]})
+    row = verify.diff_fields(approved, {"video_id": ["B2", "A2"]}, copies)[0]
+    assert copies and row["ok"] and "copies" in row["note"]
+    assert not verify._video_copies(ctx, approved, {"video_id": ["A2", "X"]})

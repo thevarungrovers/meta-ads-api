@@ -562,14 +562,39 @@ def _same(want: Any, got: Any) -> bool:
     return want == got
 
 
-def diff_fields(approved: dict[str, Any], live: dict[str, Any]) -> list[dict[str, Any]]:
+def _video_copies(ctx, approved: dict[str, Any], live: dict[str, Any]) -> bool:
+    """True when the live videos are Meta's copies of the approved ones.
+
+    Creating a multi-language creative, Meta copies each video into a new
+    video object -- same title, same length, a new id (seen live 2026-11-20)
+    -- so the ids never match. The same files are what matters.
+    """
+    want, got = _texts(approved.get("video_id")), _texts(live.get("video_id"))
+    if not want or len(want) != len(got) or _same(want, got):
+        return False
+
+    def identity(video_id: str):
+        row = ctx.read.node(str(video_id), ("id", "title", "length"))
+        return row.get("title"), round(float(row.get("length") or 0), 1)
+
+    try:
+        return sorted(map(identity, want)) == sorted(map(identity, got))
+    except Exception:  # noqa: BLE001 - unreadable is "not shown to match"
+        return False
+
+
+def diff_fields(approved: dict[str, Any], live: dict[str, Any],
+                video_copies: bool = False) -> list[dict[str, Any]]:
     rows = []
     for name in VERIFIED_FIELDS:
         want = approved.get(name)
         if want in (None, [], ""):
             continue
         got = live.get(name)
-        rows.append({"field": name, "approved": want, "live": got, "ok": _same(want, got)})
+        row = {"field": name, "approved": want, "live": got, "ok": _same(want, got)}
+        if name == "video_id" and not row["ok"] and video_copies:
+            row.update(ok=True, note="Meta's copies of the approved videos (same title and length)")
+        rows.append(row)
     return rows
 
 
@@ -594,7 +619,7 @@ def after_apply(ctx, ad_id: str | None, approved: dict[str, Any]) -> dict[str, A
             live = approved_from_spec(ctx.read.node(creative_id, CREATIVE_FIELDS))
         except Exception:  # noqa: BLE001
             live = {}
-    fields = diff_fields(approved or {}, live)
+    fields = diff_fields(approved or {}, live, _video_copies(ctx, approved or {}, live))
     review = review_state(ad)
     formats = formats_for_ad_set(ctx, ad.get("adset_id"))
     previews = fetch_previews(ctx, formats, ad_id=str(ad_id))
@@ -631,7 +656,7 @@ def after_create_creative(ctx, creative_id: str | None, approved: dict[str, Any]
         return {"creative_id": str(creative_id), "passed": False,
                 "error": f"could not re-read the creative: {str(exc).splitlines()[0]}",
                 "checked_at": _now()}
-    fields = diff_fields(approved or {}, live)
+    fields = diff_fields(approved or {}, live, _video_copies(ctx, approved or {}, live))
     previews = fetch_previews(ctx, formats_for_ad_set(ctx, adset_id), creative_id=str(creative_id))
     return {
         "creative_id": str(creative_id),
