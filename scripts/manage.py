@@ -43,6 +43,23 @@ from metaads_reporting.write import ads, adsets, audiences, campaigns, creatives
 ENTITIES = {"campaign": campaigns, "adset": adsets, "ad": ads}
 
 
+def cli_identity():
+    """The CLI names what it creates ``OWNER-cli-<base>`` -- a human, not the
+    agent -- when the owner initials are set in .env, and plain otherwise."""
+    from metaads_reporting.naming import Identity
+
+    return Identity.from_env().cli()
+
+
+def say_identity(identity) -> None:
+    if identity.problem:
+        print(f"naming: {identity.problem}", file=sys.stderr)
+    elif identity.prefix:
+        print(f"naming: new names are stamped {identity.prefix!r} (owner initials from .env)")
+    else:
+        print("naming: no owner initials in .env; names are used as given")
+
+
 def confirm(plan, client, *, assume_yes: bool, dry_run: bool) -> bool:
     """Validate against Meta, show the plan, and ask.
 
@@ -271,15 +288,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     with logdb.record_tool_call(f"manage.{args.command}", vars(args)):
+        from metaads_reporting.naming import NameRefused
+
         try:
             client = MutatingMetaAdsClient.from_env()
         except ConfigError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+        # Every name this CLI creates carries the CLI prefix; the write
+        # client refuses one that does not, below every command.
+        client.cli_identity = cli_identity()
+        client.required_name_prefix = client.cli_identity.prefix
+        if args.command == "audience" and args.action != "list" or getattr(args, "action", "") in (
+                "duplicate", "set-copy"):
+            say_identity(client.cli_identity)
 
         try:
             return _dispatch(client, args)
-        except MutationError as exc:
+        except (MutationError, NameRefused) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
@@ -302,6 +328,8 @@ def cmd_creative(client, args, *, duplicate: bool) -> int:
     --dry-run would put a file in the account's media library for a change the
     operator then declined.
     """
+    from metaads_reporting.naming import derived, restamp_for_copy, stamp
+
     builder = ads.plan_duplicate_ad if duplicate else ads.plan_update_copy
     kwargs = dict(
         ad_id=args.id,
@@ -309,11 +337,24 @@ def cmd_creative(client, args, *, duplicate: bool) -> int:
         image_path=args.image,
         video_id=args.video_id,
     )
-    if duplicate:
-        kwargs["new_name"] = args.new_name
     if args.name and not args.id:
         found = ads.find(client, name=args.name)
         kwargs["ad_id"] = found["id"]
+    source = ads.find(client, ad_id=kwargs["ad_id"])
+    identity = client.cli_identity
+    # The same naming as the MCP kinds, with the CLI's identity.
+    if duplicate:
+        ad_name = (stamp(identity, args.new_name, entity_type="ad").final if args.new_name
+                   else restamp_for_copy(identity, source.get("name") or "", entity_type="ad",
+                                         suffix=" (copy)").final)
+        kwargs["new_name"] = ad_name
+        # Derived from the ad's name, so checked like the MCP path checks it
+        # (length, characters): refused when too long, never truncated.
+        kwargs["creative_name"] = derived(f"{ad_name} creative", entity_type="creative").final
+    else:
+        kwargs["creative_name"] = restamp_for_copy(
+            identity, source.get("name") or "", entity_type="creative",
+            suffix=" creative (updated)").final
 
     plan = builder(client, **kwargs)
     if not confirm(plan, client, assume_yes=args.yes, dry_run=args.dry_run):
@@ -322,7 +363,8 @@ def cmd_creative(client, args, *, duplicate: bool) -> int:
     if args.image:
         image = media.inspect_image(args.image)
         print(f"  uploading {image.path.name} ({image.describe()['size_kb']}KB) ...")
-        image_hash = media.upload_image(client, image, apply=True)
+        image_hash = media.upload_image(client, image, apply=True, name=stamp(
+            identity, image.path.name, entity_type="image").final)
         print(f"  image_hash {image_hash}")
         plan.requires.payload = ads._fill_uploaded_image(plan.requires.payload, image_hash)
 
@@ -351,10 +393,13 @@ def cmd_audience(client, args) -> int:
                 print(f"  {row['saved_audience_id']:<20} {(row['name'] or '')[:40]:40s} [saved]")
         return 0
 
+    from metaads_reporting.naming import stamp
+
+    name = stamp(client.cli_identity, args.name, entity_type="audience").final
     if args.action == "lookalike":
         plan = audiences.plan_create_lookalike(
             client,
-            name=args.name,
+            name=name,
             origin_audience_id=args.from_id,
             country=args.country,
             ratio=args.ratio,
@@ -365,7 +410,7 @@ def cmd_audience(client, args) -> int:
         except ValueError as exc:
             print(f"error: --targeting is not valid JSON: {exc}", file=sys.stderr)
             return 1
-        plan = audiences.plan_create_saved(client, name=args.name, targeting=targeting)
+        plan = audiences.plan_create_saved(client, name=name, targeting=targeting)
 
     return apply_plan(plan, client, assume_yes=args.yes, dry_run=args.dry_run)
 

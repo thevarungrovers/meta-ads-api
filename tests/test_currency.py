@@ -119,3 +119,26 @@ def test_the_three_sets_do_not_overlap():
 def test_the_common_ad_currencies_are_all_known(code):
     """Being refused on a real account is worse than carrying extra rows."""
     assert minor_unit_exponent(code) in (0, 2, 3)
+
+
+@pytest.mark.parametrize(
+    "code", ["CLP", "COP", "CRC", "HUF", "IDR", "ISK", "JPY", "KRW", "PYG", "TWD", "VND"]
+)
+def test_metas_offset_one_currencies_are_not_divided(code):
+    """Meta's offset is 1 for these, including five ISO lists with two
+    decimals. 50000 is fifty thousand, not five hundred."""
+    from decimal import Decimal
+
+    from metaads_reporting.currency import format_money, from_minor_units, to_minor_units
+
+    assert from_minor_units(50000, code) == Decimal("50000")
+    assert to_minor_units("50000", code) == 50000
+    assert format_money(Decimal("50000"), code) == f"50000 {code}"
+
+
+def test_no_currency_is_in_two_tables():
+    from metaads_reporting.currency import THREE_DECIMAL, TWO_DECIMAL, ZERO_DECIMAL
+
+    assert not (ZERO_DECIMAL & TWO_DECIMAL)
+    assert not (ZERO_DECIMAL & THREE_DECIMAL)
+    assert not (TWO_DECIMAL & THREE_DECIMAL)

@@ -312,18 +312,129 @@ def test_the_write_surface_the_docs_claim_matches_the_allowlist():
         # Points an EXISTING ad at a different creative. The only way to change
         # what a live ad says, because a creative is immutable once attached.
         "creative",
+        # Phase 3 bidding and schedule kinds (metaads_mcp/changes/bidding.py),
+        # each behind a typed preview/apply pair with money guardrails:
+        "bid_strategy",  # campaign (CBO) and ad set
+        "bid_constraints",  # the ROAS floor
+        "start_time", "end_time", "stop_time",  # schedules; start only pre-launch
+        "adset_schedule", "pacing_type",  # dayparting, lifetime budgets only
+        "frequency_control_specs",  # reach-type goals only
+        "targeting",  # ad_set_targeting: always the full merged spec
+        "optimization_goal", "billing_event", "attribution_spec",  # optimization kinds
+        "end_time",  # (also) an A/B test's: its revert ends it early
+        "adlabels",  # the low-risk tool: labels on campaigns, ad sets and ads
     }, (
         f"the write surface changed to {sorted(every)} -- README and SKILL.md "
         f"both state it explicitly and now need updating"
     )
 
 
-def test_create_is_still_unreachable_from_the_server():
-    """create() has no caller. If one is added, it needs its own guard and the
-    docs need to stop saying creation is unavailable."""
-    import metaads_mcp.tools_write as tools_write
-    import metaads_reporting.write.campaigns as campaigns
+def test_every_create_is_paused_by_construction():
+    """The old test grepped tools_write for ".create(" -- which it never
+    contained, because creates go through plan.execute -- so it passed while
+    creation WAS reachable. This pins what actually matters: the one create
+    path refuses anything that would deliver, and the server reaches it only
+    through a ChangeKind.
+    """
+    import ast
 
-    for module in (tools_write, campaigns):
-        source = (REPO_ROOT / module.__file__.split("meta-ads-api/")[-1]).read_text()
-        assert ".create(" not in source, f"{module.__name__} now calls create()"
+    from metaads_reporting.write.client import DELIVERY_EDGES, MutationError, check_create_paused
+
+    assert DELIVERY_EDGES == {"campaigns", "adsets", "ads"}
+    for edge in DELIVERY_EDGES:
+        check_create_paused(edge, {"status": "PAUSED"})
+        for status in ("ACTIVE", None, "ARCHIVED", "DELETED"):
+            with pytest.raises(MutationError):
+                check_create_paused(edge, {"status": status})
+    with pytest.raises(MutationError):
+        check_create_paused("copies", {"status_option": "ACTIVE"})
+
+    # No server module calls a client's create() directly: creation goes
+    # through a kind's build() -> the engine -> plan.execute.
+    for path in (REPO_ROOT / "metaads_mcp").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "create"
+            ):
+                pytest.fail(f"{path.relative_to(REPO_ROOT)}:{node.lineno} calls .create() directly")
+
+
+# --- documentation that DISCLAIMS a capability -------------------------------
+#
+# The mirror image of the manage.py test above. Until 2026-11-18 the server's own
+# INSTRUCTIONS told every agent that ad copy and audiences were "NOT AVAILABLE
+# ANYWHERE IN THIS TOOLCHAIN", while preview/apply_duplicate_ad,
+# update_ad_copy and create_audience were registered and tested. An agent that
+# believed the instructions sent a human to Ads Manager for something it could
+# do itself. A disclaimer is a claim, and a claim is testable.
+
+#: Registered tool -> phrases that must not appear in a "cannot do" section
+#: while it is registered.
+_DISCLAIMED_BY = {
+    "apply_update_ad_copy": ("ad copy", "primary text", "swap an image"),
+    "apply_duplicate_ad": ("campaign, ad set or ad", "ad set or ad;"),
+    "apply_create_audience": ("lookalike", "saved audience", "audience of any kind",
+                              "website audience", "engagement audience"),
+    "apply_create_campaign": ("create a campaign", "create or delete a campaign"),
+    "apply_create_ad_set": ("create a campaign or an ad set", "an ad set,"),
+    "apply_ad_set_targeting": ("change targeting", "targeting, optimization goal"),
+    "apply_ad_set_optimization_goal": ("optimization goal",),
+    "apply_ad_set_schedule": ("schedule or special", "billing event, schedule"),
+    "apply_url_tags": ("url_tags", "utm"),
+    "apply_create_ab_test": ("a/b test", "split test"),
+}
+
+
+def _cannot_sections() -> dict[str, str]:
+    from metaads_mcp.server import INSTRUCTIONS
+
+    skill = (REPO_ROOT / ".claude" / "skills" / "meta-ads" / "SKILL.md").read_text()
+    start = INSTRUCTIONS.index("CANNOT DO")
+    end = INSTRUCTIONS.index("If the human needs one of those", start)
+    s_start = skill.index("### Not here")
+    s_end = skill.index("Ad copy, media and audiences", s_start)
+    assert end > start and s_end > s_start
+    return {
+        "server.INSTRUCTIONS": INSTRUCTIONS[start:end].lower(),
+        "SKILL.md": skill[s_start:s_end].lower(),
+    }
+
+
+def test_instructions_do_not_disclaim_a_registered_tool():
+    import asyncio
+
+    from metaads_mcp import server
+
+    registered = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    offenders = []
+    for where, text in _cannot_sections().items():
+        for tool, phrases in _DISCLAIMED_BY.items():
+            if tool not in registered:
+                continue
+            for phrase in phrases:
+                if phrase in text:
+                    offenders.append(f"{where} lists {phrase!r} as impossible, but {tool} exists")
+    assert not offenders, offenders
+
+
+# --- stray scripts -----------------------------------------------------------
+
+
+#: The only Python file allowed at the repository root. Anything else there is
+#: a scratch script -- the kind that once drove a real budget change in-process,
+#: bypassing the approval prompt, with a real campaign id hard-coded. Scripts
+#: belong in scripts/, where they are reviewed like everything else.
+ROOT_PYTHON_ALLOWED = {"install.py"}
+
+
+def test_no_stray_script_is_tracked_at_the_root():
+    """Untracked files are not shipped and are not this test's business."""
+    stray = sorted(
+        p.name
+        for p in tracked_files()
+        if p.parent == REPO_ROOT and p.suffix == ".py" and p.name not in ROOT_PYTHON_ALLOWED
+    )
+    assert not stray, f"tracked root-level scripts: {stray}. Move them to scripts/."

@@ -4,10 +4,12 @@ The smallest unit, and the one most worth pausing: on Meta a single worn-out
 creative inside an otherwise healthy ad set is the common failure, and pausing
 it is both the usual fix and completely reversible.
 
-Only ``status`` and ``name`` are writable here. Changing what an ad SAYS means
-swapping its creative, which on Meta is not an edit at all -- a creative is
-immutable once attached, so a copy change is a new ad. That is a create, and
-creates are not exposed to an agent.
+``status``, ``name`` and ``creative`` are writable here. Changing what an ad
+SAYS means swapping its creative, which on Meta is not an edit at all -- a
+creative is immutable once attached -- so :func:`plan_duplicate_ad` builds a
+new creative on a new PAUSED ad, and :func:`plan_update_copy` repoints the
+existing ad at a new creative. Both are exposed to the agent through a
+preview/apply pair.
 """
 
 from __future__ import annotations
@@ -16,15 +18,24 @@ from pathlib import Path
 from typing import Any
 
 from .client import MutatingMetaAdsClient, MutationError, check_status
-from .lookup import Candidate, NotFound, match_by_name
+from ..graph import GraphAPIError
+from .lookup import Candidate, NotFound, edge_search, is_not_found, match_by_name
 from .plan import FieldChange, PlannedChange
 
 ENTITY = "ad"
 EDGE = "ads"
 
+#: What a search lists by default: everything that can still be changed.
+#: ARCHIVED and DELETED are left out -- they cannot be changed, and including
+#: them makes every name lookup ambiguous against things that no longer exist.
+DEFAULT_STATUSES = ["ACTIVE", "PAUSED", "CAMPAIGN_PAUSED", "ADSET_PAUSED", "PENDING_REVIEW", "DISAPPROVED", "WITH_ISSUES", "IN_PROCESS"]
+
 FIELDS = (
     "id",
     "name",
+    # The account the object belongs to: the write scope check compares THIS,
+    # not the server's default with itself.
+    "account_id",
     "status",
     "effective_status",
     "adset_id",
@@ -52,7 +63,11 @@ def find(
     if ad_id is not None:
         try:
             return client.node(str(ad_id), FIELDS)
-        except Exception as exc:
+        except GraphAPIError as exc:
+            if not is_not_found(exc):
+                # A rate limit or an expired token is NOT "no such object":
+                # reporting it as one sends the agent hunting for a typo.
+                raise
             raise NotFound(
                 f"No ad {ad_id} this token can see. On Meta a missing object "
                 f"and a missing permission are the same error."
@@ -80,6 +95,7 @@ def search(
     account_id: str | None = None,
     limit: int = 200,
     max_pages: int = 10,
+    status_filter: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Ads in the account, one campaign or one ad set, narrowed by name.
 
@@ -96,24 +112,11 @@ def search(
     else:
         parent = account_path(client.resolve_account_id(account_id))
 
-    rows = client.read.edge(
-        parent,
-        EDGE,
-        FIELDS,
-        limit=limit,
-        # `limit` here is what the CALLER wants back, so it is the
-        # intentional cap too. Passing it only as the page size walks the
-        # whole account and trips the runaway guard on a large one.
-        max_items=limit,
-        max_pages=max_pages,
-        effective_status=(
-            '["ACTIVE","PAUSED","CAMPAIGN_PAUSED","ADSET_PAUSED",'
-            '"PENDING_REVIEW","DISAPPROVED","WITH_ISSUES"]'
-        ),
+    rows, _ = edge_search(
+        client, parent, EDGE, FIELDS,
+        needle=needle, limit=limit, max_pages=max_pages,
+        statuses=list(status_filter or DEFAULT_STATUSES),
     )
-    if needle:
-        target = needle.casefold()
-        rows = [r for r in rows if target in (r.get("name") or "").casefold()]
     return rows
 
 
@@ -283,16 +286,31 @@ def _splice_media(creative, payload: dict[str, Any], media_spec: dict[str, Any])
 
     if creative.shape == _creatives.ASSET_FEED:
         feed = dict(payload.get("asset_feed_spec") or {})
+        # One new file cannot stand in for several: a multi-language ad holds
+        # an image per language (and per placement), and writing one into
+        # every entry shows the same picture in every language, silently.
+        # Media follows the rules' adlabels, so the kind cannot change either.
+        key, other = ("videos", "images") if video_id else ("images", "videos")
+        existing = feed.get(key) or []
+        if feed.get(other):
+            raise MutationError(
+                f"This multi-language creative uses {other}, so it cannot take "
+                f"{'a video' if video_id else 'an image'}: its language rules point at "
+                f"the {other}. Build a new one with preview_create_creative and locales.")
+        if len(existing) != 1:
+            labels = [", ".join(l.get("name", "?") for l in e.get("adlabels") or []) or "?"
+                      for e in existing]
+            raise MutationError(
+                f"This multi-language creative has {len(existing)} {key} ({'; '.join(labels)}): "
+                f"one new file would replace every one of them, showing the same media in "
+                f"every language. Build a new one with preview_create_creative and locales, "
+                f"giving each language its own media.")
+        # The hash or id is filled in; adlabels are kept so the customization
+        # rules that reference the entry keep working.
         if pending is not None:
-            existing = feed.get("images") or [{}]
-            # The hash is filled in at apply time; adlabels are preserved so
-            # the customization rules that reference them keep working.
-            feed["images"] = [
-                {**dict(entry), "hash": "<pending upload>"} for entry in existing
-            ]
-        if video_id:
-            feed["videos"] = [{"video_id": video_id}]
-            feed.pop("images", None)
+            feed["images"] = [{**dict(existing[0]), "hash": "<pending upload>"}]
+        else:
+            feed["videos"] = [{**_creatives.strip_derived(dict(existing[0])), "video_id": video_id}]
         payload["asset_feed_spec"] = feed
         return payload
 
@@ -330,8 +348,13 @@ def plan_duplicate_ad(
     image_path: str | None = None,
     video_id: str | None = None,
     account_id: str | None = None,
+    creative_name: str | None = None,
 ) -> _PlannedChange:
     """A NEW ad beside an existing one, with edited copy and/or new media.
+
+    ``new_name`` and ``creative_name`` default to "<source> (copy)" and
+    "<ad name> creative"; the MCP kind and the CLI always pass both, already
+    named by metaads_reporting.naming.
 
     Always PAUSED. An ad created ACTIVE begins spending the moment it is
     approved, before anyone has looked at it, so going live stays a separate
@@ -356,7 +379,7 @@ def plan_duplicate_ad(
 
     name = new_name or f"{source.get('name')} (copy)"
     creative_plan = _creative_plan(
-        creative, edits, media_spec, name=f"{name} creative"
+        creative, edits, media_spec, name=creative_name or f"{name} creative"
     )
 
     before = creative.current_text()
@@ -377,11 +400,7 @@ def plan_duplicate_ad(
     warnings.append(
         f"the original ad {source.get('id')} is untouched and keeps delivering"
     )
-    if creative.shape == _creatives.ASSET_FEED:
-        warnings.append(
-            f"this is a multi-locale creative ({len(before.get('headline') or [])} "
-            f"locales); a single value is applied to all of them"
-        )
+    warnings.extend(_locale_warnings(creative, edits, before))
 
     return _PlannedChange(
         action="create",
@@ -401,6 +420,23 @@ def plan_duplicate_ad(
     )
 
 
+def _locale_warnings(creative, edits: dict[str, Any], before: dict[str, Any]) -> list[str]:
+    """A single string on a multi-locale feed lands in every language."""
+    if creative.shape != _creatives.ASSET_FEED:
+        return []
+    out = []
+    for label, value in edits.items():
+        current = before.get(label)
+        count = len(current) if isinstance(current, list) else 0
+        if isinstance(value, str) and count > 1:
+            out.append(
+                f"this ad has {count} locales and the single {label} you gave goes "
+                f"into every one of them; pass a list of {count}, one per locale "
+                f"in the order shown in `before`, to keep each language"
+            )
+    return out
+
+
 def plan_update_copy(
     client: MutatingMetaAdsClient,
     *,
@@ -409,8 +445,12 @@ def plan_update_copy(
     image_path: str | None = None,
     video_id: str | None = None,
     account_id: str | None = None,
+    creative_name: str | None = None,
 ) -> _PlannedChange:
     """Repoint an EXISTING ad at a new creative. Keeps the ad id.
+
+    The AD keeps its name; only the new creative is named (``creative_name``,
+    default "<ad name> creative (updated)").
 
     The cost is social proof. Unless the ad runs on an existing page post, a
     new creative means a new post, and the likes, comments and shares
@@ -430,7 +470,8 @@ def plan_update_copy(
         )
 
     creative_plan = _creative_plan(
-        creative, edits, media_spec, name=f"{source.get('name')} creative (updated)"
+        creative, edits, media_spec,
+        name=creative_name or f"{source.get('name')} creative (updated)",
     )
 
     before = creative.current_text()
@@ -447,6 +488,7 @@ def plan_update_copy(
         )
 
     warnings = list(media_notes)
+    warnings.extend(_locale_warnings(creative, edits, before))
     proof = _creatives.social_proof(client, creative)
     engagement = sum(
         int(proof.get(k) or 0) for k in ("likes", "comments", "shares")

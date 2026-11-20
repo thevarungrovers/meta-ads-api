@@ -141,6 +141,7 @@ def ad_set(
         "bid_strategy": bid_strategy,
         "optimization_goal": "OFFSITE_CONVERSIONS",
         "billing_event": "IMPRESSIONS",
+        "account_id": "1234567890",
     }
     if daily_budget is not None:
         row["daily_budget"] = daily_budget
@@ -164,6 +165,7 @@ def ad(
         "effective_status": effective_status or status,
         "adset_id": "120200000000002",
         "campaign_id": "120200000000001",
+        "account_id": "1234567890",
     }
     row.update(extra)
     return row

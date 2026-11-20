@@ -47,6 +47,20 @@ from metaads_reporting import config, logdb  # noqa: E402
 #: Stops load_dotenv from ever reading the real .env over the top.
 config._loaded = True
 
+# The naming identity is read from the repo's .env FILE (not os.environ), and
+# metaads_mcp.server reads it at import -- during collection. Point both paths
+# at a placeholder file first, so no test ever sees the real initials or agent
+# name. AB / max only; the real values never appear in this repository.
+import tempfile  # noqa: E402
+
+_IDENTITY_DIR = Path(tempfile.mkdtemp(prefix="metaads-identity-"))
+PLACEHOLDER_ENV = _IDENTITY_DIR / ".env"
+PLACEHOLDER_ENV.write_text(
+    "META_ADS_MCP_OWNER_INITIALS=AB\nMETA_ADS_MCP_AGENT_NAME=max\n"
+)
+config.ENV_PATH = PLACEHOLDER_ENV
+config.CONFIG_ENV_PATH = _IDENTITY_DIR / "config.env"  # absent
+
 
 @pytest.fixture(autouse=True)
 def _isolate_log_database(tmp_path):
@@ -78,8 +92,17 @@ def _fake_credentials(monkeypatch):
         "META_ADS_OUTPUT_DIR",
         "META_ADS_MCP_READ_ONLY",
         "META_ADS_MCP_ALLOWED_ACCOUNT_IDS",
+        "META_ADS_MCP_OWNER_INITIALS",
+        "META_ADS_MCP_AGENT_NAME",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _placeholder_identity(monkeypatch):
+    """Every test names things as AB / max, from a placeholder .env file."""
+    monkeypatch.setattr(config, "ENV_PATH", PLACEHOLDER_ENV)
+    monkeypatch.setattr(config, "CONFIG_ENV_PATH", _IDENTITY_DIR / "config.env")
 
 
 @pytest.fixture
@@ -100,3 +123,38 @@ def _no_real_backoff_sleeps(monkeypatch):
     monkeypatch.setattr(
         "metaads_reporting.graph._sleep_backoff", lambda *args, **kwargs: None
     )
+
+
+class _OfflineLinkSession:
+    """Answers every link check 200, so no test ever reaches a real website."""
+
+    def request(self, method, url, **kwargs):
+        from tests.fakes import FakeResponse
+
+        return FakeResponse({}, status=200)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_link_checks(monkeypatch):
+    """The ad verification follows destination links over plain HTTP, outside
+    the Graph transport. Offline here: a fake resolver with a public address,
+    and a session that answers 200. Tests of the checker pass their own."""
+    monkeypatch.setattr(
+        "metaads_reporting.linkcheck._resolve", lambda host: ["93.184.216.34"]
+    )
+    monkeypatch.setattr(
+        "metaads_reporting.linkcheck._new_session", lambda: _OfflineLinkSession()
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_token_health():
+    """The health check caches per client id for an hour; ids are reused."""
+    from metaads_reporting import token_health
+
+    token_health._cache.clear()
+    yield
+    token_health._cache.clear()

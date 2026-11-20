@@ -393,3 +393,125 @@ def test_token_info_never_prints_the_token(sim, capsys):
     token_info.main([])
     captured = capsys.readouterr()
     assert FAKE_TOKEN not in captured.out + captured.err
+
+
+# --- naming: OWNER-cli-<base> when the initials are set, plain when not ----------
+
+
+CLI_COMBOS = [
+    pytest.param("AB", "max", "AB-cli-", id="both"),
+    pytest.param("AB", "", "AB-cli-", id="owner-only"),
+    pytest.param("", "max", "", id="agent-only"),
+    pytest.param("", "", "", id="neither"),
+]
+
+
+def _env(monkeypatch, tmp_path, owner, agent):
+    from metaads_reporting import config
+
+    path = tmp_path / ".env"
+    path.write_text(f"META_ADS_MCP_OWNER_INITIALS={owner}\nMETA_ADS_MCP_AGENT_NAME={agent}\n")
+    monkeypatch.setattr(config, "ENV_PATH", path)
+
+
+def _sent(sim, edge):
+    return next(c for c in sim.created if c["edge"] == edge)["payload"]
+
+
+@pytest.mark.parametrize("owner, agent, prefix", CLI_COMBOS)
+def test_manage_ad_duplicate_stamps_the_cli_prefix(sim, monkeypatch, tmp_path, capsys, owner, agent, prefix):
+    from scripts import manage
+    from tests.test_mcp_creative_path import CREATIVE_ID, link_creative_obj
+
+    _env(monkeypatch, tmp_path, owner, agent)
+    sim.objects[AD_ID]["creative"] = {"id": CREATIVE_ID}
+    sim.objects[CREATIVE_ID] = link_creative_obj()
+    assert manage.main(["ad", "duplicate", "--id", AD_ID, "--headline", "new",
+                        "--new-name", "spring v2", "--yes"]) == 0
+    assert _sent(sim, "ads")["name"] == f"{prefix}spring v2"
+    assert _sent(sim, "adcreatives")["name"] == f"{prefix}spring v2 creative"
+    out = capsys.readouterr().out
+    assert (prefix in out) if prefix else ("names are used as given" in out)
+
+
+@pytest.mark.parametrize("owner, agent, prefix", CLI_COMBOS)
+def test_manage_ad_duplicate_strips_a_foreign_prefix_from_the_copy(sim, monkeypatch, tmp_path,
+                                                                    owner, agent, prefix):
+    from scripts import manage
+    from tests.test_mcp_creative_path import CREATIVE_ID, link_creative_obj
+
+    _env(monkeypatch, tmp_path, owner, agent)
+    sim.objects[AD_ID]["name"] = "CD-bot-launch"
+    sim.objects[AD_ID]["creative"] = {"id": CREATIVE_ID}
+    sim.objects[CREATIVE_ID] = link_creative_obj()
+    assert manage.main(["ad", "duplicate", "--id", AD_ID, "--headline", "new", "--yes"]) == 0
+    assert _sent(sim, "ads")["name"] == f"{prefix}launch (copy)"
+
+
+def test_manage_ad_duplicate_refuses_a_derived_creative_name_over_the_limit(
+        sim, monkeypatch, tmp_path, capsys):
+    """The ad name fits (7 + 393 = 400); "<ad name> creative" does not, and is
+    refused like the MCP path refuses it -- never sent, never truncated."""
+    from scripts import manage
+    from tests.test_mcp_creative_path import CREATIVE_ID, link_creative_obj
+
+    _env(monkeypatch, tmp_path, "AB", "max")
+    sim.objects[AD_ID]["creative"] = {"id": CREATIVE_ID}
+    sim.objects[CREATIVE_ID] = link_creative_obj()
+    assert manage.main(["ad", "duplicate", "--id", AD_ID, "--headline", "new",
+                        "--new-name", "x" * 393, "--yes"]) == 1
+    assert "too long" in capsys.readouterr().err
+    assert not sim.created
+
+
+@pytest.mark.parametrize("owner, agent, prefix", CLI_COMBOS)
+def test_manage_audiences_stamp_the_cli_prefix(sim, monkeypatch, tmp_path, owner, agent, prefix):
+    from scripts import manage
+
+    _env(monkeypatch, tmp_path, owner, agent)
+    assert manage.main(["audience", "saved", "--name", "QC 25-54", "--yes",
+                        "--targeting", '{"geo_locations": {"countries": ["CA"]}}']) == 0
+    assert _sent(sim, "saved_audiences")["name"] == f"{prefix}QC 25-54"
+
+
+def test_manage_audience_lookalike_stamps_the_cli_prefix(sim, monkeypatch, tmp_path):
+    from scripts import manage
+
+    sim.objects["SRC"] = {"id": "SRC", "name": "Buyers", "approximate_count_lower_bound": 5000,
+                          "approximate_count_upper_bound": 6000, "delivery_status": {"code": 200},
+                          "operation_status": {"code": 200}, "subtype": "WEBSITE"}
+    assert manage.main(["audience", "lookalike", "--name", "LAL 1%", "--from-id", "SRC",
+                        "--country", "CA", "--yes"]) == 0
+    created = [c for c in sim.created if c["edge"] == "customaudiences"]
+    assert created[0]["payload"]["name"] == "AB-cli-LAL 1%"
+
+
+def test_manage_refuses_a_name_carrying_the_agents_prefix(sim, capsys):
+    from scripts import manage
+
+    assert manage.main(["audience", "saved", "--name", "AB-max-x", "--yes",
+                        "--targeting", '{"geo_locations": {"countries": ["CA"]}}']) == 1
+    assert "prefix" in capsys.readouterr().err
+    assert not sim.created
+
+
+def test_manage_refuses_a_malformed_owner_naming_the_key(sim, monkeypatch, tmp_path, capsys):
+    from scripts import manage
+
+    _env(monkeypatch, tmp_path, "a1", "")
+    assert manage.main(["audience", "saved", "--name", "x", "--yes",
+                        "--targeting", '{"geo_locations": {"countries": ["CA"]}}']) == 1
+    assert "META_ADS_MCP_OWNER_INITIALS" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("edge", ["campaigns?x=1", "campaigns#frag", "x/campaigns", "/campaigns"])
+def test_an_edge_with_a_query_fragment_or_slash_is_refused(sim, edge):
+    from metaads_reporting.write.client import MutatingMetaAdsClient, MutationError
+
+    client = MutatingMetaAdsClient.from_env()
+    client.required_name_prefix = "AB-cli-"
+    with pytest.raises(MutationError, match="bare path segment"):
+        client.create(entity_type="campaign", edge=edge, payload={"name": "plain", "status": "PAUSED"})
+    with pytest.raises(MutationError, match="bare path segment"):
+        client.update(f"{CAMPAIGN_ID}/campaigns", entity_type="campaign", payload={"name": "AB-cli-x"})
+    assert not sim.writes

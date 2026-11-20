@@ -8,6 +8,7 @@ means someone reviews it.
 from __future__ import annotations
 
 import asyncio
+import json
 import importlib
 
 import pytest
@@ -26,6 +27,31 @@ READ_TOOLS = frozenset(
         "list_my_changes",
         "get_ad_creative",
         "list_audiences",
+        "reconcile_ledger",
+        "get_report_run",
+        "get_campaign",
+        "get_ad_set",
+        "get_ad",
+        "verify_ad",
+        "get_ad_previews",
+        "get_audience",
+        "search_targeting",
+        "estimate_reach",
+        "list_ad_images",
+        "list_ad_videos",
+        "list_labels",
+        "list_custom_conversions",
+        "list_pixels",
+        "get_pixel_health",
+        "list_connected_identities",
+        "list_lead_forms",
+        "list_ad_rules",
+        "list_ab_tests",
+        "get_ab_test",
+        "list_catalogs",
+        "list_product_sets",
+        "list_recent_changes",
+        "search_ad_library",
     }
 )
 
@@ -40,6 +66,34 @@ PREVIEW_TOOLS = frozenset(
         "preview_duplicate_ad",
         "preview_update_ad_copy",
         "preview_create_audience",
+        "preview_ad_set_lifetime_budget",
+        "preview_campaign_lifetime_budget",
+        "preview_ad_set_bid_strategy",
+        "preview_campaign_bid_strategy",
+        "preview_ad_set_roas_floor",
+        "preview_ad_set_schedule",
+        "preview_campaign_schedule",
+        "preview_ad_set_dayparting",
+        "preview_ad_set_frequency_cap",
+        "preview_ad_set_targeting",
+        "preview_ad_set_placements",
+        "preview_url_tags",
+        "preview_advantage_creative_options",
+        "preview_attach_lead_form",
+        "preview_replace_ad_creative",
+        "preview_ad_set_optimization_goal",
+        "preview_ad_set_attribution_spec",
+        "preview_create_ad",
+        "preview_create_creative",
+    "preview_upload_image",
+    "preview_upload_video",
+        "preview_multi_ad_status",
+        "preview_create_campaign",
+        "preview_create_ad_set",
+        "preview_duplicate_ad_set",
+        "preview_duplicate_campaign",
+        "preview_create_ab_test",
+        "preview_low_risk_change",
     }
 )
 
@@ -55,6 +109,34 @@ APPLY_TOOLS = frozenset(
         "apply_update_ad_copy",
         "apply_create_audience",
         "revert_change",
+        "apply_ad_set_lifetime_budget",
+        "apply_campaign_lifetime_budget",
+        "apply_ad_set_bid_strategy",
+        "apply_campaign_bid_strategy",
+        "apply_ad_set_roas_floor",
+        "apply_ad_set_schedule",
+        "apply_campaign_schedule",
+        "apply_ad_set_dayparting",
+        "apply_ad_set_frequency_cap",
+        "apply_ad_set_targeting",
+        "apply_ad_set_placements",
+        "apply_url_tags",
+        "apply_advantage_creative_options",
+        "apply_attach_lead_form",
+        "apply_replace_ad_creative",
+        "apply_ad_set_optimization_goal",
+        "apply_ad_set_attribution_spec",
+        "apply_create_ad",
+        "apply_create_creative",
+    "apply_upload_image",
+    "apply_upload_video",
+        "apply_multi_ad_status",
+        "apply_create_campaign",
+        "apply_create_ad_set",
+        "apply_duplicate_ad_set",
+        "apply_duplicate_campaign",
+        "apply_create_ab_test",
+        "apply_low_risk_change",
     }
 )
 
@@ -158,10 +240,41 @@ def test_only_the_local_tools_claim_a_closed_world(tools):
         assert tool.annotations.open_world_hint is expected, name
 
 
+#: Applies that move money, stop or reshape delivery, change targeting, or
+#: create something. Grown deliberately, one kind at a time.
+SPENDS = {
+    "apply_ad_set_lifetime_budget",
+    "apply_campaign_lifetime_budget",
+    "apply_ad_set_bid_strategy",
+    "apply_campaign_bid_strategy",
+    "apply_ad_set_roas_floor",
+    "apply_ad_set_schedule",
+    "apply_campaign_schedule",
+    "apply_ad_set_dayparting",
+    "apply_ad_set_frequency_cap",
+    "apply_ad_set_targeting",
+    "apply_ad_set_placements",
+    "apply_url_tags",
+    "apply_advantage_creative_options",
+    "apply_attach_lead_form",
+    "apply_replace_ad_creative",
+    "apply_ad_set_optimization_goal",
+    "apply_ad_set_attribution_spec",
+    "apply_create_ad",
+    "apply_create_creative",
+    "apply_multi_ad_status",
+    "apply_create_campaign",
+    "apply_create_ad_set",
+    "apply_duplicate_ad_set",
+    "apply_duplicate_campaign",
+    "apply_create_ab_test",
+}
+
+
 def test_the_money_moving_applies_are_marked_destructive(tools):
     """And only those. Marking a reversible single-ad pause destructive would
     train somebody to click through the loud prompts."""
-    spends = {
+    spends = SPENDS | {
         "apply_campaign_status",
         "apply_campaign_daily_budget",
         "apply_ad_set_status",
@@ -196,3 +309,30 @@ def test_the_installers_safe_tool_list_matches_the_server(tools):
     assert set(install.SAFE_TOOLS) == READ_TOOLS | PREVIEW_TOOLS
     assert set(install.WRITE_TOOLS) == APPLY_TOOLS
     assert not set(install.SAFE_TOOLS) & set(install.WRITE_TOOLS)
+
+
+def test_every_creating_kind_declares_creates_named():
+    """A kind that creates something named must declare it, so the engine's
+    backstop checks the names it sends."""
+    from metaads_mcp.changes import all_kinds
+
+    creating = {"create_campaign", "create_ad_set", "create_ad", "create_creative",
+                "create_audience", "create_ab_test", "duplicate_ad", "duplicate_ad_set",
+                "duplicate_campaign", "update_ad_copy", "url_tags",
+                "advantage_creative_options", "attach_lead_form", "upload_image",
+                "upload_video"}
+    kinds = {k.name: k for k in all_kinds()}
+    for name in creating:
+        assert kinds[name].creates_named, name
+    assert {n for n, k in kinds.items() if k.creates_named} == creating
+
+
+@pytest.mark.parametrize("name", ["preview_update_ad_copy", "preview_duplicate_ad"])
+def test_copy_fields_take_one_text_per_locale_over_mcp(tools, name):
+    # Live: the planner kept each language of a bilingual ad given a list,
+    # but the published schema took only a string, so over MCP every
+    # language got the same text.
+    properties = tools[name].input_schema["properties"]
+    for field in ("primary_text", "headline", "description"):
+        kinds = json.dumps(properties[field])
+        assert '"array"' in kinds and '"string"' in kinds, (name, field)

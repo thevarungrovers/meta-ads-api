@@ -39,7 +39,9 @@ import os
 import pathlib
 import platform
 import re
+import secrets
 import shutil
+import stat
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent
@@ -49,7 +51,7 @@ VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
 WINDOWS_VENV_PYTHON = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
 SKILL_FILE = REPO_ROOT / ".claude" / "skills" / SERVER_NAME / "SKILL.md"
 
-#: The tools that cannot change anything: 8 reads and 6 previews. A preview
+#: The tools that cannot change anything: the reads and the previews. A preview
 #: queries the account and mints a token in memory; it writes nothing.
 #: Hardcoded because this script must not import the server (that would need the
 #: dependencies, which is exactly what it may be running before). Kept honest by
@@ -66,6 +68,31 @@ SAFE_TOOLS = (
     "list_my_changes",
     "get_ad_creative",
     "list_audiences",
+    "reconcile_ledger",
+    "get_report_run",
+    "get_campaign",
+    "get_ad_set",
+    "get_ad",
+    "verify_ad",
+    "get_ad_previews",
+    "get_audience",
+    "search_targeting",
+    "estimate_reach",
+    "list_ad_images",
+    "list_ad_videos",
+    "list_labels",
+    "list_custom_conversions",
+    "list_pixels",
+    "get_pixel_health",
+    "list_connected_identities",
+    "list_lead_forms",
+    "list_ad_rules",
+    "list_ab_tests",
+    "get_ab_test",
+    "list_catalogs",
+    "list_product_sets",
+    "list_recent_changes",
+    "search_ad_library",
     "preview_campaign_status",
     "preview_campaign_daily_budget",
     "preview_ad_set_status",
@@ -75,6 +102,34 @@ SAFE_TOOLS = (
     "preview_duplicate_ad",
     "preview_update_ad_copy",
     "preview_create_audience",
+    "preview_ad_set_lifetime_budget",
+    "preview_campaign_lifetime_budget",
+    "preview_ad_set_bid_strategy",
+    "preview_campaign_bid_strategy",
+    "preview_ad_set_roas_floor",
+    "preview_ad_set_schedule",
+    "preview_campaign_schedule",
+    "preview_ad_set_dayparting",
+    "preview_ad_set_frequency_cap",
+    "preview_ad_set_targeting",
+    "preview_ad_set_placements",
+    "preview_url_tags",
+    "preview_advantage_creative_options",
+    "preview_attach_lead_form",
+    "preview_replace_ad_creative",
+    "preview_ad_set_optimization_goal",
+    "preview_ad_set_attribution_spec",
+    "preview_create_ad",
+    "preview_create_creative",
+    "preview_upload_image",
+    "preview_upload_video",
+    "preview_multi_ad_status",
+    "preview_create_campaign",
+    "preview_create_ad_set",
+    "preview_duplicate_ad_set",
+    "preview_duplicate_campaign",
+    "preview_create_ab_test",
+    "preview_low_risk_change",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -88,6 +143,34 @@ WRITE_TOOLS = (
     "apply_duplicate_ad",
     "apply_update_ad_copy",
     "apply_create_audience",
+    "apply_ad_set_lifetime_budget",
+    "apply_campaign_lifetime_budget",
+    "apply_ad_set_bid_strategy",
+    "apply_campaign_bid_strategy",
+    "apply_ad_set_roas_floor",
+    "apply_ad_set_schedule",
+    "apply_campaign_schedule",
+    "apply_ad_set_dayparting",
+    "apply_ad_set_frequency_cap",
+    "apply_ad_set_targeting",
+    "apply_ad_set_placements",
+    "apply_url_tags",
+    "apply_advantage_creative_options",
+    "apply_attach_lead_form",
+    "apply_replace_ad_creative",
+    "apply_ad_set_optimization_goal",
+    "apply_ad_set_attribution_spec",
+    "apply_create_ad",
+    "apply_create_creative",
+    "apply_upload_image",
+    "apply_upload_video",
+    "apply_multi_ad_status",
+    "apply_create_campaign",
+    "apply_create_ad_set",
+    "apply_duplicate_ad_set",
+    "apply_duplicate_campaign",
+    "apply_create_ab_test",
+    "apply_low_risk_change",
     "revert_change",
 )
 
@@ -561,6 +644,94 @@ def next_steps(agent: str, read_only: bool) -> list[str]:
     return steps
 
 
+IDENTITY_KEYS = ("META_ADS_MCP_OWNER_INITIALS", "META_ADS_MCP_AGENT_NAME")
+
+
+def _replace_private(path: pathlib.Path, text: str) -> None:
+    """Replace ``path`` atomically: write a temp file beside it, created
+    0o600 from the start (it holds the credentials too), then os.replace.
+
+    A crash leaves either the old file or the new one, never half of each.
+    The mode is never looser than 0o600, and an existing stricter one (0o400,
+    even 0o000) is kept, never widened.
+
+    A symlinked ``.env`` is written THROUGH to its target, which is what is
+    replaced -- replacing the link would turn it into a regular file and
+    leave the real one stale. A link to nothing is refused.
+    """
+    if path.is_symlink():
+        target = pathlib.Path(os.path.realpath(path))
+        if not target.is_file():
+            raise InstallError(
+                f"{path.name} is a symlink to {target}, which is not a regular file; "
+                "nothing was written. Point the link at the real file, or replace it."
+            )
+        path = target
+    mode = 0o600
+    if path.exists():
+        mode = stat.S_IMODE(path.stat().st_mode) & 0o600
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_identity(env_path: pathlib.Path, owner: str | None, agent: str | None,
+                   dry_run: bool) -> list[str]:
+    """Put the naming identity into .env -- the ONLY place it is read from.
+
+    Never into an MCP client config (the server ignores a process value) and
+    never into a tracked file. Only the two keys are touched: an existing line
+    is replaced, a missing one appended. ``None`` leaves a key as it is.
+    """
+    if env_path.name != ".env":
+        raise InstallError(f"the identity goes only into .env, not {env_path}")
+    sys.path.insert(0, str(REPO_ROOT))
+    from metaads_reporting.naming import Identity
+
+    wanted = {k: v.strip() for k, v in zip(IDENTITY_KEYS, (owner, agent)) if v is not None}
+    if not wanted:
+        return []
+    check = Identity.from_values(wanted.get(IDENTITY_KEYS[0]), wanted.get(IDENTITY_KEYS[1]))
+    if check.problem:
+        # Which key, and the rule -- never the value: a mistyped secret
+        # pasted into the wrong prompt must not end up in a terminal log.
+        bad = [key for key, value in wanted.items()
+               if value and Identity.from_values(*(
+                   (value, None) if key == IDENTITY_KEYS[0] else (None, value))).problem]
+        raise InstallError(
+            f"invalid {' and '.join(bad) or 'naming identity'}: owner initials are 2-4 "
+            "uppercase letters (e.g. AB); the agent name is a lowercase slug of 2-24 "
+            "characters, a letter first, then letters, digits or _ (no -), and not "
+            "cli or manual (e.g. max). Leave it empty for no prefix."
+        )
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    out, seen = [], set()
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key in wanted:
+            out.append(f"{key}={wanted[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    out.extend(f"{k}={v}" for k, v in wanted.items() if k not in seen)
+    if dry_run:
+        return [f"would set {', '.join(wanted)} in {env_path.name}"]
+    _replace_private(env_path, "\n".join(out) + "\n")
+    return [f"set {', '.join(wanted)} in {env_path.name} (the agent's name prefix)"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Add the meta-ads MCP server to an AI agent.",
@@ -590,6 +761,16 @@ def main() -> int:
         "--yes",
         action="store_true",
         help="do not ask for confirmation before writing (needs --agent)",
+    )
+    parser.add_argument(
+        "--owner-initials",
+        help="2-4 uppercase initials for the name prefix, written to .env only "
+             "(empty string to clear)",
+    )
+    parser.add_argument(
+        "--agent-name",
+        help="lowercase agent slug for the name prefix, written to .env only "
+             "(empty string to clear)",
     )
     args = parser.parse_args()
 
@@ -621,6 +802,9 @@ def main() -> int:
         print()
 
     for note in install(agent, read_only, args.dry_run):
+        print(f"  {note}")
+    for note in write_identity(REPO_ROOT / ".env", args.owner_initials, args.agent_name,
+                               args.dry_run):
         print(f"  {note}")
 
     print()

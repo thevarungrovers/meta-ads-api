@@ -21,15 +21,24 @@ from typing import Any
 from ..currency import format_money, from_minor_units, to_minor_units
 from .campaigns import budget_field
 from .client import MutatingMetaAdsClient, MutationError, check_status
-from .lookup import Candidate, NotFound, match_by_name
+from ..graph import GraphAPIError
+from .lookup import Candidate, NotFound, edge_search, is_not_found, match_by_name
 from .plan import FieldChange, PlannedChange
 
 ENTITY = "ad set"
 EDGE = "adsets"
 
+#: What a search lists by default: everything that can still be changed.
+#: ARCHIVED and DELETED are left out -- they cannot be changed, and including
+#: them makes every name lookup ambiguous against things that no longer exist.
+DEFAULT_STATUSES = ["ACTIVE", "PAUSED", "CAMPAIGN_PAUSED", "IN_PROCESS", "WITH_ISSUES"]
+
 FIELDS = (
     "id",
     "name",
+    # The account the object belongs to: the write scope check compares THIS,
+    # not the server's default with itself.
+    "account_id",
     "status",
     "effective_status",
     "campaign_id",
@@ -47,11 +56,40 @@ FIELDS = (
 
 #: Bid strategies under which ``bid_amount`` is actually used. Everything else
 #: ignores it, silently.
+#:
+#:   LOWEST_COST_WITH_BID_CAP  bid_amount is a hard cap on each auction bid
+#:   COST_CAP                  bid_amount is the average cost per result to hold
+#:
+#: NOT here, and the old table had both: LOWEST_COST_WITH_MIN_ROAS takes its
+#: target in ``bid_constraints.roas_average_floor`` (a ratio, not money), and
+#: TARGET_COST is deprecated. A bid_amount write under either is accepted and
+#: ignored, which is exactly the trap this table exists to refuse.
 STRATEGIES_USING_BID = frozenset({"LOWEST_COST_WITH_BID_CAP", "COST_CAP"})
+STRATEGIES_USING_BID_AMOUNT = STRATEGIES_USING_BID
 
-#: Strategies that use a cost target rather than a bid cap. ``bid_amount`` is
-#: the field for both in the API, which is why the strategy has to be read.
-STRATEGIES_USING_TARGET = frozenset({"TARGET_COST", "LOWEST_COST_WITH_MIN_ROAS"})
+#: Uses bid_constraints.roas_average_floor; see the ad_set_roas_floor kind.
+STRATEGY_MIN_ROAS = "LOWEST_COST_WITH_MIN_ROAS"
+
+
+def effective_bid_strategy(client: MutatingMetaAdsClient, row: dict[str, Any]) -> str:
+    """The bid strategy this ad set actually runs under.
+
+    Under campaign budget optimization the strategy is set on the CAMPAIGN and
+    an ad set may report none, so an empty answer is read from the parent
+    rather than taken to mean "no strategy".
+    """
+    own = row.get("bid_strategy")
+    if own:
+        return own
+    campaign_id = row.get("campaign_id")
+    if campaign_id:
+        try:
+            parent = client.node(str(campaign_id), ("id", "bid_strategy"))
+        except Exception:  # noqa: BLE001 - unreadable parent: say "not set"
+            parent = {}
+        if parent.get("bid_strategy"):
+            return parent["bid_strategy"]
+    return "(not set)"
 
 
 def find(
@@ -69,7 +107,11 @@ def find(
     if ad_set_id is not None:
         try:
             return client.node(str(ad_set_id), FIELDS)
-        except Exception as exc:
+        except GraphAPIError as exc:
+            if not is_not_found(exc):
+                # A rate limit or an expired token is NOT "no such object":
+                # reporting it as one sends the agent hunting for a typo.
+                raise
             raise NotFound(
                 f"No ad set {ad_set_id} this token can see. On Meta a missing "
                 f"object and a missing permission are the same error."
@@ -96,6 +138,7 @@ def search(
     account_id: str | None = None,
     limit: int = 200,
     max_pages: int = 10,
+    status_filter: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Ad sets in the account or in one campaign, optionally narrowed by name.
 
@@ -110,21 +153,11 @@ def search(
         if campaign_id
         else account_path(client.resolve_account_id(account_id))
     )
-    rows = client.read.edge(
-        parent,
-        EDGE,
-        FIELDS,
-        limit=limit,
-        # `limit` here is what the CALLER wants back, so it is the
-        # intentional cap too. Passing it only as the page size walks the
-        # whole account and trips the runaway guard on a large one.
-        max_items=limit,
-        max_pages=max_pages,
-        effective_status='["ACTIVE","PAUSED","CAMPAIGN_PAUSED","IN_PROCESS","WITH_ISSUES"]',
+    rows, _ = edge_search(
+        client, parent, EDGE, FIELDS,
+        needle=needle, limit=limit, max_pages=max_pages,
+        statuses=list(status_filter or DEFAULT_STATUSES),
     )
-    if needle:
-        target = needle.casefold()
-        rows = [r for r in rows if target in (r.get("name") or "").casefold()]
     return rows
 
 
@@ -185,7 +218,8 @@ def plan_set_daily_budget(
     campaign off campaign-budget optimization.
     """
     row = find(client, ad_set_id=ad_set_id, name=name, account_id=account_id)
-    currency = client.currency(account_id)
+    # The AD SET's account, not the default one: a token reaches several.
+    currency = client.currency(row.get("account_id") or account_id)
     client.check_daily_budget(float(amount), override=override_guardrail)
 
     using = budget_field(row)
@@ -258,16 +292,17 @@ def plan_set_bid_amount(
     bid moved.
     """
     row = find(client, ad_set_id=ad_set_id, name=name, account_id=account_id)
-    currency = client.currency(account_id)
-    strategy = row.get("bid_strategy") or "(not set)"
+    # The AD SET's account, not the default one: a token reaches several.
+    currency = client.currency(row.get("account_id") or account_id)
+    strategy = effective_bid_strategy(client, row)
 
-    if strategy not in STRATEGIES_USING_BID | STRATEGIES_USING_TARGET:
+    if strategy not in STRATEGIES_USING_BID_AMOUNT:
         raise MutationError(
             f"Ad set {row.get('name')!r} is on bid strategy {strategy}, which "
             f"does not use bid_amount. Meta ACCEPTS the write and ignores it, "
             f"so this would be recorded as applied while nothing changed. "
             f"bid_amount is used under: "
-            f"{', '.join(sorted(STRATEGIES_USING_BID | STRATEGIES_USING_TARGET))}."
+            f"{', '.join(sorted(STRATEGIES_USING_BID_AMOUNT))}."
         )
 
     before = from_minor_units(row.get("bid_amount"), currency)
@@ -280,9 +315,9 @@ def plan_set_bid_amount(
 
     meaning = (
         "a CAP: delivery will not bid above it"
-        if strategy in STRATEGIES_USING_BID
-        else "a TARGET: Meta aims for this average, and may exceed it on an "
-        "individual result"
+        if strategy == "LOWEST_COST_WITH_BID_CAP"
+        else "a TARGET: Meta aims for this average cost, and may exceed it on "
+        "an individual result"
     )
     warnings = [f"under {strategy} this amount is {meaning}"]
     if before and after < before:

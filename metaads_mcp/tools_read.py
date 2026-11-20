@@ -7,39 +7,45 @@ from here regardless of what is asked for.
 
 from __future__ import annotations
 
-import functools
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from metaads_mcp.errors import refusals_reach_the_caller
 from metaads_reporting.client import ReadOnlyMetaAdsClient
-from metaads_reporting.currency import CurrencyError
-from metaads_reporting.graph import GraphError
 from metaads_reporting.insights import InsightsError, name_contains, summarise
 from metaads_reporting.reports import get_report, report_names
 
 
-def refusals_reach_the_caller(fn):
-    """Re-raise a deliberate refusal as ToolError so its message survives.
+#: effective_status values a find_* may filter on -- what is ACTUALLY
+#: happening, parents and review folded in, not what somebody set.
+EffectiveStatus = Literal[
+    "ACTIVE",
+    "PAUSED",
+    "CAMPAIGN_PAUSED",
+    "ADSET_PAUSED",
+    "IN_PROCESS",
+    "WITH_ISSUES",
+    "PENDING_REVIEW",
+    "DISAPPROVED",
+]
 
-    The MCP runtime carries a ToolError's text through to the caller but
-    replaces every other exception with a bare "Error executing tool <name>".
-    An unknown report name should say which names exist, not nothing.
-    """
+#: The naming filters every find_* / list_* tool takes (metaads_reporting.naming).
+OriginFilter = Annotated[
+    Literal["any", "agent", "cli", "manual"],
+    Field(description="Who the NAME says made it: agent (an OWNER-agent- prefix), cli "
+                      "(OWNER-cli-, a human with scripts/manage.py), manual (no prefix)"),
+]
+AgentFilter = Annotated[str | None, Field(description="Only names with this agent part, e.g. max")]
+OwnerFilter = Annotated[str | None, Field(description="Only names with these owner initials, e.g. AB")]
+MineFilter = Annotated[bool, Field(description="Only names with THIS server's own prefix")]
 
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except ToolError:
-            raise
-        except (ValueError, LookupError, GraphError, CurrencyError) as exc:
-            raise ToolError(str(exc)) from exc
-
-    return wrapper
-
+Breakdown = Literal[
+    "age", "gender", "country", "region", "dma",
+    "publisher_platform", "platform_position", "device_platform",
+    "impression_device", "hourly_stats_aggregated_by_advertiser_time_zone",
+]
 
 # ALL FOUR HINTS, ALWAYS, ON EVERY TOOL. A hint left unset is published as
 # absent, and a client that cannot see one falls back on the spec's default --
@@ -74,6 +80,13 @@ def register(mcp, state) -> None:
     client = ReadOnlyMetaAdsClient.from_env()
     state.read_client = client
     state.default_account_id = client.settings.account_id or ""
+
+    def headroom() -> dict[str, Any]:
+        """Meta's rate-limit usage as of the last call: every read reports it,
+        so an agent sees 80% coming rather than meeting 100% as an error."""
+        return {"worst_percent_used": client.rate_limit().get("worst_percent_used")}
+
+    state.headroom = headroom
 
     def money(value: Any, currency: str) -> str | None:
         from metaads_reporting.currency import format_money, from_minor_units
@@ -113,9 +126,63 @@ def register(mcp, state) -> None:
         the same reason: report dates are evaluated in the ACCOUNT's zone, not
         yours.
         """
+        from metaads_reporting.token_health import token_health
+
         summary = client.account_summary()
         summary["rate_limit"] = client.rate_limit()
+        summary["token"] = token_health(client)
         return summary
+
+    def found(rows, truncated, render, limit) -> dict[str, Any]:
+        from metaads_mcp import ledger
+        from metaads_reporting.naming import attribution
+
+        made = ledger.created_ids()
+
+        def annotated(r):
+            # Who the NAME says made it (a convention), and whether the
+            # ledger shows this server did (the proof).
+            return {**render(r), **attribution(state.identity, r.get("name")),
+                    "ledger_created": str(r.get("id")) in made}
+
+        return {
+            "rows": [annotated(r) for r in rows[:limit]],
+            "count": min(len(rows), limit),
+            "truncated": truncated,
+            "rate_limit": headroom(),
+        }
+
+    def name_filter(origin="any", agent_name=None, owner=None, mine=False):
+        from metaads_reporting.naming import NameFilter
+
+        return NameFilter.build(state.identity, origin=origin, agent_name=agent_name,
+                                owner=owner, mine=mine)
+
+    def _search(module, parent, needle, limit, status, names=None):
+        from metaads_reporting.write.lookup import edge_search
+
+        if names is None or not names.active:
+            return edge_search(
+                _as_write_shim(client), parent, module.EDGE, module.FIELDS,
+                needle=needle, limit=limit,
+                statuses=[status] if status else list(module.DEFAULT_STATUSES),
+            )
+        # A server-side prefix pre-filter where one exists, then the exact
+        # local parse; read deeper, since the local filter drops rows.
+        rows, truncated = edge_search(
+            _as_write_shim(client), parent, module.EDGE, module.FIELDS,
+            needle=needle or names.needle, limit=200,
+            statuses=[status] if status else list(module.DEFAULT_STATUSES),
+        )
+        if needle and names.needle:
+            rows = [r for r in rows if names.needle in (r.get("name") or "")]
+        kept = [r for r in rows if names.matches(r.get("name"))]
+        return kept[:limit], truncated or len(kept) > limit
+
+    def _account() -> str:
+        from metaads_reporting.account_id import account_path
+
+        return account_path(client.resolve_account_id())
 
     @mcp.tool(title="Find campaigns by name", annotations=READ_ONLY)
     @refusals_reach_the_caller
@@ -125,10 +192,15 @@ def register(mcp, state) -> None:
             Field(description="Case-insensitive substring of the campaign name"),
         ] = None,
         status: Annotated[
-            str | None, Field(description="ACTIVE or PAUSED")
+            EffectiveStatus | None,
+            Field(description="Filter on effective_status, e.g. ACTIVE"),
         ] = None,
         limit: Annotated[int, Field(description="Max rows", ge=1, le=200)] = 50,
-    ) -> list[dict[str, Any]]:
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
+    ) -> dict[str, Any]:
         """Campaigns with their ids, status, objective and budget.
 
         Start here. Every write tool needs an id from this.
@@ -137,31 +209,34 @@ def register(mcp, state) -> None:
         the budget and its ad sets do not (Advantage campaign budget); `adset`
         means the opposite. Changing a budget at the wrong level is refused,
         and which level a given campaign uses is not guessable.
+
+        The name match covers the whole account, not just the first page.
+        `truncated: true` means more matched than `limit` returned -- narrow
+        the search or raise the limit. `status` filters on effective_status,
+        which is what is actually delivering.
+
+        Every row says who its NAME says made it (`origin` agent / cli /
+        manual, `owner`, `agent`, `base`) and whether the ledger shows this
+        server created it (`ledger_created`); filter with origin, agent_name,
+        owner or mine.
         """
         from metaads_reporting.write import campaigns as campaign_writes
 
+        names = name_filter(origin, agent_name, owner, mine)
         currency = client.currency()
-        rows = campaign_writes.search(
-            _as_write_shim(client), name_contains_text, limit=limit
-        )
-        if status:
-            wanted = status.upper()
-            rows = [r for r in rows if (r.get("status") or "").upper() == wanted]
-        return [
-            {
-                "campaign_id": str(r.get("id")),
-                "name": r.get("name"),
-                "status": r.get("status"),
-                "effective_status": r.get("effective_status"),
-                "objective": r.get("objective"),
-                "bid_strategy": r.get("bid_strategy"),
-                "budget_level": campaign_writes.budget_level(r),
-                "daily_budget": money(r.get("daily_budget"), currency),
-                "lifetime_budget": money(r.get("lifetime_budget"), currency),
-                "currency": currency,
-            }
-            for r in rows[:limit]
-        ]
+        rows, truncated = _search(campaign_writes, _account(), name_contains_text, limit, status, names)
+        return found(rows, truncated, lambda r: {
+            "campaign_id": str(r.get("id")),
+            "name": r.get("name"),
+            "status": r.get("status"),
+            "effective_status": r.get("effective_status"),
+            "objective": r.get("objective"),
+            "bid_strategy": r.get("bid_strategy"),
+            "budget_level": campaign_writes.budget_level(r),
+            "daily_budget": money(r.get("daily_budget"), currency),
+            "lifetime_budget": money(r.get("lifetime_budget"), currency),
+            "currency": currency,
+        }, limit)
 
     @mcp.tool(title="Find ad sets by name", annotations=READ_ONLY)
     @refusals_reach_the_caller
@@ -170,8 +245,15 @@ def register(mcp, state) -> None:
         campaign_id: Annotated[
             str | None, Field(description="Restrict to one campaign")
         ] = None,
+        status: Annotated[
+            EffectiveStatus | None, Field(description="Filter on effective_status")
+        ] = None,
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
-    ) -> list[dict[str, Any]]:
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
+    ) -> dict[str, Any]:
         """Ad sets with their ids, status, budget, bid and parent campaign.
 
         Ad set names are unique only WITHIN a campaign -- "Broad" and
@@ -184,15 +266,24 @@ def register(mcp, state) -> None:
         """
         from metaads_reporting.write import adsets as adset_writes
 
-        currency = client.currency()
-        rows = adset_writes.search(
-            _as_write_shim(client),
-            name_contains_text,
-            campaign_id=campaign_id,
-            limit=limit,
-        )
-        return [
-            {
+        names = name_filter(origin, agent_name, owner, mine)
+        parent = str(campaign_id) if campaign_id else _account()
+        rows, truncated = _search(adset_writes, parent, name_contains_text, limit, status, names)
+        # Each row in ITS account's currency: a campaign_id can name a campaign
+        # in another allowed account, and a JPY budget read as CAD is a
+        # hundredfold error.
+        currencies: dict[str, str] = {}
+
+        def currency_of(r) -> str:
+            account = str(r.get("account_id") or "") or None
+            key = account or ""
+            if key not in currencies:
+                currencies[key] = client.currency(account)
+            return currencies[key]
+
+        def shape(r):
+            currency = currency_of(r)
+            return {
                 "ad_set_id": str(r.get("id")),
                 "name": r.get("name"),
                 "status": r.get("status"),
@@ -206,8 +297,8 @@ def register(mcp, state) -> None:
                 "billing_event": r.get("billing_event"),
                 "currency": currency,
             }
-            for r in rows[:limit]
-        ]
+
+        return found(rows, truncated, shape, limit)
 
     @mcp.tool(title="Find ads by name", annotations=READ_ONLY)
     @refusals_reach_the_caller
@@ -217,8 +308,15 @@ def register(mcp, state) -> None:
         campaign_id: Annotated[
             str | None, Field(description="Restrict to one campaign")
         ] = None,
+        status: Annotated[
+            EffectiveStatus | None, Field(description="Filter on effective_status")
+        ] = None,
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
-    ) -> list[dict[str, Any]]:
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
+    ) -> dict[str, Any]:
         """Ads with their ids, status and parents.
 
         `effective_status` is the field to read, not `status`. `DISAPPROVED`
@@ -227,25 +325,18 @@ def register(mcp, state) -> None:
         """
         from metaads_reporting.write import ads as ad_writes
 
-        rows = ad_writes.search(
-            _as_write_shim(client),
-            name_contains_text,
-            ad_set_id=ad_set_id,
-            campaign_id=campaign_id,
-            limit=limit,
-        )
-        return [
-            {
-                "ad_id": str(r.get("id")),
-                "name": r.get("name"),
-                "status": r.get("status"),
-                "effective_status": r.get("effective_status"),
-                "ad_set_id": str(r.get("adset_id")),
-                "campaign_id": str(r.get("campaign_id")),
-                "updated_time": r.get("updated_time"),
-            }
-            for r in rows[:limit]
-        ]
+        names = name_filter(origin, agent_name, owner, mine)
+        parent = str(ad_set_id or campaign_id or "") or _account()
+        rows, truncated = _search(ad_writes, parent, name_contains_text, limit, status, names)
+        return found(rows, truncated, lambda r: {
+            "ad_id": str(r.get("id")),
+            "name": r.get("name"),
+            "status": r.get("status"),
+            "effective_status": r.get("effective_status"),
+            "ad_set_id": str(r.get("adset_id")),
+            "campaign_id": str(r.get("campaign_id")),
+            "updated_time": r.get("updated_time"),
+        }, limit)
 
     @mcp.tool(title="Run a performance report", annotations=READ_ONLY)
     @refusals_reach_the_caller
@@ -266,60 +357,143 @@ def register(mcp, state) -> None:
             str | None,
             Field(description="Report on one campaign, ad set or ad id instead of the account"),
         ] = None,
-        limit: Annotated[int, Field(ge=1, le=500)] = 200,
+        max_rows: Annotated[
+            int, Field(description="Most rows to return", ge=1, le=5000)
+        ] = 200,
+        aggregate: Annotated[
+            bool,
+            Field(description="True: one row per entity for the whole window. False: one per day"),
+        ] = True,
+        action_types: Annotated[
+            list[str] | None,
+            Field(description="Keep only these action types in actions/action_values, e.g. ['purchase']"),
+        ] = None,
+        breakdowns: Annotated[
+            list[Breakdown] | None,
+            Field(description="Override the report's breakdowns, e.g. ['age', 'gender']"),
+        ] = None,
+        run_async: Annotated[
+            bool,
+            Field(description="Start an async report run instead; poll get_report_run"),
+        ] = False,
     ) -> dict[str, Any]:
         """Account, campaign, ad set or ad performance from the insights edge.
 
         Today is excluded from `days` on purpose: today's metrics are partial
-        all day and drag every average down.
+        all day and drag every average down. `days` is evaluated in the
+        ACCOUNT's time zone (a Meta date preset where one exists).
+
+        `max_rows` is a real cap on rows returned; `truncated: true` says
+        there were more. `aggregate=False` gives a row per day, which on an
+        ad-level report is a lot of rows.
 
         THREE THINGS TO KNOW ABOUT THESE NUMBERS:
 
         - **Attribution is 7-day-click plus 1-day-view** unless a report says
           otherwise. The 1-day-view half counts people who SAW an ad and never
           touched it, which is why Meta's conversion count is routinely several
-          times larger than any click-based record of the same campaign. They
-          are not measuring the same thing, and neither is wrong.
+          times larger than any click-based record of the same campaign.
         - **Dates are in the ACCOUNT's time zone.** See `get_account`.
         - **`reach` and `frequency` cannot be summed across rows.** The same
           person reached on two days is one person. The totals below leave them
           out for that reason.
         """
+        from metaads_reporting.insights import window_for_days
+
         definition = get_report(report)
         filters = (
             (name_contains("campaign", campaign_name),) if campaign_name else ()
         )
+        increment = None if aggregate else 1
         if since or until:
             query = definition.build(
-                since=since, until=until, filtering=filters, limit=limit
+                since=since, until=until, filtering=filters, time_increment=increment,
+                breakdowns=tuple(breakdowns) if breakdowns else None,
             )
         else:
-            from metaads_reporting.insights import last_n_days
-
-            window = last_n_days(days or 30)
+            tz = (client.account() or {}).get("timezone_name")
+            window = window_for_days(days or 30, tz)
             query = definition.build(
-                since=window["since"],
-                until=window["until"],
+                preset=window.get("date_preset"),
+                since=window.get("since"),
+                until=window.get("until"),
                 filtering=filters,
-                limit=limit,
+                time_increment=increment,
+                breakdowns=tuple(breakdowns) if breakdowns else None,
             )
 
-        rows = client.insight_rows(query, node_id=node_id)
+        if run_async:
+            from metaads_reporting.account_id import account_path
+            from metaads_reporting.write import async_insights
+
+            node = node_id or account_path(client.resolve_account_id())
+            run_id = async_insights.start(client, node, query.to_params())
+            return {
+                "report": report,
+                "report_run_id": run_id,
+                "window": query.describe_window(),
+                "next": "call get_report_run with this id until async_status is "
+                "'Job Completed', then it returns the rows",
+            }
+
+        rows = client.insight_rows(query, node_id=node_id, max_items=max_rows + 1)
+        truncated = len(rows) > max_rows
+        rows = rows[:max_rows]
+        if action_types:
+            wanted = set(action_types)
+            for row in rows:
+                for key in ("actions", "action_values", "cost_per_action_type"):
+                    if isinstance(row.get(key), list):
+                        row[key] = [
+                            e for e in row[key]
+                            if isinstance(e, dict) and e.get("action_type") in wanted
+                        ]
         return {
             "report": report,
             "level": definition.level,
+            "breakdowns": list(query.breakdowns),
             "window": query.describe_window(),
+            "aggregate": aggregate,
             "attribution_windows": list(query.attribution_windows),
             "currency": client.currency(),
-            "row_count": len(rows),
+            "rows_returned": len(rows),
+            "truncated": truncated,
             "totals": summarise(rows),
             "rows": rows,
+            "rate_limit": headroom(),
             "note": (
                 "Totals omit reach and frequency: they cannot be summed across "
                 "rows. Use the creative_fatigue report, which collapses the "
                 "window into one row per ad, when frequency is the question."
             ),
         }
+
+    @mcp.tool(title="Poll an async report run", annotations=READ_ONLY)
+    @refusals_reach_the_caller
+    def get_report_run(
+        report_run_id: Annotated[str, Field(description="From run_report(run_async=True)")],
+        max_rows: Annotated[int, Field(ge=1, le=5000)] = 500,
+    ) -> dict[str, Any]:
+        """Where an async report is, and its rows once it is done.
+
+        `async_status` reaches "Job Completed" at 100%; "Job Failed" or "Job
+        Skipped" means start it again, narrower. Money in the rows is already in
+        major units (insights always are).
+        """
+        from metaads_reporting.write import async_insights
+
+        state_ = async_insights.status(client, report_run_id)
+        out: dict[str, Any] = {
+            "report_run_id": report_run_id,
+            "async_status": state_.get("async_status"),
+            "async_percent_completion": state_.get("async_percent_completion"),
+            "rate_limit": headroom(),
+        }
+        if state_.get("async_status") == "Job Completed":
+            rows = async_insights.rows(client, report_run_id, max_items=max_rows + 1)
+            out.update(rows=rows[:max_rows], rows_returned=min(len(rows), max_rows),
+                       truncated=len(rows) > max_rows)
+        return out
 
     @mcp.tool(title="Read an ad's creative and its current copy", annotations=READ_ONLY)
     @refusals_reach_the_caller
@@ -363,6 +537,7 @@ def register(mcp, state) -> None:
             ad_name=ad.get("name"),
             effective_status=ad.get("effective_status"),
             social_proof=creatives.social_proof(_as_write_shim(client), creative),
+            rate_limit=headroom(),
         )
         return out
 
@@ -373,8 +548,16 @@ def register(mcp, state) -> None:
             str, Field(description="'custom', 'saved' or 'all'")
         ] = "all",
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
+        unused_only: Annotated[
+            bool,
+            Field(description="Only custom audiences no ad set includes or excludes"),
+        ] = False,
+        origin: OriginFilter = "any",
+        agent_name: AgentFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> dict[str, Any]:
-        """Audiences that already exist, for picking a lookalike source.
+        """Audiences that already exist: sizes, status, usability, and use.
 
         Reading a customer-list audience is fine and often necessary — you need
         to see one to build a lookalike from it. CREATING one is what is
@@ -382,17 +565,51 @@ def register(mcp, state) -> None:
         """
         from metaads_reporting.write import audiences
 
+        from metaads_reporting.naming import attribution
+
+        names = name_filter(origin, agent_name, owner, mine)
         shim = _as_write_shim(client)
         wanted = (kind or "all").strip().lower()
+        # A naming filter drops rows locally, so it reads deeper first.
+        depth = 200 if names.active else limit + 1
+
+        def named(rows):
+            rows = [{**r, **attribution(state.identity, r.get("name"))} for r in rows]
+            return [r for r in rows if names.matches(r.get("name"))]
+
         out: dict[str, Any] = {}
         if wanted in ("custom", "all"):
-            out["custom"] = audiences.list_custom(shim, limit=limit)
+            custom = named(audiences.list_custom(shim, limit=depth))
+            try:
+                used, complete = state.audience_usage()
+                unavailable = None
+            except Exception as exc:  # noqa: BLE001 - the heaviest read here; often throttled
+                if unused_only:
+                    raise
+                used, complete, unavailable = None, False, str(exc).splitlines()[0]
+            for row in custom:
+                row["used_by_ad_sets"] = (
+                    None if used is None else len(used.get(row["audience_id"], []))
+                )
+            if unused_only:
+                custom = [r for r in custom if not r["used_by_ad_sets"]]
+            out["custom"] = custom[:limit]
+            out["custom_truncated"] = len(custom) > limit
+            out["usage_scan_complete"] = complete
+            if unavailable:
+                out["usage_unavailable"] = (
+                    f"{unavailable} -- the audiences are listed, but which ad sets "
+                    "use them is unknown (used_by_ad_sets: null)."
+                )
         if wanted in ("saved", "all"):
-            out["saved"] = audiences.list_saved(shim, limit=limit)
+            out["saved"] = named(audiences.list_saved(shim, limit=depth))[:limit]
+        out["rate_limit"] = headroom()
         out["note"] = (
-            "Only 'saved' and 'lookalike' audiences can be CREATED here. A "
-            "customer-list audience must be made in Ads Manager, where a "
-            "person accepts the data terms."
+            "`usable` says whether Meta can deliver to a custom audience yet "
+            "(None: an unmapped status, quoted verbatim). Audiences are never "
+            "deleted here; an unused one changes nothing. A customer-list "
+            "audience must be made in Ads Manager, where a person accepts the "
+            "data terms."
         )
         return out
 
@@ -406,15 +623,24 @@ def register(mcp, state) -> None:
         Call this before proposing a change, so you propose something that can
         actually be applied rather than something that will be refused.
         """
-        from metaads_mcp.guardrails import read_only_mode, writes_disabled
+        from metaads_mcp.budget_check import budget_cap_report
+        from metaads_mcp.guardrails import DailyUsage, read_only_mode, writes_disabled
+        from metaads_reporting.token_health import token_health
 
         read_only = read_only_mode()
         return {
             "limits": state.limits.describe(),
             "session": state.counters.snapshot(),
+            "today": DailyUsage(state.limits).snapshot(),
+            "token": token_health(client),
             "writes_disabled": writes_disabled(),
             "read_only_server": read_only,
             "pending_previews": state.previews.pending_count,
+            # Who names what this server creates, from the repo's .env only.
+            # Each part is used only when set; both empty means plain names.
+            "identity": state.identity.describe(),
+            # Campaigns too big for the daily total to ever re-activate.
+            "budget_cap_check": budget_cap_report(state),
             "note": (
                 "THIS SERVER IS READ-ONLY: it published no apply_* tools and no "
                 "revert_change, so nothing here can change the account. The "
@@ -422,7 +648,9 @@ def register(mcp, state) -> None:
                 "what you would change, and let them make it from a writable "
                 "client or Ads Manager."
                 if read_only
-                else "Session counters reset only when the server restarts."
+                else "Session counters reset when the server restarts; the "
+                "daily ones (`today`) are read from the ledger and reset at "
+                "local midnight."
             ),
         }
 
@@ -462,6 +690,13 @@ def register(mcp, state) -> None:
             }
             for e in rows
         ]
+
+    from metaads_mcp import tools_account
+
+    tools_account.register(
+        mcp, state, client,
+        headroom=headroom, money=money, read_only=READ_ONLY, local_only=LOCAL_ONLY,
+    )
 
 
 class _WriteShim:

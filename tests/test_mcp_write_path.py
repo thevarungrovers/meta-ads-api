@@ -136,6 +136,11 @@ def test_a_token_is_not_interchangeable_between_tools(tools):
     with pytest.raises(Exception) as caught:
         tool["apply_ad_status"](preview_token=preview.preview_token)
     assert "not interchangeable" in str(caught.value)
+    # Spent, deliberately -- a refused token is never retryable -- and said so.
+    assert "now spent: take a fresh preview for preview_campaign_status" in str(caught.value)
+    with pytest.raises(Exception) as caught:
+        tool["apply_campaign_status"](preview_token=preview.preview_token)
+    assert "already used" in str(caught.value)
 
 
 def test_an_unknown_token_is_refused(tools):
@@ -251,11 +256,12 @@ def test_the_session_apply_cap_stops_a_loop(monkeypatch):
     assert "session apply limit reached" in str(caught.value)
 
 
-def test_a_preview_over_the_per_day_delta_ceiling_is_blocked_at_preview_time(
+def test_an_activation_skips_the_per_change_limit_and_uses_the_daily_total(
     monkeypatch,
 ):
-    """Blocked at the preview, not at the apply, so the human sees WHY before
-    being asked to approve anything."""
+    """Decided 2026-11-18: activating counts against the DAILY total, not the
+    per-change limit -- otherwise a campaign whose budget is over that limit
+    could never be re-activated. A budget increase still needs both."""
     sim = make_sim()
     sim.objects[CAMPAIGN_ID]["status"] = "PAUSED"
     tight = Limits(**{**DEFAULTS, "max_projected_delta_per_day": Decimal("10.00")})
@@ -264,9 +270,17 @@ def test_a_preview_over_the_per_day_delta_ceiling_is_blocked_at_preview_time(
     preview = registrar.tools["preview_campaign_status"](
         campaign_id=CAMPAIGN_ID, new_status="ACTIVE"
     )
-    assert preview.blocked is True
-    failed = [c for c in preview.checks if c.startswith("FAIL")]
-    assert any("projected_delta_per_day" in c for c in failed)
+    assert preview.blocked is False
+    assert any(
+        c == "SKIP projected_delta_per_day (activation: counted against the daily total)"
+        for c in preview.checks
+    )
+    assert any("uses 250.00 of today's remaining" in c for c in preview.checks)
+
+    raise_it = registrar.tools["preview_campaign_daily_budget"](
+        campaign_id=CAMPAIGN_ID, new_daily_budget="300.00"
+    )
+    assert any(c.startswith("FAIL projected_delta_per_day") for c in raise_it.checks)
 
 
 def test_revert_counts_against_the_apply_cap(monkeypatch):
@@ -556,3 +570,85 @@ def test_every_preview_names_the_currency(tools):
     tool, state, sim = tools
     preview = tool["preview_campaign_status"](campaign_id=CAMPAIGN_ID, new_status="PAUSED")
     assert preview.currency == "CAD"
+
+
+def test_a_failed_revert_still_marks_the_entry_reverted(tools):
+    """The failure path used to write the outcome without `reverts`, so the
+    entry looked unreverted and could be reverted again blind -- exactly what
+    happened when a live revert hit Meta's 1-write-per-30s limit."""
+    tool, state, sim = tools
+    preview = tool["preview_campaign_status"](campaign_id=CAMPAIGN_ID, new_status="PAUSED")
+    result = tool["apply_campaign_status"](preview_token=preview.preview_token)
+
+    original = sim.request
+
+    def router(method, url, params=None, data=None, files=None, timeout=None):
+        if method == "POST":
+            return error_response(100, message="Invalid parameter")
+        return original(method, url, params, data, files, timeout)
+
+    sim.request = router
+    with pytest.raises(Exception):
+        tool["revert_change"](entry_id=result.entry_id)
+    sim.request = original
+
+    rows = tool["list_my_changes"]()
+    assert rows[0]["reverted"] is True
+    assert rows[-1]["applied"] is False and rows[-1]["error"]
+    with pytest.raises(Exception) as caught:
+        tool["revert_change"](entry_id=result.entry_id)
+    assert "already been reverted" in str(caught.value)
+
+
+@pytest.mark.parametrize("strategy", ["LOWEST_COST_WITH_MIN_ROAS", "TARGET_COST"])
+def test_bid_amount_is_refused_where_meta_ignores_it(monkeypatch, strategy):
+    """MIN_ROAS takes its target in bid_constraints.roas_average_floor and
+    TARGET_COST is deprecated: a bid_amount under either is accepted and
+    ignored."""
+    sim = make_sim()
+    sim.objects[ADSET_ID].update(bid_strategy=strategy, bid_amount="300", daily_budget="5000")
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    with pytest.raises(Exception) as caught:
+        registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="4.00")
+    assert "does not use bid_amount" in str(caught.value)
+
+
+def test_under_a_campaign_budget_the_strategy_is_read_from_the_campaign(monkeypatch):
+    sim = make_sim()
+    sim.objects[ADSET_ID].pop("bid_strategy")
+    sim.objects[ADSET_ID]["bid_amount"] = "300"
+    sim.objects[CAMPAIGN_ID]["bid_strategy"] = "COST_CAP"
+    registrar, _ = build_tools(sim, monkeypatch=monkeypatch)
+    preview = registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="3.50")
+    assert any("COST_CAP" in w and "TARGET" in w for w in preview.warnings)
+
+
+def _cost_cap_under_a_campaign_budget():
+    # As seen live: a COST_CAP ad set with no budget of its own, inside a
+    # campaign holding 71.42/day, with ~80 clicks a day.
+    sim = make_sim()
+    sim.objects[CAMPAIGN_ID].update(daily_budget="7142", bid_strategy="COST_CAP")
+    sim.objects[ADSET_ID].update(bid_strategy="COST_CAP", bid_amount="12500", daily_budget=None)
+    sim.insights = [insights_row(clicks="559", spend="175.28")]
+    return sim
+
+
+def test_a_bid_change_never_projects_more_than_the_budget_can_spend(monkeypatch):
+    # Live: +5.00 on a 125.00 cost cap projected 399.29/day -- the bid delta
+    # times CLICKS, under a campaign budget of 71.42/day.
+    registrar, _ = build_tools(_cost_cap_under_a_campaign_budget(), limits=Limits(**{
+        **DEFAULTS, "max_cost_cap": Decimal("500"), "max_bid_amount": Decimal("500")}),
+        monkeypatch=monkeypatch)
+    preview = registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="130.00")
+    assert Decimal(preview.projected_daily_spend_delta) <= Decimal("71.42")
+    assert all("." not in c.split(":")[-1].split()[0] or len(c.split(":")[-1].split()[0].split(".")[1]) <= 2
+               for c in preview.checks if c.split()[1].startswith("projected_delta_per_day"))
+
+
+def test_a_cost_cap_is_held_to_max_cost_cap(monkeypatch):
+    registrar, _ = build_tools(_cost_cap_under_a_campaign_budget(), limits=Limits(**{
+        **DEFAULTS, "max_cost_cap": Decimal("200"), "max_bid_amount": Decimal("50")}),
+        monkeypatch=monkeypatch)
+    preview = registrar.tools["preview_ad_set_bid_amount"](ad_set_id=ADSET_ID, new_bid_amount="130.00")
+    assert any(c.startswith("OK") and "max_cost_cap" in c for c in preview.checks)
+    assert not any("max_bid_amount" in c for c in preview.checks)

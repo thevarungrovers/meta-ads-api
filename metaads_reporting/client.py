@@ -68,8 +68,29 @@ ACCOUNT_STATUS = {
 }
 
 
-class MetaAdsReportingError(RuntimeError):
-    """A read failed. Wraps the Graph error with the request's context."""
+class MetaAdsReportingError(GraphAPIError):
+    """A read failed. Carries the Graph error's code, subcode and messages.
+
+    It used to be a bare RuntimeError holding only the text, which threw away
+    the one thing a caller needs to tell an expired token from a rate limit
+    from a bad id. Now it IS a GraphAPIError (so ``code``/``is_rate_limit``
+    work on it) and keeps the original as ``cause``.
+    """
+
+    def __init__(self, exc: GraphAPIError) -> None:
+        super().__init__(
+            str(exc),
+            status=exc.status,
+            code=exc.code,
+            subcode=exc.subcode,
+            error_type=exc.error_type,
+            fbtrace_id=exc.fbtrace_id,
+            user_title=exc.user_title,
+            user_message=exc.user_message,
+            path=exc.path,
+        )
+        self.cause = exc
+        self.retry_after = getattr(exc, "retry_after", None)
 
 
 def build_transport(settings: Settings, *, session: Any | None = None) -> GraphTransport:
@@ -138,14 +159,14 @@ class ReadOnlyMetaAdsClient:
         try:
             return self._transport.get(path, **params)
         except GraphAPIError as exc:
-            raise MetaAdsReportingError(str(exc)) from exc
+            raise MetaAdsReportingError(exc) from exc
 
     def _paged(self, path: str, **params: Any) -> Iterator[dict[str, Any]]:
         assert_read_method("GET")
         try:
             yield from self._transport.paged(path, **params)
         except GraphAPIError as exc:
-            raise MetaAdsReportingError(str(exc)) from exc
+            raise MetaAdsReportingError(exc) from exc
 
     # NOTE: `limit` is the page size, `max_items` is how many you actually
     # want, and `max_pages` is the runaway guard. See GraphTransport.paged.
@@ -238,6 +259,29 @@ class ReadOnlyMetaAdsClient:
             for row in rows
         ]
 
+    def for_page(self, page_id: str) -> "ReadOnlyMetaAdsClient":
+        """A read-only client that speaks as one Page.
+
+        Some Page edges (``leadgen_forms``) refuse a system-user token with
+        code 190 "must be called with a Page Access Token". That token is
+        fetched with this client's own and lives only in the returned client:
+        never logged, never returned to a caller.
+        """
+        token = self.node(str(page_id), ("access_token",)).get("access_token")
+        if not token:
+            raise ValueError(
+                f"Page {page_id} gave no access token: assign the Page to the "
+                "System User in Business Settings."
+            )
+        transport = GraphTransport(
+            access_token=token,
+            api_version=self._settings.api_version,
+            base_url=self._settings.graph_base,
+            app_secret=self._settings.app_secret,
+            session=self._transport._session,
+        )
+        return ReadOnlyMetaAdsClient(transport, self._settings)
+
     # -- objects ----------------------------------------------------------
 
     def node(self, node_id: str, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -273,6 +317,15 @@ class ReadOnlyMetaAdsClient:
             )
         )
 
+    def get(self, path: str, **params: Any) -> dict[str, Any]:
+        """One GET on any Graph path, for edges that are not lists of objects.
+
+        ``/{creative_id}/previews``, ``act_/generatepreviews``,
+        ``act_/delivery_estimate`` and ``/search`` answer with a shape of their
+        own. Still a GET, through the same guarded path as everything else.
+        """
+        return self._get(str(path), **params)
+
     # -- insights ---------------------------------------------------------
 
     def insights(
@@ -282,8 +335,12 @@ class ReadOnlyMetaAdsClient:
         node_id: str | None = None,
         account_id: str | None = None,
         max_pages: int = 20,
+        max_items: int | None = None,
     ) -> list[dict[str, Any]]:
         """Run ``query`` against an account (the default) or one object.
+
+        ``max_items`` is a real row cap; ``query.limit`` is only Meta's page
+        size, and without a cap a daily ad-level report walks every page.
 
         Returns raw rows: money stays as Meta sent it. Use :meth:`insight_rows`
         for rows with the units already resolved.
@@ -298,7 +355,10 @@ class ReadOnlyMetaAdsClient:
         ) as slot:
             rows = list(
                 self._paged(
-                    f"{target}/insights", max_pages=max_pages, **query.to_params()
+                    f"{target}/insights",
+                    max_pages=max_pages,
+                    max_items=max_items,
+                    **query.to_params(),
                 )
             )
             slot["row_count"] = len(rows)
@@ -311,6 +371,7 @@ class ReadOnlyMetaAdsClient:
         node_id: str | None = None,
         account_id: str | None = None,
         max_pages: int = 20,
+        max_items: int | None = None,
     ) -> list[dict[str, Any]]:
         """Insights rows flattened to ``{field: value}``, units resolved.
 
@@ -320,9 +381,13 @@ class ReadOnlyMetaAdsClient:
         """
         code = self.currency(account_id)
         rows = self.insights(
-            query, node_id=node_id, account_id=account_id, max_pages=max_pages
+            query, node_id=node_id, account_id=account_id, max_pages=max_pages,
+            max_items=max_items,
         )
-        columns = tuple(query.fields) + ("date_start", "date_stop")
+        # Breakdown dimensions come back as keys of their own (age, gender,
+        # publisher_platform ...); without them in the columns a broken-down
+        # report would be a list of unlabelled rows.
+        columns = tuple(query.fields) + tuple(query.breakdowns) + ("date_start", "date_stop")
         return [object_to_row(row, columns, code) for row in rows]
 
     # -- rate limit -------------------------------------------------------

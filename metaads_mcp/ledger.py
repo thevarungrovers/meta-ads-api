@@ -31,6 +31,10 @@ new_entry_id = logdb.new_entry_id
 entries = logdb.change_entries
 find_entry = logdb.find_change
 reverted_entry_ids = logdb.reverted_entry_ids
+changes_since = logdb.changes_since
+batch_entries = logdb.batch_changes
+set_verification = logdb.set_verification
+amend = logdb.amend_change
 
 
 def write_intent(
@@ -45,6 +49,8 @@ def write_intent(
     before: str,
     after: str,
     projected_delta: str,
+    inverse: dict | None = None,
+    reverts: str | None = None,
 ) -> None:
     """Record what we are ABOUT to do. Must be called before the mutation."""
     logdb.insert_change(
@@ -58,6 +64,8 @@ def write_intent(
         before=before,
         after=after,
         projected_delta=projected_delta,
+        inverse=inverse,
+        reverts=reverts,
     )
 
 
@@ -68,6 +76,7 @@ def write_outcome(
     resource_name: str | None = None,
     error: str | None = None,
     reverts: str | None = None,
+    verification: dict | None = None,
 ) -> None:
     """Record how it went, and which earlier entry this one reverses."""
     logdb.complete_change(
@@ -76,4 +85,37 @@ def write_outcome(
         resource_name=resource_name,
         error=error,
         reverts=reverts,
+        verification=verification,
     )
+
+
+#: Kinds whose applied rows mean "this server made that object".
+CREATING_KINDS = frozenset({
+    "create_campaign", "create_ad_set", "create_ad", "duplicate_ad",
+    "duplicate_ad_set", "duplicate_campaign",
+})
+
+
+def created_ids(entries_list: list[dict] | None = None) -> set[str]:
+    """Every object id the ledger says this server created: a create's id,
+    a copy's id and its children, and anything a copy's follow-up renamed."""
+    out: set[str] = set()
+    for entry in entries_list if entries_list is not None else entries():
+        if not entry.get("applied"):
+            continue
+        inverse = entry.get("inverse") if isinstance(entry.get("inverse"), dict) else {}
+        if inverse.get("kind") in CREATING_KINDS and entry.get("tool", "").startswith("apply_"):
+            for key in ("created_id", "created_ad_id"):
+                if inverse.get(key):
+                    out.add(str(inverse[key]))
+            out.update(str(c) for c in inverse.get("children") or [] if c)
+            if entry.get("entity_id") not in (None, "", "(new)"):
+                out.add(str(entry["entity_id"]))
+        elif inverse.get("follows"):
+            out.add(str(entry.get("entity_id")))
+    return out
+
+
+def created_by_us(entity_id: str) -> bool:
+    """Whether the ledger shows this server created ``entity_id``."""
+    return str(entity_id) in created_ids()

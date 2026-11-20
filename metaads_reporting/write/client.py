@@ -45,15 +45,38 @@ from ..graph import GraphAPIError, GraphTransport, WRITE_METHODS
 #: API accepts": each entry is one someone decided to support. Adding to this
 #: mapping is the deliberate act that widens the blast radius.
 WRITABLE_FIELDS: dict[str, frozenset[str]] = {
-    "campaign": frozenset({"status", "name", "daily_budget", "lifetime_budget"}),
-    "adset": frozenset(
-        {"status", "name", "daily_budget", "lifetime_budget", "bid_amount"}
-    ),
+    "campaign": frozenset({
+        "status", "name", "daily_budget", "lifetime_budget",
+        # Under campaign budget optimization the bid strategy lives here.
+        "bid_strategy",
+        # The schedule. start_time only before the campaign has delivered.
+        "start_time", "stop_time",
+        # Labels, through the low-risk tool's closed allowlist.
+        "adlabels",
+    }),
+    "adset": frozenset({
+        "status", "name", "daily_budget", "lifetime_budget", "bid_amount",
+        # Bidding: the strategy, and its ROAS floor (bid_constraints).
+        "bid_strategy", "bid_constraints",
+        # Schedule and dayparting (dayparting needs pacing_type day_parting).
+        "start_time", "end_time", "adset_schedule", "pacing_type",
+        # Frequency cap, honoured only under reach-type optimization goals.
+        "frequency_control_specs",
+        # The WHOLE targeting spec: Meta replaces it wholesale, so the
+        # targeting kind always sends the full merged spec, never a fragment.
+        "targeting",
+        # What the ad set optimizes for, how it is billed, and the window it
+        # attributes conversions over.
+        "optimization_goal", "billing_event", "attribution_spec",
+        "adlabels",
+    }),
     # `creative` points an EXISTING ad at a different creative. It is the only
     # way to change what a live ad says, because a creative is immutable once
     # attached. The value is {"creative_id": "..."} -- a dict, which `update`
     # JSON-encodes on the way out.
-    "ad": frozenset({"status", "name", "creative"}),
+    "ad": frozenset({"status", "name", "creative", "adlabels"}),
+    # An A/B test is never deleted; undoing one ends it early.
+    "adstudy": frozenset({"end_time"}),
 }
 
 #: Statuses this package will set. DELETED and ARCHIVED are absent on purpose:
@@ -73,6 +96,75 @@ REFUSED_STATUSES = {
         "and not always there."
     ),
 }
+
+#: Account edges whose objects deliver -- and spend -- once ACTIVE. A create on
+#: one of these is refused unless it is created PAUSED: activating is always a
+#: separate, previewed, approved step. Enforced HERE, below every tool, so no
+#: caller can create something live by forgetting a field.
+DELIVERY_EDGES = frozenset({"campaigns", "adsets", "ads"})
+
+
+def check_create_paused(edge: str, payload: dict[str, Any]) -> None:
+    """Refuse a create that would start delivering on its own."""
+    status = str(payload.get("status") or "").upper()
+    if status in REFUSED_STATUSES:
+        raise MutationError(f"Refusing to create anything with status {status}.")
+    if edge in DELIVERY_EDGES and status != "PAUSED":
+        raise MutationError(
+            f"Refusing to create on {edge} with status {status or '(none)'}: "
+            "everything this package creates is created PAUSED, and activating "
+            "it is a separate step a human approves."
+        )
+    option = str(payload.get("status_option") or "").upper()
+    if edge == "copies" and option != "PAUSED":
+        raise MutationError(
+            "Refusing a copy without status_option=PAUSED: copies are created paused."
+        )
+
+
+#: Edges whose objects carry a NAME this package stamps with the owner/agent
+#: prefix (metaads_reporting.naming). ``copies`` is not here: a copy's names
+#: arrive in the renames that follow it.
+NAMED_EDGES = frozenset({"campaigns", "adsets", "ads", "adcreatives", "customaudiences",
+                         "saved_audiences", "ad_studies", "adlabels"})
+#: Entity types whose ``name`` an update may set (a rename).
+NAMED_TYPES = frozenset({"campaign", "adset", "ad"})
+
+
+def bare_segment(value: str, what: str) -> str:
+    """``value`` as ONE path segment: classified on its urlsplit path, and
+    refused if it carries anything else (a query, a fragment, a slash), so a
+    ``campaigns?x`` edge or a ``123/campaigns`` node cannot route around the
+    name and status checks that key on it."""
+    from urllib.parse import urlsplit
+
+    text = str(value or "")
+    path = urlsplit(text).path
+    if not path or path != text or "/" in path:
+        raise MutationError(f"Refusing {what} {text!r}: it must be one bare path segment.")
+    return path
+
+
+def check_name_prefix(prefix: str, name: Any, what: str) -> None:
+    """Refuse a name without the configured prefix, below every tool.
+
+    The second guard, after the engine's ``name_prefix`` check: a create path
+    that forgot to stamp cannot send an unprefixed name. No prefix
+    configured: nothing to require.
+    """
+    if prefix and not str(name or "").startswith(prefix):
+        raise MutationError(
+            f"Refusing {what} named {str(name or '')!r}: everything this server names "
+            f"starts with {prefix!r} (the owner/agent prefix from .env). Nothing was sent."
+        )
+    # Whether or not a prefix is configured: a name that only LOOKS like one
+    # ("\u0421D-bot-x", "AB-max-CD\u2011bot-x") would misattribute the entity.
+    from metaads_reporting.naming import sent_name_problem
+
+    problem = sent_name_problem(name, prefix)
+    if problem:
+        raise MutationError(f"Refusing {what}: {problem}. Nothing was sent.")
+
 
 #: Budget above which a write is refused unless explicitly overridden. Not a
 #: security control -- it is a typo catch, in the account's MAJOR units. The
@@ -103,14 +195,22 @@ class MutationResult:
 
     @property
     def success(self) -> bool:
-        """Meta answers an update with ``{"success": true}``, a create with an id."""
+        """Meta answers an update with ``{"success": true}``, a create with an
+        id, and a copy with ``copied_<type>_id``."""
         if self.response.get("success") is True:
             return True
-        return bool(self.response.get("id"))
+        return bool(self.response.get("id") or _copied_id(self.response))
 
     def __str__(self) -> str:
         verb = "validated" if self.validated_only else "APPLIED"
         return f"{verb}: {self.node_id or '(new)'}"
+
+
+def _copied_id(response: dict[str, Any]) -> str:
+    for key in ("copied_campaign_id", "copied_adset_id", "copied_ad_id"):
+        if response.get(key):
+            return str(response[key])
+    return ""
 
 
 def check_writable(entity_type: str, payload: dict[str, Any]) -> None:
@@ -181,6 +281,10 @@ class MutatingMetaAdsClient:
         from ..client import ReadOnlyMetaAdsClient
 
         self._read = ReadOnlyMetaAdsClient(transport, settings)
+        #: The owner/agent prefix every name this client creates must start
+        #: with. Set by the MCP server (the agent's) and scripts/manage.py
+        #: (the CLI's); empty when no identity is configured.
+        self.required_name_prefix = ""
 
     @classmethod
     def from_env(
@@ -224,6 +328,7 @@ class MutatingMetaAdsClient:
         payload: dict[str, Any],
         apply: bool = False,
         account_id: str | None = None,
+        allow_unprefixed_name: bool = False,
     ) -> MutationResult:
         """Write ``payload`` to one object, validating unless ``apply`` is True.
 
@@ -237,7 +342,12 @@ class MutatingMetaAdsClient:
         """
         if not payload:
             raise MutationError("Nothing to write: the payload is empty.")
+        node_id = bare_segment(node_id, "node id")
         check_writable(entity_type, payload)
+        if "name" in payload and entity_type in NAMED_TYPES and not allow_unprefixed_name:
+            # A rename keeps the prefix. Only a revert, putting back a name
+            # exactly as it was, passes allow_unprefixed_name.
+            check_name_prefix(self.required_name_prefix, payload["name"], f"renaming {entity_type} {node_id}")
         if "status" in payload:
             payload = dict(payload, status=check_status(payload["status"]))
 
@@ -260,7 +370,10 @@ class MutatingMetaAdsClient:
             node_id=str(node_id),
             method="POST",
             edge=None,
-            payload=payload,
+            # validate_only is recorded WITH the payload: before this, a
+            # validation and an apply wrote identical rows, and the log could
+            # not say whether an object was ever really created.
+            payload={**payload, "validate_only": not apply},
         )
 
         try:
@@ -287,28 +400,29 @@ class MutatingMetaAdsClient:
         payload: dict[str, Any],
         apply: bool = False,
         account_id: str | None = None,
+        parent: str | None = None,
     ) -> MutationResult:
-        """Create one object under the ad account.
+        """Create one object under the ad account -- or, for ``copies``, under
+        the object being copied (``<parent>/copies``).
 
-        *** NOTHING CALLS THIS YET. *** It is the foundation for a create path,
-        not a create path. ``scripts/manage.py`` has no create command, and the
-        MCP server cannot reach this by construction. Earlier versions of the
-        README and the server instructions claimed a
-        ``manage.py campaign new`` existed; it never did, and that claim is
-        gone.
-
-        Deliberately NOT exposed over MCP: creating a campaign carries an
-        objective, a budget and a ``special_ad_categories`` declaration that is
-        a legal statement about housing, employment, credit and social-issue
-        advertising. That belongs to a human who can answer for it.
+        Called through :func:`~metaads_reporting.write.plan.execute` by the
+        creative and audience plans: a new creative, a new PAUSED ad, a saved
+        audience or a lookalike, plus the image upload in ``media``. Every
+        caller in the MCP server reaches it through a preview/apply pair.
 
         ``payload`` is not field-allowlisted the way :meth:`update` is -- a
-        create needs fields no update ever sets -- so the only guard is that
-        nothing in the MCP server can call it. Anyone wiring this up owes it a
-        guard of its own.
+        create needs fields no update ever sets -- so each plan that creates
+        carries its own guard: ads are created PAUSED, and audiences go
+        through ``audiences.check_no_customer_data``.
         """
         if not payload:
             raise MutationError("Nothing to create: the payload is empty.")
+        edge = bare_segment(edge, "edge")
+        if parent is not None:
+            parent = bare_segment(parent, "parent id")
+        check_create_paused(edge, payload)
+        if edge in NAMED_EDGES:
+            check_name_prefix(self.required_name_prefix, payload.get("name"), f"creating on {edge}")
         target = self.resolve_account_id(account_id)
         # Same JSON encoding as `update`. A creative's object_story_spec and an
         # audience's lookalike_spec are both dicts, and handing one to requests
@@ -321,13 +435,18 @@ class MutatingMetaAdsClient:
         if not apply:
             body["execution_options"] = json.dumps(["validate_only"])
 
-        path = f"{account_path(target)}/{edge}"
+        if edge == "copies":
+            if not parent:
+                raise MutationError("A copy needs the id of the object being copied.")
+            path = f"{parent}/copies"
+        else:
+            path = f"{account_path(target)}/{edge}"
         correlation_id = self._audit.attempt(
             account_id=target,
-            node_id="(new)",
+            node_id=f"(copy of {parent})" if edge == "copies" else "(new)",
             method="POST",
             edge=edge,
-            payload=payload,
+            payload={**payload, "validate_only": not apply},
         )
         try:
             response = self._transport.request("POST", path, data=body)
@@ -339,7 +458,7 @@ class MutatingMetaAdsClient:
         self._audit.outcome(correlation_id, ok=True, response=response)
         return MutationResult(
             validated_only=not apply,
-            node_id=str(response.get("id") or ""),
+            node_id=str(response.get("id") or _copied_id(response) or ""),
             response=response,
         )
 

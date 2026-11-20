@@ -29,7 +29,8 @@ from typing import Any
 
 from ..currency import format_money, from_minor_units, to_minor_units
 from .client import MutatingMetaAdsClient, MutationError, check_status
-from .lookup import Candidate, NotFound, match_by_name
+from ..graph import GraphAPIError
+from .lookup import Candidate, NotFound, edge_search, is_not_found, match_by_name
 from .plan import FieldChange, PlannedChange
 
 ENTITY = "campaign"
@@ -38,6 +39,11 @@ EDGE = "campaigns"
 #: Everything a preview or a plan needs off a campaign. The Graph API returns
 #: ONLY what is named here -- there is no default field set -- so a field left
 #: off reads as absent rather than erroring.
+#: What a search lists by default: everything that can still be changed.
+#: ARCHIVED and DELETED are left out -- they cannot be changed, and including
+#: them makes every name lookup ambiguous against things that no longer exist.
+DEFAULT_STATUSES = ["ACTIVE", "PAUSED", "IN_PROCESS", "WITH_ISSUES"]
+
 FIELDS = (
     "id",
     "name",
@@ -99,7 +105,11 @@ def find(
     if campaign_id is not None:
         try:
             return client.node(str(campaign_id), FIELDS)
-        except Exception as exc:
+        except GraphAPIError as exc:
+            if not is_not_found(exc):
+                # A rate limit or an expired token is NOT "no such object":
+                # reporting it as one sends the agent hunting for a typo.
+                raise
             raise NotFound(
                 f"No campaign {campaign_id} this token can see. On Meta a "
                 f"missing object and a missing permission are the same error, "
@@ -127,6 +137,7 @@ def search(
     account_id: str | None = None,
     limit: int = 200,
     max_pages: int = 10,
+    status_filter: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Campaigns in the account, optionally narrowed by name. Read-only.
 
@@ -136,22 +147,12 @@ def search(
     """
     from ..account_id import account_path
 
-    target = account_path(client.resolve_account_id(account_id))
-    rows = client.read.edge(
-        target,
-        EDGE,
-        FIELDS,
-        limit=limit,
-        # `limit` here is what the CALLER wants back, so it is the
-        # intentional cap too. Passing it only as the page size walks the
-        # whole account and trips the runaway guard on a large one.
-        max_items=limit,
-        max_pages=max_pages,
-        effective_status='["ACTIVE","PAUSED","IN_PROCESS","WITH_ISSUES"]',
+    parent = account_path(client.resolve_account_id(account_id))
+    rows, _ = edge_search(
+        client, parent, EDGE, FIELDS,
+        needle=needle, limit=limit, max_pages=max_pages,
+        statuses=list(status_filter or DEFAULT_STATUSES),
     )
-    if needle:
-        target_text = needle.casefold()
-        rows = [r for r in rows if target_text in (r.get("name") or "").casefold()]
     return rows
 
 
@@ -237,7 +238,8 @@ def plan_set_daily_budget(
     convert the campaign to CBO, redistributing spend across every ad set.
     """
     row = find(client, campaign_id=campaign_id, name=name, account_id=account_id)
-    currency = client.currency(account_id)
+    # The CAMPAIGN's account, not the default one: a token reaches several.
+    currency = client.currency(row.get("account_id") or account_id)
     client.check_daily_budget(float(amount), override=override_guardrail)
 
     level = budget_level(row)

@@ -37,6 +37,9 @@ class GraphSim:
         insights: list[dict[str, Any]] | None = None,
     ) -> None:
         self.account = dict(account)
+        #: Other ad accounts the token reaches, keyed "act_<id>". Anything not
+        #: here answers as ``account``, which is what every one-account test wants.
+        self.accounts: dict[str, dict[str, Any]] = {}
         self.objects = {k: dict(v) for k, v in (objects or {}).items()}
         #: parent id -> edge name -> child ids
         self.edges = edges or {}
@@ -49,6 +52,17 @@ class GraphSim:
         #: Creates that really happened, and the multipart fields of the last call.
         self.created: list[dict[str, Any]] = []
         self.last_files: dict[str, Any] = {}
+        #: Canned answers for the edges that are not lists of stored objects
+        #: (/search, delivery_estimate, ads_archive ...), keyed by "node/edge"
+        #: or "edge" alone. A callable gets the GET params.
+        self.canned: dict[str, Any] = {}
+        #: What /debug_token answers: a never-expiring System User token.
+        self.token_debug: dict[str, Any] = {
+            "type": "SYSTEM_USER", "is_valid": True, "expires_at": 0,
+            "data_access_expires_at": 0, "scopes": ["ads_management", "ads_read"],
+        }
+        #: ad_formats the previews edges refuse.
+        self.refuse_formats: set[str] = set()
         #: Set to a FakeResponse to make the NEXT request fail.
         self.next_failure: FakeResponse | None = None
 
@@ -82,10 +96,34 @@ class GraphSim:
             return FakeResponse({"error": {"message": "no path", "code": 100}}, status=400)
 
         node, edge = segments[0], (segments[1] if len(segments) > 1 else None)
-        fields = [f for f in (params.get("fields") or "").split(",") if f]
+        fields = _split_fields(params.get("fields") or "")
+
+        for key in (f"{node}/{edge}" if edge else node, edge or "", node):
+            if key and key in self.canned:
+                answer = self.canned[key]
+                answer = answer(params) if callable(answer) else answer
+                if isinstance(answer, FakeResponse):
+                    return answer
+                return FakeResponse(answer)
 
         if edge == "insights":
             return FakeResponse({"data": list(self.insights)})
+
+        # Ad previews: an iframe whose src is a signed link, as Meta sends it.
+        # `refuse_formats` makes a format fail the way Meta refuses one.
+        if edge in ("previews", "generatepreviews"):
+            ad_format = params.get("ad_format", "")
+            if ad_format in self.refuse_formats:
+                return FakeResponse(
+                    {"error": {"message": f"format {ad_format} not supported", "code": 100}},
+                    status=400,
+                )
+            body = (
+                f'<iframe src="https://business.facebook.com/ads/api/preview_iframe.php'
+                f'?d={node}&amp;f={ad_format}&amp;t=SIGNED" width="540" height="690">'
+                f"</iframe>"
+            )
+            return FakeResponse({"data": [{"body": body}]})
 
         # The accounts a System User token has been ASSIGNED, which is what
         # /me/adaccounts actually answers -- usually far fewer than the business
@@ -100,8 +138,10 @@ class GraphSim:
                 {"data": [self._project(self.objects[c], fields) for c in children]}
             )
 
+        if node == "debug_token":
+            return FakeResponse({"data": dict(self.token_debug)})
         if node.startswith("act_"):
-            return FakeResponse(self._project(self.account, fields))
+            return FakeResponse(self._project(self.accounts.get(node, self.account), fields))
         if node == "me":
             return FakeResponse({"id": "SYSTEM_USER_1", "name": "Test System User"})
         if node in self.objects:
@@ -134,7 +174,7 @@ class GraphSim:
         """
         if not fields:
             return {"id": obj.get("id")}
-        wanted = {f.split(".", 1)[0].split("(", 1)[0] for f in fields}
+        wanted = {f.split(".", 1)[0].split("(", 1)[0].split("{", 1)[0] for f in fields}
         out = {k: v for k, v in obj.items() if k in wanted}
         out.setdefault("id", obj.get("id"))
         return out
@@ -148,6 +188,10 @@ class GraphSim:
         "adimages": "IMAGE",
         "customaudiences": "AUD",
         "saved_audiences": "SAVED",
+        "campaigns": "CAMP",
+        "adsets": "ADSET",
+        "ad_studies": "STUDY",
+        "adlabels": "LABEL",
     }
 
     def _post(self, segments: list[str], body: dict[str, Any]) -> FakeResponse:
@@ -156,6 +200,21 @@ class GraphSim:
 
         if edge in self.CREATE_EDGES:
             return self._create(edge, body)
+
+        if edge == "advideos":
+            return self._video_upload(body)
+
+        if edge == "copies":
+            return self._copy(node, dict(body))
+
+        if edge == "insights":
+            # An async report run: an object with a status, rows on its edge.
+            run_id = f"RUN{len(self.created) + 1}"
+            self.created.append({"edge": "insights", "payload": dict(body)})
+            self.objects[run_id] = {
+                "id": run_id, "async_status": "Job Completed", "async_percent_completion": 100,
+            }
+            return FakeResponse({"report_run_id": run_id})
 
         payload = {
             k: v
@@ -184,6 +243,45 @@ class GraphSim:
         if "status" in payload:
             self.objects[node]["effective_status"] = payload["status"]
         return FakeResponse({"success": True})
+
+    #: Bytes Meta asks for per transfer in the sim, so a test file spans chunks.
+    VIDEO_CHUNK = 4
+
+    def _video_upload(self, body: dict[str, Any]) -> FakeResponse:
+        """Meta's resumable upload: start, transfer the ranges it asks for, finish.
+
+        A new video starts in ``video_status_after_upload`` (default ready),
+        as Meta's encoder would leave it. ``video_chunks`` records each range.
+        """
+        phase = body.get("upload_phase")
+        if phase == "start":
+            size = int(body["file_size"])
+            video_id = f"VIDEO{len(self.created) + 1}"
+            self.created.append({"edge": "advideos", "payload": {"file_size": size}})
+            self._upload = {"session": f"S{video_id}", "id": video_id, "size": size, "got": 0}
+            self.video_chunks: list[tuple[int, int]] = []
+            return FakeResponse({"upload_session_id": self._upload["session"], "video_id": video_id,
+                                 "start_offset": "0", "end_offset": str(min(self.VIDEO_CHUNK, size))})
+        upload = self._upload
+        if body.get("upload_session_id") != upload["session"]:
+            return FakeResponse({"error": {"message": "bad session", "code": 100}}, status=400)
+        if phase == "transfer":
+            start = int(body["start_offset"])
+            _, chunk = next(iter(self.last_files.values()))
+            if start != upload["got"]:
+                return FakeResponse({"error": {"message": "bad offset", "code": 100}}, status=400)
+            upload["got"] = start + len(chunk)
+            self.video_chunks.append((start, upload["got"]))
+            nxt = min(upload["got"] + self.VIDEO_CHUNK, upload["size"])
+            return FakeResponse({"start_offset": str(upload["got"]), "end_offset": str(nxt)})
+        if phase == "finish":
+            if upload["got"] != upload["size"]:
+                return FakeResponse({"error": {"message": "incomplete", "code": 100}}, status=400)
+            state = getattr(self, "video_status_after_upload", "ready")
+            self.objects[upload["id"]] = {"id": upload["id"], "title": body.get("title"),
+                                          "status": {"video_status": state}}
+            return FakeResponse({"success": True})
+        return FakeResponse({"error": {"message": f"phase {phase}?", "code": 100}}, status=400)
 
     def _create(self, edge: str, body: dict[str, Any]) -> FakeResponse:
         """A create on an account edge. Mirrors the real responses."""
@@ -215,6 +313,34 @@ class GraphSim:
         self.objects[new_id] = {"id": new_id, **payload}
         return FakeResponse({"id": new_id})
 
+    def _copy(self, node: str, body: dict[str, Any]) -> FakeResponse:
+        """POST <node>/copies: a PAUSED copy, children too when deep_copy."""
+        validate_only = "validate_only" in json.loads(body.get("execution_options") or "[]")
+        if node not in self.objects:
+            return FakeResponse({"error": {"message": f"no object {node}", "code": 100}}, status=400)
+        if validate_only:
+            self.validated.append({"edge": "copies", "node": node, "payload": body})
+            return FakeResponse({"success": True})
+        source = self.objects[node]
+        is_campaign = "objective" in source
+        new_id = f"COPY{len(self.created) + 1}"
+        self.created.append({"edge": "copies", "node": node, "payload": body})
+        decorate = getattr(self, "copy_suffix", "")
+        self.objects[new_id] = {**source, "id": new_id, "status": body.get("status_option", "PAUSED"),
+                                "effective_status": body.get("status_option", "PAUSED"),
+                                "name": f"{source.get('name', '')}{decorate}"}
+        children = []
+        if body.get("deep_copy") in (True, "true", "True"):
+            child_edge = "adsets" if is_campaign else "ads"
+            for child in (self.edges.get(node) or {}).get(child_edge, []):
+                child_id = f"{new_id}_{child}"
+                self.objects[child_id] = {**self.objects[child], "id": child_id, "status": "PAUSED",
+                                          "name": f"{self.objects[child].get('name', '')}{decorate}"}
+                children.append({"ad_object_type": child_edge[:-1], "source_id": child,
+                                 "copied_id": child_id})
+        key = "copied_campaign_id" if is_campaign else "copied_adset_id"
+        return FakeResponse({key: new_id, "ad_object_ids": children})
+
     # -- assertions helpers -------------------------------------------------
 
     @property
@@ -224,3 +350,19 @@ class GraphSim:
     @property
     def writes(self) -> list[dict[str, Any]]:
         return [c for c in self.calls if c["method"] == "POST"]
+
+
+def _split_fields(spec: str) -> list[str]:
+    """Split a fields list on top-level commas only, as Meta does:
+    ``a,b{c,d}`` is two fields, not three."""
+    out, depth, cur = [], 0, ""
+    for ch in spec:
+        depth += ch in "{("
+        depth -= ch in "})"
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur)
+    return [f for f in out if f]

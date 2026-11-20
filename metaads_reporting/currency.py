@@ -27,23 +27,28 @@ So the exponent is looked up, never assumed, and an unknown currency is
 exponent is silent: no exception, no warning, just a number off by 100 in an
 approval prompt.
 
-The table is ISO 4217's own exponent for each currency Meta supports as an ad
-account currency. It is a published standard, which is the only kind of source
-worth hard-coding; Meta follows it.
+The table is META'S OFFSET for each currency it supports as an ad account
+currency (developers.facebook.com/docs/marketing-api/currencies), which is NOT
+always ISO 4217's exponent. Meta uses an offset of 1 -- the API integer is
+already whole units -- for several currencies ISO lists with two decimals:
+COP, CRC, HUF, IDR and TWD, alongside ISO's own zero-decimal ones. Dividing
+those by 100 renders a 50,000 COP budget as 500.00.
 """
 
 from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
 
-#: ISO 4217 currencies with NO minor unit. One "cent" is one whole unit, so the
-#: API integer is already the amount and the divisor is 1.
+#: Currencies Meta stores with an OFFSET OF 1: the API integer is already the
+#: amount and the divisor is 1. ISO 4217's zero-decimal currencies, plus the
+#: ones Meta treats as zero-decimal although ISO gives them two.
+META_OFFSET_ONE_NOT_ISO = frozenset({"COP", "CRC", "HUF", "IDR", "TWD"})
 ZERO_DECIMAL = frozenset(
     {
         "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG",
         "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
     }
-)
+) | META_OFFSET_ONE_NOT_ISO
 
 #: ISO 4217 currencies with THREE decimal places. The API integer is thousandths.
 #: None of these is common as a Meta ad account currency, which is exactly why
@@ -55,11 +60,11 @@ THREE_DECIMAL = frozenset({"BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"})
 #: than defaulted: an unknown code must raise, not quietly divide by 100.
 TWO_DECIMAL = frozenset(
     {
-        "AED", "ARS", "AUD", "BDT", "BOB", "BRL", "CAD", "CHF", "CNY", "COP",
-        "CRC", "CZK", "DKK", "EGP", "EUR", "GBP", "GTQ", "HKD", "HNL", "HUF",
-        "IDR", "ILS", "INR", "KES", "LKR", "MOP", "MXN", "MYR", "NGN", "NIO",
+        "AED", "ARS", "AUD", "BDT", "BOB", "BRL", "CAD", "CHF", "CNY",
+        "CZK", "DKK", "EGP", "EUR", "GBP", "GTQ", "HKD", "HNL",
+        "ILS", "INR", "KES", "LKR", "MOP", "MXN", "MYR", "NGN", "NIO",
         "NOK", "NZD", "PEN", "PHP", "PKR", "PLN", "QAR", "RON", "RUB", "SAR",
-        "SEK", "SGD", "THB", "TRY", "TWD", "TZS", "UAH", "USD", "UYU", "VEF",
+        "SEK", "SGD", "THB", "TRY", "TZS", "UAH", "USD", "UYU", "VEF",
         "ZAR",
     }
 )

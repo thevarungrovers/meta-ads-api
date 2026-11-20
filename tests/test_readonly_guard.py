@@ -48,6 +48,9 @@ ALLOWED = {
     # Uploads a file to the adimages edge, so it names POST like the rest of
     # the write package.
     "metaads_reporting/write/media.py",
+    # Creates an async insights REPORT RUN: a POST to <node>/insights and no
+    # other path (pinned below). It changes nothing in the account.
+    "metaads_reporting/write/async_insights.py",
     # The human-driven CLI.
     "scripts/manage.py",
 }
@@ -196,3 +199,20 @@ def test_the_mutating_client_has_no_delete_at_all():
 
     for name in ("delete", "remove", "destroy", "archive"):
         assert not hasattr(MutatingMetaAdsClient, name), f"it has .{name}()"
+
+
+def test_async_insights_posts_only_to_an_insights_edge():
+    import ast as _ast
+    import inspect
+
+    from metaads_reporting.write import async_insights
+
+    source = inspect.getsource(async_insights)
+    posts = [
+        node for node in _ast.walk(_ast.parse(source))
+        if isinstance(node, _ast.Constant) and node.value == "POST"
+    ]
+    assert len(posts) == 1, "one POST, in start()"
+    for bad in ("123/adsets", "act_1/campaigns", "123?x=1", "../123"):
+        with pytest.raises(ValueError):
+            async_insights.insights_path(bad)

@@ -36,27 +36,36 @@ from .plan import FieldChange, PlannedChange
 SAVED_EDGE = "saved_audiences"
 CUSTOM_EDGE = "customaudiences"
 
-#: The only subtype this package will create on the customaudiences edge.
+#: Payload keys each subtype may carry -- a PER-SUBTYPE allowlist. The old flat
+#: deny-list also listed pixel_id and app_ids, which blocked website and app
+#: audiences outright; those are not personal data, they are where Meta's own
+#: event data lives. What IS refused, for every subtype, is the shape of a
+#: customer-list upload: ALWAYS_REFUSED, and subtype CUSTOM itself.
+ALLOWED_KEYS: dict[str, frozenset[str]] = {
+    "WEBSITE": frozenset({"name", "description", "subtype", "rule", "retention_days", "prefill"}),
+    "ENGAGEMENT": frozenset({"name", "description", "subtype", "rule", "prefill"}),
+    "APP": frozenset({"name", "description", "subtype", "rule", "retention_days"}),
+    "LOOKALIKE": frozenset({"name", "description", "subtype", "origin_audience_id", "lookalike_spec"}),
+}
+ALLOWED_SUBTYPES = frozenset(ALLOWED_KEYS)
+
+#: Kept for callers of the old name: the lookalike subtype.
 ALLOWED_CUSTOM_SUBTYPE = "LOOKALIKE"
 
-#: Fields that carry, or point at, personal data. Any one of them present means
-#: the call is building a customer-list audience, whatever its subtype says.
-CUSTOMER_DATA_FIELDS = frozenset(
-    {
-        "data",
-        "schema",
-        "payload",
-        "users",
-        "customer_file_source",
-        "data_source",
-        "is_raw",
-        "app_ids",
-        "pixel_id",
-    }
+#: Fields that carry, or point at, an uploaded customer list. Refused for
+#: every subtype, whatever else the payload says.
+ALWAYS_REFUSED = frozenset(
+    {"data", "schema", "payload", "users", "customer_file_source", "is_raw"}
 )
+#: The old name, for anything still importing it.
+CUSTOMER_DATA_FIELDS = ALWAYS_REFUSED
 
-#: Lookalike ratios Meta accepts: 1% to 20% of a country's population.
-MIN_RATIO, MAX_RATIO = 0.01, 0.20
+#: Lookalike ratios this server creates: 1% to 10% of a country. Meta accepts
+#: up to 20%, but above 10% a lookalike is barely a lookalike.
+MIN_RATIO, MAX_RATIO = 0.01, 0.10
+
+#: Retention bounds, in days, per source.
+RETENTION_DAYS = {"WEBSITE": (1, 180), "ENGAGEMENT": (1, 365), "APP": (1, 180), "LEAD": (1, 90)}
 
 
 class CustomerDataRefused(MutationError):
@@ -76,29 +85,44 @@ def check_no_customer_data(payload: dict[str, Any]) -> None:
     ...
     metaads_reporting.write.audiences.CustomerDataRefused: ...
     """
-    found = sorted(set(payload) & CUSTOMER_DATA_FIELDS)
+    found = sorted(set(payload) & ALWAYS_REFUSED)
     if found:
         raise CustomerDataRefused(
             f"Refusing to send {', '.join(found)}: those fields build a custom "
             f"audience from a customer list, which uploads personal data to "
-            f"Meta. This package creates saved audiences and lookalikes only. "
-            f"If you genuinely need a customer-list audience, do it in Ads "
-            f"Manager, where the data terms are presented and accepted by a "
-            f"person."
+            f"Meta. Customer-list audiences stay in Ads Manager, where the data "
+            f"terms are presented and accepted by a person."
+        )
+    subtype = str(payload.get("subtype") or "").upper()
+    if subtype == "CUSTOM":
+        raise CustomerDataRefused(
+            "subtype CUSTOM is a customer-list audience, which uploads personal "
+            "data. It is not available here."
         )
 
 
 def check_subtype(subtype: str) -> str:
-    """Only LOOKALIKE may be created on the customaudiences edge."""
+    """Only the subtypes in ALLOWED_KEYS may be created."""
     wanted = (subtype or "").strip().upper()
-    if wanted != ALLOWED_CUSTOM_SUBTYPE:
+    if wanted not in ALLOWED_SUBTYPES:
         raise CustomerDataRefused(
-            f"subtype {wanted or '(none)'} is not available here. The "
-            f"customaudiences edge creates both lookalikes and customer-list "
-            f"audiences, and only {ALLOWED_CUSTOM_SUBTYPE} is permitted -- the "
-            f"other kind uploads personal data."
+            f"subtype {wanted or '(none)'} is not available here. Creatable: "
+            f"{', '.join(sorted(ALLOWED_SUBTYPES))}. A customer-list audience "
+            f"uploads personal data and stays in Ads Manager."
         )
     return wanted
+
+
+def check_payload(subtype: str, payload: dict[str, Any]) -> None:
+    """The per-subtype allowlist, on top of the unconditional refusals."""
+    check_no_customer_data(payload)
+    allowed = ALLOWED_KEYS[check_subtype(subtype)]
+    extra = sorted(set(payload) - allowed)
+    if extra:
+        raise CustomerDataRefused(
+            f"Refusing {', '.join(extra)} on a {subtype} audience: not on its "
+            f"allowlist ({', '.join(sorted(allowed))})."
+        )
 
 
 FIELDS = (
@@ -109,8 +133,13 @@ FIELDS = (
     "approximate_count_lower_bound",
     "approximate_count_upper_bound",
     "operation_status",
-    "time_created",
     "delivery_status",
+    "time_created",
+    "time_updated",
+    "retention_days",
+    "rule",
+    "lookalike_spec",
+    "data_source",
 )
 
 #: Probed against the live API, not taken from the docs: `approximate_count`
@@ -141,19 +170,45 @@ def list_custom(
     the same as creating one, and you need to see them to pick a lookalike
     source.
     """
+    from ..audience_status import usability
+
     target = account_path(client.resolve_account_id(account_id))
     rows = client.read.edge(target, CUSTOM_EDGE, FIELDS, limit=limit, max_items=limit)
-    return [
-        {
+    out = []
+    for r in rows:
+        lookalike = r.get("lookalike_spec") or {}
+        out.append({
             "audience_id": str(r.get("id")),
             "name": r.get("name"),
             "subtype": r.get("subtype"),
             "approx_size": _approx_size(r),
             "status": (r.get("operation_status") or {}).get("description"),
+            "delivery_status": r.get("delivery_status"),
+            "operation_status": r.get("operation_status"),
+            "retention_days": r.get("retention_days"),
+            "rule": _rule_summary(r.get("rule")),
+            "lookalike": (
+                {
+                    "source": lookalike.get("origin") or lookalike.get("origin_audience_id"),
+                    "ratio": lookalike.get("ratio"),
+                    "country": lookalike.get("country"),
+                }
+                if lookalike else None
+            ),
+            "data_source": (r.get("data_source") or {}).get("type") if isinstance(r.get("data_source"), dict) else r.get("data_source"),
             "created": r.get("time_created"),
-        }
-        for r in rows
-    ]
+            "updated": r.get("time_updated"),
+            **{f"usable{'_' + k if k != 'usable' else ''}": v for k, v in usability(r).items()},
+        })
+    return out
+
+
+def _rule_summary(rule: Any) -> str | None:
+    """A rule (JSON string or dict), shortened for a listing."""
+    if not rule:
+        return None
+    text = rule if isinstance(rule, str) else json.dumps(rule)
+    return text if len(text) <= 300 else text[:300] + "..."
 
 
 def list_saved(
@@ -287,7 +342,7 @@ def plan_create_lookalike(
         )
 
     try:
-        origin = client.read.node(str(origin_audience_id), ("id", "name", "subtype"))
+        origin = client.read.node(str(origin_audience_id), FIELDS)
     except Exception as exc:
         raise MutationError(
             f"No audience {origin_audience_id} this token can see. Use "
@@ -300,7 +355,22 @@ def plan_create_lookalike(
         "origin_audience_id": str(origin_audience_id),
         "lookalike_spec": {"ratio": ratio, "country": code, "type": "custom_ratio"},
     }
-    check_no_customer_data(payload)
+    check_payload("LOOKALIKE", payload)
+
+    from ..audience_status import usability
+
+    usable = usability(origin)
+    if usable["usable"] is False:
+        raise MutationError(
+            f"The source {origin.get('name')!r} is not usable ({usable['reason']}), so a "
+            "lookalike built on it would be empty."
+        )
+    low = origin.get("approximate_count_lower_bound")
+    if isinstance(low, int) and low < MIN_LOOKALIKE_SOURCE:
+        raise MutationError(
+            f"The source {origin.get('name')!r} has about {low} people; Meta needs at "
+            f"least {MIN_LOOKALIKE_SOURCE} in one country to build a lookalike."
+        )
 
     return PlannedChange(
         action="create",
@@ -320,6 +390,52 @@ def plan_create_lookalike(
             "a lookalike takes a few hours to populate and cannot be used "
             "until it does",
             f"a {ratio:.0%} lookalike is {'narrow and close to the source' if ratio <= 0.02 else 'broad; reach rises and similarity falls'}",
+        ],
+        edge=CUSTOM_EDGE,
+    )
+
+
+#: Meta's minimum source size for a lookalike: 100 people in one country.
+MIN_LOOKALIKE_SOURCE = 100
+
+
+def plan_create_rule_audience(
+    client: MutatingMetaAdsClient,
+    *,
+    name: str,
+    subtype: str,
+    rule: dict[str, Any],
+    retention_days: int | None = None,
+    description: str | None = None,
+    summary: str = "",
+) -> PlannedChange:
+    """A rule-based custom audience: website, engagement or app.
+
+    Built from events Meta ALREADY HOLDS -- pixel fires, Page and Instagram
+    engagement, video views, lead-form opens, app events. Nothing is uploaded.
+    It populates over hours after creation.
+    """
+    if not name.strip():
+        raise MutationError("An audience needs a name.")
+    payload: dict[str, Any] = {"name": name, "subtype": subtype, "rule": rule, "prefill": True}
+    if subtype in ("WEBSITE", "APP") and retention_days:
+        payload["retention_days"] = int(retention_days)
+    if description:
+        payload["description"] = description
+    if subtype == "APP":
+        payload.pop("prefill")
+    check_payload(subtype, payload)
+    return PlannedChange(
+        action="create",
+        entity=f"{subtype.lower()} audience",
+        entity_type="custom_audience",
+        node_id="",
+        label=name,
+        payload=payload,
+        changes=[FieldChange("name", None, name), FieldChange("rule", None, summary)],
+        warnings=[
+            "built from events Meta already holds -- no customer data is uploaded",
+            "a rule-based audience populates over hours; get_audience reports when it is usable",
         ],
         edge=CUSTOM_EDGE,
     )

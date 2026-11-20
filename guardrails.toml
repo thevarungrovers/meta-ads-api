@@ -24,6 +24,12 @@ max_bid_amount              = "50.00"   # bid cap / cost target ceiling
 max_bid_increase_pct        = 50.0
 max_entities_per_call       = 25
 max_projected_delta_per_day = "200.00"  # upper bound on extra daily spend
+max_cost_cap                = "300.00"  # highest COST_CAP average-cost target
+min_roas_floor              = "0.50"    # lowest MIN_ROAS floor (0.50 = 50% return)
+max_audiences_per_ad_set    = 10        # included + excluded custom audiences
+overlap_warn_pct            = 50.0      # WARN: two included audiences overlap this much
+exclusion_swallow_pct       = 80.0      # WARN: exclusions remove this share of reach
+max_reach_change_pct        = 80.0      # FAIL widening (WARN narrowing) reach this much
 
 # --- per-session bounds ------------------------------------------------------
 # These matter more than the per-call ones. A per-call limit does nothing to
@@ -31,6 +37,22 @@ max_projected_delta_per_day = "200.00"  # upper bound on extra daily spend
 # does.
 max_applies_per_session     = 20
 max_projected_session_delta = "500.00"
+
+# --- per-day bounds (local calendar day) --------------------------------------
+# Counted from the ledger (logs/meta-ads.db, `changes`), not from memory, so
+# they survive a restart and are shared by every server process. Only
+# successful applies and reverts count; the day starts at LOCAL midnight.
+# Writes made with scripts/manage.py go to the `mutations` log only and are NOT
+# counted here.
+#
+# An ACTIVATION (campaign, ad set or ad set to ACTIVE, or a revert that restores
+# spend) is counted against this daily total and the session total, and is
+# exempt from the per-change max_projected_delta_per_day. So this total must be
+# at least the largest daily budget the agent may need to re-activate -- a CBO
+# campaign's budget, or an ABO campaign's summed ad set budgets. The server
+# logs a warning at startup when one exceeds it.
+max_applies_per_day                = 40
+max_projected_delta_per_day_total  = "1000.00"
 
 [scope]
 # Ad account ids the server may touch, as bare digits with no `act_` prefix.
@@ -48,3 +70,14 @@ allowed_campaign_ids = []
 # because the API integer behind it is 50000 on a USD account and 500 on a JPY
 # one.
 allowed_currencies = ["CAD"]
+
+# The per-change, session and daily totals above are counted in ONE currency:
+# cap_currency if set (it must be in allowed_currencies), otherwise the first
+# entry of allowed_currencies. A change to an entity in any other currency is
+# REFUSED at preview unless a rate below converts it -- none is ever guessed --
+# or it can only lower spend (a pause, a cut; counted as 0). A rate must name a
+# currency that is in allowed_currencies, or the file is refused at load.
+# cap_currency = "CAD"
+#
+# [scope.currency_rates]   # 1 unit of the key = this many cap-currency units
+# JPY = "0.0091"

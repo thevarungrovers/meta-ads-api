@@ -60,7 +60,9 @@ git clone <this repo> meta-ads-api && cd meta-ads-api
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 
-# 2. Fill in your credentials
+# 2. Fill in your credentials (and, optionally, the naming identity:
+#    META_ADS_MCP_OWNER_INITIALS / META_ADS_MCP_AGENT_NAME -- see
+#    "Naming what the agent creates"; leave them empty for plain names)
 cp .env.example .env && chmod 600 .env
 $EDITOR .env
 
@@ -123,7 +125,7 @@ no-op.
 It asks whether you want **basic permissions only**, and that answer means
 something slightly different per client:
 
-- **Claude Code** has a per-tool allowlist, so the 14 safe tools are
+- **Claude Code** has a per-tool allowlist, so the 70 safe tools are
   pre-approved and the 7 that change the account still stop and ask you. That is
   strictly better, so Claude Code always gets the full tool set with an
   allowlist.
@@ -136,7 +138,15 @@ something slightly different per client:
 python3 install.py --agent cursor --read-only
 python3 install.py --agent claude-code --no-read-only --yes
 python3 install.py --agent codex --dry-run
+python3 install.py --agent claude-code --owner-initials AB --agent-name max   # into .env only
 ```
+
+`--owner-initials` / `--agent-name` are validated and written into `.env`, the
+only place the naming identity is read from; never into a client config. The
+file is replaced atomically (a private temp file beside it, then a rename), is
+never left looser than `600` (a stricter mode, such as `400`, is kept), a
+symlinked `.env` is written through to its target rather than replaced, and a
+malformed value is reported by its key, not echoed.
 
 ## Three things about Meta that will bite you
 
@@ -264,57 +274,185 @@ Entities are addressable **by name**: exact match wins, then case-insensitive
 substring, and ambiguity is refused with the candidates listed rather than
 resolved for you.
 
+What the CLI creates is named `<OWNER>-cli-<base>` when the owner initials are
+set in `.env` (`--name "QC 25-54"` becomes `AB-cli-QC 25-54`), and the plain
+base when they are not. It prints the prefix before anything is sent.
+
+## Naming what the agent creates
+
+Every name the server creates starts with the owner's initials and the agent's
+name, so a month later anyone can tell what came through this server from what
+was made by hand in Ads Manager, and filter by it:
+
+```
+<OWNER>-<agent>-<base name>
+AB-max-spring_promo_week_12          (placeholder values)
+```
+
+The prefix goes **first**, before any house-style name you use as the base. The
+base keeps whatever separators the agent chose; only the two `-` after the
+initials and the agent name are the delimiter.
+
+**Where it comes from: the repo's `.env`, and nothing else.**
+
+| Key | Format | Example |
+|---|---|---|
+| `META_ADS_MCP_OWNER_INITIALS` | 2-4 uppercase letters | `AB` |
+| `META_ADS_MCP_AGENT_NAME` | a lowercase slug, 2-24 characters, a letter first, then letters, digits or `_` (no `-`); `cli` and `manual` are reserved | `max` |
+
+`config.env` is read too when present; `.env` wins, and an empty value never
+overrides a set one. A value in the process environment (an MCP client's `env`
+block) is **ignored**, with a startup warning when it disagrees, so there is
+**one identity per checkout**: a second agent needs its own checkout with its own
+`.env`. `get_guardrails` shows which parts are set.
+
+**Empty is not an error.** Each part is used only when it is set:
+
+| Set in `.env` | A campaign named `spring_promo` is created as |
+|---|---|
+| both | `AB-max-spring_promo` |
+| initials only | `AB-spring_promo` |
+| agent only | `max-spring_promo` |
+| neither | `spring_promo`, exactly as given |
+
+A value that is set but malformed (`a1`, `max-1`) refuses every create and
+rename at preview, naming the `.env` key to fix.
+
+With **initials only**, a base that starts like an agent name followed by `-`
+(`spring-promo`) is refused: `AB-spring-promo` would read as agent `spring`.
+Join the first word with `_` or a space instead (`spring_promo`, `spring promo`).
+
+**What is prefixed.** Every name the agent creates: campaigns, ad sets, ads,
+creatives (the top-level, internal `name` only -- never the headline viewers
+see, `link_data.name`), audiences, A/B tests (not their cell names) and labels.
+Images and videos have no name here and are not stamped. A copy or duplicate
+(`duplicate_ad`, `duplicate_ad_set`, `duplicate_campaign`) gets our prefix on the
+source's base, any other prefix stripped; `/copies` takes no name, so each
+object it creates is renamed right after, one ledger entry each, within
+`max_entities_per_call`. An object Meta copies that the preview did not list
+(added in between) is counted too: the apply is refused, copying nothing, when
+the copy would now go over the limit, and a name refused for it is skipped and
+reported, never sent. When a rename after the copy fails, the apply result
+reports each object's live name (`follow_ups[].live_name`, and the copy's own
+`entity_name`) and a top-level `warnings` line. With no identity, Meta's copy
+naming is kept for `/copies`; `duplicate_ad` still strips another agent's or the
+CLI's prefix from the copy's name (`CD-bot-launch` -> `launch (copy)`). A
+creative made by a copy edit is named from the ad's base; the ad keeps its name.
+
+**Limits.** A name is at most **400 characters, prefix included**, for every
+type above. An over-long name is **refused, never truncated**; the preview says
+how long the base may be. The preview always shows the exact final name (the
+`naming` block). A duplicate name only warns -- Meta allows them. Control and
+invisible characters (every default-ignorable code point, such as a Hangul
+filler or a variation selector, the blank Braille pattern, and any space other
+than a plain U+0020), a doubled prefix, and another agent's or the CLI's prefix
+are refused -- including one spelt with look-alike characters: the first two
+dash-separated segments are folded (NFKC, any dash to `-`, Cyrillic, Greek
+(capital and small) and Cherokee letters to the Latin ones they resemble), and a name that then reads as a
+prefix it does not literally carry is refused, in the preview, the engine's
+backstop and the write client alike. Accented letters and typographic dashes
+in an ordinary name (`Summer – Sale`, `Café-Paris`) are fine. `url_tags` that use `{{campaign.name}}`, `{{adset.name}}` or
+`{{ad.name}}` warn that UTM values will carry the prefix.
+
+**Renames.** The agent may rename **only its own entities**: the live name
+carries its prefix, or the ledger shows this server created it. A manual entity
+or another agent's (the same owner's included) is refused; there is no override.
+A live name carrying a *different* full `OWNER-agent-` prefix is refused even
+when the ledger shows this checkout created it (say `.env` changed from
+`AB-max` to `AB-bot`): the name's attribution wins.
+The prefix is kept (restored, on a ledger-owned entity whose prefix was removed
+in Ads Manager); a revert puts the old name back exactly.
+
+**Filtering.** `find_campaigns`, `find_ad_sets`, `find_ads`, `list_audiences`
+and `list_labels` take `origin` (`agent` / `cli` / `manual`), `agent_name`,
+`owner` and `mine` (this server's own prefix), and every row says what its name
+claims (`origin`, `owner`, `agent`, `base`); the `find_*` rows add
+`ledger_created`, whether the ledger shows this server made it. The name is a
+convention; the ledger is the proof.
+
+**`reconcile_ledger`**, with a prefix configured, adds a `naming` section:
+`prefix_lost` (something this server created whose name no longer carries the
+prefix, `pre_feature` when it was created before naming existed),
+`prefix_without_ledger` (named with our prefix, but no ledger row), and a count
+of other prefixes. It is information only; existing entities are never renamed
+for you.
+
+Two safety nets hold the rule below the tools: the engine builds each request
+in the preview and fails `name_prefix` if any name it would send lacks the
+prefix, and the write client refuses such a create or rename before anything
+leaves the process.
+
 ## What the agent can do
 
-29 tools: 10 read, 9 `preview_*`/`apply_*` pairs, and `revert_change`.
+110 tools: 35 read, 37 `preview_*`/`apply_*` pairs, and `revert_change`.
 
 ### Can read (safe)
 
-| Tool | Gives you |
+| Tools | Give you |
 |---|---|
-| `list_ad_accounts` | Accounts this token can reach |
-| `get_account` | Currency, time zone, status, spend cap, balance |
-| `find_campaigns` | Campaigns, ids, `budget_level`, budgets |
-| `find_ad_sets` | Ad sets, budgets, `bid_strategy`, `bid_amount` |
-| `find_ads` | Ads and their `effective_status` |
-| `run_report` | Performance, five reports |
-| `get_ad_creative` | What an ad **says**, its creative shape, and the social proof at stake |
-| `list_audiences` | Custom, lookalike and saved audiences |
-| `get_guardrails` | The bounds and the session budget left |
-| `list_my_changes` | What it has changed, with `entry_id`s |
+| `list_ad_accounts`, `get_account` | Accounts; currency, time zone, status, token health, rate limit |
+| `find_campaigns`, `find_ad_sets`, `find_ads` | Ids, `budget_level`, budgets, bids, `effective_status`, and `truncated` when cut off; who made it (`origin`, `ledger_created`), filterable by `origin` / `agent_name` / `owner` / `mine` |
+| `get_campaign`, `get_ad_set`, `get_ad` | One entity in full: special ad categories, the whole targeting spec, placements, learning stage, review feedback, preview links, 7/30-day totals |
+| `run_report`, `get_report_run` | Performance: ten reports (incl. placements, demographics, geo, hour of day, conversions by action), any breakdown, a real `max_rows`, async runs |
+| `get_ad_creative`, `verify_ad`, `get_ad_previews` | What an ad says; whether it was approved and still matches what was approved; preview links per placement |
+| `list_audiences`, `get_audience` | Audiences with size, `usable`, and which ad sets use them; the same naming filters |
+| `search_targeting`, `estimate_reach` | Targeting ids (interests, behaviours, places, locales ...); reach bounds |
+| `list_ad_images`, `list_ad_videos`, `list_labels` | Media to reuse; labels (with the naming filters) |
+| `list_pixels`, `get_pixel_health`, `list_custom_conversions` | Tracking diagnostics |
+| `list_connected_identities`, `list_lead_forms` | Pages, Instagram accounts, apps; form metadata (never leads) |
+| `list_ad_rules`, `list_ab_tests`, `get_ab_test`, `list_catalogs`, `list_product_sets` | Rules (money rules flagged), studies, catalogs |
+| `list_recent_changes`, `search_ad_library` | Ads Manager's activity log; Meta's Ad Library |
+| `get_guardrails`, `list_my_changes`, `reconcile_ledger` | Bounds, today's budget and the naming identity; what it changed; whether the account still matches, names included |
 
 ### Can change (needs your yes)
 
-| Pair | Changes |
+Every one is a `preview_*` / `apply_*` pair, on one engine
+(`metaads_mcp/changes/`): kill switch, token, staleness, session and daily
+caps, a two-phase ledger, Meta's `validate_only` in the preview.
+
+| Kinds | Change |
 |---|---|
-| `preview/apply_campaign_status` | Pause or activate a whole campaign |
-| `preview/apply_campaign_daily_budget` | A campaign-budget campaign's daily budget |
-| `preview/apply_ad_set_status` | Pause or activate an ad set |
-| `preview/apply_ad_set_daily_budget` | An ad set's daily budget |
-| `preview/apply_ad_set_bid_amount` | An ad set's bid cap or cost target |
-| `preview/apply_ad_status` | Pause or activate one ad |
-| `preview/apply_duplicate_ad` | A **new PAUSED ad** beside an existing one, with changed copy or media |
-| `preview/apply_update_ad_copy` | Repoint a **live ad** at a new creative (discards social proof) |
-| `preview/apply_create_audience` | A saved targeting spec, or a lookalike |
-| `revert_change` | Undo one ledger entry |
+| `campaign_status`, `ad_set_status`, `ad_status`, `multi_ad_status` | Pause or activate (a batch of ads in one ad set) |
+| `campaign_daily_budget`, `ad_set_daily_budget`, `campaign_lifetime_budget`, `ad_set_lifetime_budget` | Budgets, at the level that holds them |
+| `ad_set_bid_amount`, `ad_set_bid_strategy`, `campaign_bid_strategy`, `ad_set_roas_floor` | Bidding |
+| `ad_set_schedule`, `campaign_schedule`, `ad_set_dayparting`, `ad_set_frequency_cap` | When it runs and how often |
+| `ad_set_targeting`, `ad_set_placements` | Who and where: places, ages, interests, audiences in/out, Advantage+ |
+| `ad_set_optimization_goal`, `ad_set_attribution_spec` | What it optimizes for; the attribution window |
+| `create_audience` | Website, engagement, video, lead-form, app, lookalike (1-10%), saved |
+| `duplicate_ad`, `update_ad_copy`, `url_tags`, `advantage_creative_options`, `attach_lead_form`, `replace_ad_creative` | What an ad says, via a new creative |
+| `create_creative`, `create_ad`, `create_campaign`, `create_ad_set`, `duplicate_ad_set`, `duplicate_campaign` | New things, always **PAUSED**, 3 applies each |
+| `upload_video` | A local MP4/MOV into the video library (chunked upload), titled with the agent prefix (`AB-max-clip.mp4`), then waits a bounded time for Meta's processing; 1 apply, shows nowhere. A video creative without a thumbnail uses Meta's suggested frame |
+| `upload_image` | A local image into the image library, named with the agent prefix (`AB-max-fr.jpg`), ready for a creative; 1 apply, shows nowhere |
+| `create_creative` with `locales` | A multi-language ad: copy, link and media per language (a library hash or a local file, uploaded at apply; fr/en built in, or Meta locale ids), one default language; Stories/Reels may get a vertical image per language |
+| `create_ab_test` | A split test between PAUSED cells |
+| `low_risk_change` | Names (of the agent's own entities only) and ad labels, on a closed allowlist |
+| `revert_change` | Undo one ledger entry or a whole batch |
+
+Every ad change is **verified**: the preview fetches preview links for the
+placements the ad set uses and checks text truncation, image shape (from the
+file header), video length, the call to action and every destination link; the
+apply re-reads the ad and diffs it against what was approved, with its review
+state. `verify_ad` repeats that after review.
 
 ### Cannot do at all — including from the CLI
 
 | Not available | Why |
 |---|---|
-| Create a **campaign** or **ad set** | A campaign carries a `special_ad_categories` declaration — a legal statement about housing/employment/credit/social-issue advertising. That belongs to a person. (Creating an **ad** inside an existing ad set *is* supported; it inherits the declaration.) |
-| Upload a **video** | The `advideos` edge is asynchronous and chunked; an ad built on a still-encoding video is rejected. An existing `video_id` can be reused, which covers duplicating a video ad. |
-| Create a **customer-list audience** | It uploads hashed customer emails and phone numbers to Meta. Saved audiences and lookalikes are supported; this one is refused **structurally** — see below |
-| Change targeting, optimization goal, billing event, schedule | Not on the write client's field allowlist |
-| Set a status to `DELETED` or `ARCHIVED` | Irreversible through the API — pause instead |
-| Delete anything | The mutating client has no delete method at all |
-| Anything touching billing or account access | Out of scope by design |
+| Delete or archive anything, audiences included | Irreversible. Pausing is the undo; an unused audience changes nothing. The mutating client has no delete method at all |
+| Create a **customer-list audience** | It uploads hashed customer emails and phone numbers to Meta — refused **structurally**, see below |
+| Create a **lead form**, download leads | A form carries a privacy policy and legal text a person answers for; leads are personal data |
+| Switch a campaign between campaign and ad-set budgets | It redistributes spend across every ad set |
+| Automated rules that change money | An unattended writer outside every guardrail here |
+| Upload a **video** | The `advideos` edge is asynchronous and chunked; reuse an existing `video_id` |
+| Pixel/CAPI configuration, catalog feeds, billing, account access | Out of scope by design |
 
 None of that is "refused at call time" — there is **no generic
-update/passthrough tool**, and the write client's field allowlist contains only
-`status`, `name`, `creative`, `daily_budget`, `lifetime_budget` and
-`bid_amount`. An unregistered operation is unreachable, not merely
-undocumented. `tests/test_mcp_surface.py` pins the tool names so adding one is a
+update/passthrough tool**, and the write client's field allowlist
+(`write/client.py:WRITABLE_FIELDS`) names every field that can be written:
+status, name, budgets, bids and bid constraints, schedules and dayparting,
+frequency caps, targeting, optimization goal, billing event, attribution, an
+ad's creative, labels, and an A/B test's end time. Creates are refused unless
+PAUSED. `tests/test_mcp_surface.py` pins the tool names so adding one is a
 reviewed diff.
 
 ### Customer-list audiences are refused on purpose
@@ -325,10 +463,11 @@ Meta already has" from "upload our customer list" are the `subtype` field and
 whether a `data` payload is attached — far too thin a line to leave to
 convention. So both halves are checked:
 
-- `check_subtype` admits `LOOKALIKE` and nothing else;
+- each creatable subtype (`WEBSITE`, `ENGAGEMENT`, `APP`, `LOOKALIKE`) has its
+  own payload-key allowlist, and `CUSTOM` is refused outright;
 - `check_no_customer_data` refuses any payload carrying `data`, `schema`,
-  `payload`, `users`, `customer_file_source`, `pixel_id` … and runs on **every**
-  call, not just the suspicious-looking ones.
+  `payload`, `users`, `is_raw` or `customer_file_source`, for every subtype,
+  and runs on **every** call, not just the suspicious-looking ones.
 
 Reading an existing customer-list audience is fine and necessary — you need to
 see one to pick a lookalike source. Creating one is what is blocked.
@@ -407,16 +546,29 @@ A key you delete falls back to the code default. A key you **misspell is an
 error at startup**, not a silently ignored line — a ceiling that is quietly not
 there reads as protection.
 
-### 2. Limits per conversation
+Bidding and targeting add `max_cost_cap`, `min_roas_floor`,
+`max_audiences_per_ad_set`, `overlap_warn_pct`, `exclusion_swallow_pct` and
+`max_reach_change_pct`; `max_preview_formats` caps how many placements an ad
+change previews.
+
+### 2. Limits per conversation, and per day
 
 ```toml
-max_applies_per_session     = 20
-max_projected_session_delta = "500.00"
+max_applies_per_session           = 20
+max_projected_session_delta       = "500.00"
+max_applies_per_day               = 40
+max_projected_delta_per_day_total = "1000.00"
 ```
 
 These matter more. A per-call limit does nothing against a loop making four
-hundred individually-legal changes. Counters live in memory and reset only when
-the server restarts — which is a deliberate act.
+hundred individually-legal changes. The session counters live in memory; the
+**daily** ones are computed from the ledger (successful applies since LOCAL
+midnight), so they survive restarts and are shared by every server process.
+A creation costs 3 applies. **Activating** something (and a revert that
+restores spend) is counted against the daily and session totals and exempt
+from the per-change `max_projected_delta_per_day`, so the daily total must be at
+least the largest budget you would re-activate -- `get_guardrails` lists any
+campaign that is larger under `budget_cap_check` (checked once per session). `scripts/manage.py` writes are not counted.
 
 ### 3. Scope
 
@@ -434,6 +586,49 @@ default is "the one account in `.env`, and nothing else". Pin
 `META_ADS_MCP_ALLOWED_ACCOUNT_IDS` can **narrow** this further but never widen
 it — a machine-local override that could add accounts would defeat the committed
 file.
+
+**The totals are in one currency.** The per-change, session and daily spend
+limits and totals are counted in the *cap currency*: `cap_currency` under
+`[scope]` if set, otherwise the first entry of `allowed_currencies`. A change to
+an entity whose account is in another currency is **refused at preview**
+(`FAIL cap_currency`), because adding JPY amounts to CAD ones makes every total
+meaningless -- unless it provably can only **lower** spend (a pause, a cut, a
+rename or a PAUSED creation, or -- projecting nothing -- a frequency cap made
+stricter, a bid or cost cap lowered or a ROAS floor raised under the same
+strategy, targeting only narrowed, a daily-budget flight only shortened), which
+is let through and counted as 0. A projection of 0 alone is not that proof, and
+neither is "tightening": a looser frequency cap, or one bid strategy swapped for
+another, is refused without a rate. The one exception is a conversion you configure
+yourself; no rate is ever looked up or guessed, and a rate for a currency that
+is not in `allowed_currencies` is refused when the file loads:
+
+```toml
+[scope]
+allowed_currencies = ["CAD", "JPY"]
+cap_currency       = "CAD"          # optional; default: the first allowed currency
+
+[scope.currency_rates]               # 1 unit of the key = this many cap-currency units
+JPY = "0.0091"
+```
+
+With a rate, the preview still shows the projection in the entity's currency, and
+a warning says what it is counted as; the token, the counters and the ledger
+carry the converted amount, rounded up for an increase and down for a cut, never
+to the nearest. The ledger also keeps the entity-currency figure, and a revert
+works from that one, so it is converted exactly once. A revert row written
+before that figure was kept, in a non-cap currency, holds a doubly converted
+amount: it is never read back. A daily budget's is recomputed from the row's
+before/after values; where that is not possible (a bid, say), the revert that
+lowers spend still goes through, and re-applying the change later is refused
+with the reason. Every change that can
+move money -- whatever it projects -- checks the entity's currency is in
+`allowed_currencies`; only names, labels and PAUSED creations are exempt, and
+pauses. **Pausing is always allowed**: a campaign, ad set or ad (or a batch of
+ads) set to PAUSED passes both currency checks whatever its account's currency,
+because stopping spend is never blocked. The account scope
+(`allowed_account_ids`) still decides which accounts may be touched at all, and
+activating the same thing again is checked as usual. Adding days to a daily-budget flight projects the whole daily
+budget for each added day, not the unused headroom.
 
 ### 4. The stop button
 
@@ -458,7 +653,7 @@ the same risk:
 
 | Failure | Retried? | Why |
 |---|---|---|
-| Rate limit (613, 4, 17, 32, 429, 80xxx) | **Yes**, up to 3 times | Meta refused it outright. Nothing was applied, so repeating it is safe |
+| Rate limit (613, 4, 17, 32, 429, 80xxx) | **Yes**, while the wait fits in a tool call | Meta refused it outright. Nothing was applied, so repeating it is safe |
 | Timeout / connection error | **Never** | The request may have reached Meta with the response lost. A retry makes a second change |
 | HTTP 5xx | **Never, on a write** | Same ambiguity |
 | Anything permanent (100, 200, …) | No | Repeating it just fails again |
@@ -469,8 +664,11 @@ and fail three more times for nothing. Reads are unaffected and still retry
 everything transient.
 
 **So an `apply_*` can take ~30 seconds to return.** That is the retry working.
-It also means batching writes is slow by construction: five changes is five
-windows.
+Past a minute (Meta's own `estimated_time_to_regain_access`, or the next
+backoff) the transport stops sleeping and the tool answers
+`RATE_LIMITED retry_after=<seconds>` instead, because an MCP client would have
+timed the call out anyway. Batching writes is slow by construction: five changes
+is five windows.
 
 ## Everything is written down
 
@@ -509,7 +707,16 @@ after you did, and reverting would discard *their* change while the ledger
 recorded it as a tidy undo of yours.
 
 A revert is itself a change and is itself recorded, so the ledger stays a
-history rather than a list of things that are still true.
+history rather than a list of things that are still true. Reverting a revert
+re-applies the original change, and costs what it projected. Undoing a change
+that **tightened** delivery (a cap, a floor, narrowed targeting) projects the
+entity's unused budget headroom, and so does every later step of that revert
+chain that lifts the restriction again, however deep: the headroom is re-read
+at that moment, never taken from an older step. Undoing a shortened
+daily-budget flight puts days back, so it projects the whole daily budget --
+and so does re-applying an extension through a revert of its revert, never
+less than that bound whatever an older row recorded (rows from before
+extensions projected the daily budget hold the headroom, often 0).
 
 ## How reading and writing are kept apart
 
@@ -537,7 +744,7 @@ for.
 ## Tests
 
 ```bash
-./.venv/bin/python -m pytest -q
+./.venv/bin/pytest -q
 ```
 
 Everything is offline. `tests/graphsim.py` is a small in-memory Graph API that
@@ -575,10 +782,14 @@ Two things every test gets automatically, from `tests/conftest.py`:
 | `code 190, subcode 463` | The token expired | Generate a new one; `token_info.py --check` warns in advance |
 | `code 200` or `code 10` | Missing scope **or** the System User is not assigned to the account | Check both — they give the same error |
 | `code 100, subcode 33` | The object does not exist, *or* the token cannot see it | Meta does not distinguish these. Check the id and the assignment |
-| `code 4`, `17`, `32`, `613`, `80xxx` | Rate limit | Reads retry automatically. `get_account` reports headroom |
+| `code 4`, `17`, `32`, `613`, `80xxx` | Rate limit | Retried while the wait is under a minute, else `RATE_LIMITED retry_after=`. Every read reports headroom |
 | Server "connected" but tools missing | You registered it mid-session | Restart the client; the tool list is read once, at startup |
 | A budget looks 100x wrong | Minor units | You are reading a raw node field. `currency.from_minor_units` is the converter |
 | Every number is one day out | Account time zone | Report dates are evaluated in the account's zone. `get_account` shows it |
+
+Over MCP every failure carries a prefix -- `AUTH_EXPIRED`, `PERMISSION`,
+`RATE_LIMITED retry_after=`, `NOT_FOUND`, `POLICY`, `INVALID`,
+`TOO_MUCH_DATA`, `TRANSIENT`, `INTERNAL` -- from `metaads_mcp/errors.py`.
 
 Start with `./.venv/bin/python scripts/test_connection.py`. The rungs are
 ordered so the **first** failure names the real problem.
@@ -596,14 +807,20 @@ metaads_reporting/        the library
   config.py               .env, with blank treated as absent
   export.py               DataFrames and CSV
   logdb.py                the SQLite log: tool calls, API calls, changes, mutations
-  reports/                five declarative report definitions
+  reports/                ten declarative report definitions
+  placement_specs.py      what each placement shows: cut-offs, shapes, lengths
+  linkcheck.py            destination checks, HEAD only, SSRF-guarded
+  reach.py audience_status.py special_ad_rules.py token_health.py
   write/                  THE ONLY PLACE THAT CAN MUTATE
-    client.py             field allowlist, validate_only, no delete
-    campaigns.py adsets.py ads.py   plan builders
+    client.py             field allowlist, validate_only, PAUSED creates, no delete
+    campaigns.py adsets.py ads.py creatives.py audiences.py media.py   plan builders
+    async_insights.py     the one POST a read needs: <node>/insights
     lookup.py plan.py audit.py
 
 metaads_mcp/              the MCP server
-  server.py guardrails.py previews.py ledger.py tools_read.py tools_write.py
+  server.py guardrails.py previews.py ledger.py errors.py verify.py
+  tools_read.py tools_account.py tools_write.py
+  changes/                every write: a ChangeKind on one engine
 
 scripts/
   test_connection.py      the diagnostic ladder

@@ -60,6 +60,9 @@ class PlannedChange:
     #: A create that must happen first, and whose new id this plan depends on.
     #: An ad needs its creative to exist before it can point at one.
     requires: "PlannedChange | None" = None
+    #: A revert putting a name back EXACTLY as it was, which may predate the
+    #: owner/agent prefix: the write client's prefix guard lets it through.
+    allow_unprefixed_name: bool = False
 
     @property
     def is_create(self) -> bool:
@@ -107,19 +110,23 @@ def execute(
             f"landed if the second step fails."
         )
     if plan.is_create:
+        extra = {"parent": plan.node_id} if plan.edge == "copies" else {}
         return client.create(
             entity_type=plan.entity_type,
             edge=plan.edge,
             payload=plan.payload,
             apply=apply,
             account_id=account_id,
+            **extra,
         )
+    extra = {"allow_unprefixed_name": True} if plan.allow_unprefixed_name else {}
     return client.update(
         plan.node_id,
         entity_type=plan.entity_type,
         payload=plan.payload,
         apply=apply,
         account_id=account_id,
+        **extra,
     )
 
 

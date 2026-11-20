@@ -81,7 +81,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 DB_PATH = LOG_DIR / "meta-ads.db"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Request payloads are capped before storage. A targeting spec is large and a
 #: field list can be long; neither is worth unbounded rows, and the first few
@@ -155,7 +155,9 @@ CREATE TABLE IF NOT EXISTS changes (
     outcome_at                  TEXT,
     resource_name               TEXT,
     error                       TEXT,
-    reverts                     TEXT
+    reverts                     TEXT,
+    inverse_json                TEXT,
+    verification_json           TEXT
 );
 
 -- Every write the library sent, from any caller.
@@ -184,6 +186,26 @@ CREATE INDEX IF NOT EXISTS idx_changes_at       ON changes(at);
 CREATE INDEX IF NOT EXISTS idx_changes_reverts  ON changes(reverts);
 CREATE INDEX IF NOT EXISTS idx_mutations_at     ON mutations(at);
 """
+
+#: Columns added to `changes` in schema version 2. `CREATE TABLE IF NOT EXISTS`
+#: never alters a table that is already there, so an existing logs/meta-ads.db
+#: would silently lack these and the first apply would fail with "table changes
+#: has no column named inverse_json". connect() adds whichever are missing.
+#: Additive and nullable only -- no new table, no backfill.
+#:
+#:   inverse_json       what revert_change needs beyond before/after: the change
+#:                      kind that wrote the row, the previous creative id, the
+#:                      created ad id, the full previous targeting spec, a
+#:                      batch_id shared by every row one batch apply wrote, and
+#:                      the apply weight the daily cap counts
+#:   verification_json  the after-apply ad verification: field diff, review
+#:                      state, preview placements and timestamps. Never the
+#:                      signed preview URLs, which expire and expose an
+#:                      unpublished ad to anyone holding one
+_CHANGES_ADDED_COLUMNS = (
+    ("inverse_json", "TEXT"),
+    ("verification_json", "TEXT"),
+)
 
 # One connection per thread. The MCP SDK runs sync tools on a worker thread, and
 # a sqlite3 connection may only be used from the thread that created it.
@@ -248,9 +270,13 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    present = {row[1] for row in conn.execute("PRAGMA table_info(changes)")}
+    for column, kind in _CHANGES_ADDED_COLUMNS:
+        if column not in present:
+            conn.execute(f"ALTER TABLE changes ADD COLUMN {column} {kind}")
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-        "ON CONFLICT(key) DO NOTHING",
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (str(SCHEMA_VERSION),),
     )
     if fresh:
@@ -555,13 +581,21 @@ def insert_change(
     before: str,
     after: str,
     projected_delta: str,
+    inverse: Any = None,
+    reverts: str | None = None,
 ) -> None:
-    """Record what we are ABOUT to change. Call before the mutation is sent."""
+    """Record what we are ABOUT to change. Call before the mutation is sent.
+
+    ``reverts`` goes in HERE, with the intent, not with the outcome: a revert
+    that fails must still block a second attempt (see reverted_entry_ids), and
+    an outcome that never arrives would otherwise leave no marker at all.
+    """
     connect().execute(
         "INSERT INTO changes"
         "(entry_id, tool_call_id, at, pid, tool, account_id, entity_type, entity_id, "
-        " entity_name, field, before, after, projected_daily_spend_delta) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " entity_name, field, before, after, projected_daily_spend_delta, "
+        " inverse_json, reverts) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             entry_id,
             _current_tool_call.get(),
@@ -576,6 +610,8 @@ def insert_change(
             before,
             after,
             projected_delta,
+            None if inverse is None else json.dumps(inverse, default=str),
+            reverts,
         ),
     )
 
@@ -587,12 +623,64 @@ def complete_change(
     resource_name: str | None = None,
     error: str | None = None,
     reverts: str | None = None,
+    verification: Any = None,
 ) -> None:
-    """Record how it went. A plain UPDATE, never an upsert -- see the docstring."""
+    """Record how it went. A plain UPDATE, never an upsert -- see the docstring.
+
+    ``reverts`` is only written when given: the intent row usually carries it
+    already, and COALESCE keeps that rather than nulling it.
+    """
     connect().execute(
-        "UPDATE changes SET ok=?, outcome_at=?, resource_name=?, error=?, reverts=? "
-        "WHERE entry_id=?",
-        (1 if ok else 0, _now(), resource_name, error, reverts, entry_id),
+        "UPDATE changes SET ok=?, outcome_at=?, resource_name=?, error=?, "
+        "reverts=COALESCE(?, reverts), "
+        "verification_json=COALESCE(?, verification_json) WHERE entry_id=?",
+        (
+            1 if ok else 0,
+            _now(),
+            resource_name,
+            error,
+            reverts,
+            None if verification is None else json.dumps(verification, default=str),
+            entry_id,
+        ),
+    )
+
+
+def amend_change(
+    entry_id: str,
+    *,
+    entity_id: str | None = None,
+    inverse_extra: dict[str, Any] | None = None,
+) -> None:
+    """Fill in what is known only after the write: a created object's id.
+
+    A create's intent row is written before the object exists, so its
+    entity_id starts as "(new)". Leaving it there made the ledger name nothing
+    findable -- the id lived only in resource_name.
+    """
+    conn = connect()
+    if entity_id:
+        conn.execute(
+            "UPDATE changes SET entity_id=? WHERE entry_id=? AND entity_id IN ('(new)', '')",
+            (entity_id, entry_id),
+        )
+    if inverse_extra:
+        row = conn.execute(
+            "SELECT inverse_json FROM changes WHERE entry_id=?", (entry_id,)
+        ).fetchone()
+        current = _loads(row[0]) if row else None
+        merged = {**(current if isinstance(current, dict) else {}), **inverse_extra}
+        conn.execute(
+            "UPDATE changes SET inverse_json=? WHERE entry_id=?",
+            (json.dumps(merged, default=str), entry_id),
+        )
+
+
+def set_verification(entry_id: str, verification: Any) -> None:
+    """Replace a row's verification (verify_ad re-runs it after review)."""
+    connect().execute(
+        "UPDATE changes SET verification_json=? WHERE entry_id=?",
+        (json.dumps(verification, default=str), entry_id),
     )
 
 
@@ -621,6 +709,8 @@ def _row_to_entry(row: sqlite3.Row) -> dict[str, Any]:
         "resource_name": row["resource_name"],
         "error": row["error"],
         "reverts": row["reverts"],
+        "inverse": _loads(row["inverse_json"]),
+        "verification": _loads(row["verification_json"]),
     }
 
 
@@ -633,6 +723,34 @@ def change_entries() -> list[dict[str, Any]]:
     return [
         _row_to_entry(row)
         for row in connect().execute("SELECT * FROM changes ORDER BY at, rowid")
+    ]
+
+
+def changes_since(since_utc_iso: str) -> list[dict[str, Any]]:
+    """Successful changes at or after ``since_utc_iso``, for the daily cap.
+
+    The bound is a UTC ISO string because that is how ``at`` is stored
+    (``_now()``), so the comparison is a plain string compare served by
+    ``idx_changes_at``. The CALLER decides where the day starts -- local
+    midnight converted to UTC -- because "today" is a local notion.
+
+    ``ok = 1`` only: a write Meta refused spent nothing and must not eat the
+    day's budget.
+    """
+    rows = connect().execute(
+        "SELECT * FROM changes WHERE at >= ? AND ok = 1 ORDER BY at, rowid",
+        (since_utc_iso,),
+    )
+    return [_row_to_entry(row) for row in rows]
+
+
+def batch_changes(batch_id: str) -> list[dict[str, Any]]:
+    """Every row one batch apply wrote (batch_id lives in inverse_json)."""
+    return [
+        entry
+        for entry in change_entries()
+        if isinstance(entry.get("inverse"), dict)
+        and entry["inverse"].get("batch_id") == batch_id
     ]
 
 

@@ -63,8 +63,13 @@ def test_only_allowlisted_fields_are_writable():
     assert "not in the allowlist" in str(caught.value)
 
 
-def test_targeting_is_not_writable_anywhere():
+def test_targeting_is_writable_only_on_an_ad_set():
+    """An ad set's targeting is writable since the ad_set_targeting kind, which
+    always sends the full merged spec. Nowhere else."""
     for entity in WRITABLE_FIELDS:
+        if entity == "adset":
+            check_writable(entity, {"targeting": "{}"})
+            continue
         with pytest.raises(MutationError):
             check_writable(entity, {"targeting": "{}"})
 
@@ -74,12 +79,12 @@ def test_an_unknown_entity_type_is_refused():
         check_writable("adaccount", {"spend_cap": 1})
 
 
-def test_an_ad_exposes_status_name_and_creative_and_nothing_else():
+def test_an_ad_exposes_status_name_creative_and_labels_and_nothing_else():
     """`creative` repoints an existing ad at a different creative -- the only
     way to change what a live ad says, because a creative is immutable once
     attached. The copy itself is still not editable in place: you build a new
     creative (see write/creatives.py) and point at it."""
-    assert WRITABLE_FIELDS["ad"] == frozenset({"status", "name", "creative"})
+    assert WRITABLE_FIELDS["ad"] == frozenset({"status", "name", "creative", "adlabels"})
 
 
 def test_an_ad_still_cannot_have_its_targeting_or_parent_changed():
@@ -333,7 +338,7 @@ def test_every_write_is_recorded_in_the_mutation_log(client):
     )
     rows = logdb.mutation_rows()
     assert len(rows) == 1
-    assert rows[0]["payload"] == {"status": "PAUSED"}
+    assert rows[0]["payload"] == {"status": "PAUSED", "validate_only": False}
     assert rows[0]["ok"] == 1
 
 

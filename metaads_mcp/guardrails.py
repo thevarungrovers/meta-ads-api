@@ -7,6 +7,10 @@ Two kinds of limit, and the second matters more:
 * **Per-session** -- at most N applies, at most X total projected daily spend
   added. A per-call limit does nothing against a loop making four hundred
   individually-legal changes, which is the failure mode an agent actually has.
+* **Per-day** -- the same two bounds for the LOCAL calendar day, counted from
+  the ledger rather than from memory. The session counters reset whenever the
+  server process restarts, and an agent in continuous use restarts it often,
+  so on their own they bound a session and nothing longer.
 
 Values come from ``guardrails.toml`` at the repo root, falling back to the
 constants below. A key that is misspelled raises at startup rather than being
@@ -16,10 +20,11 @@ as protection that is not there.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import tomllib
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -37,6 +42,21 @@ DEFAULTS: dict[str, object] = {
     "max_projected_delta_per_day": Decimal("200.00"),
     "max_applies_per_session": 20,
     "max_projected_session_delta": Decimal("500.00"),
+    # how many placements an ad change previews (most-spent first)
+    "max_preview_formats": 5,
+    # bidding: the highest COST_CAP target, and the lowest ROAS floor allowed
+    # (a near-zero floor is an uncapped bid by another name)
+    "max_cost_cap": Decimal("50.00"),
+    "min_roas_floor": Decimal("0.50"),
+    # targeting: audiences per ad set (include + exclude), the overlap and
+    # exclusion thresholds that WARN, and the reach move that FAILs
+    "max_audiences_per_ad_set": 10,
+    "overlap_warn_pct": 50.0,
+    "exclusion_swallow_pct": 80.0,
+    "max_reach_change_pct": 80.0,
+    # the local calendar day, across restarts and processes
+    "max_applies_per_day": 40,
+    "max_projected_delta_per_day_total": Decimal("1000.00"),
 }
 
 _DECIMAL_KEYS = {
@@ -44,9 +64,24 @@ _DECIMAL_KEYS = {
     "max_bid_amount",
     "max_projected_delta_per_day",
     "max_projected_session_delta",
+    "max_projected_delta_per_day_total",
+    "max_cost_cap",
+    "min_roas_floor",
 }
-_FLOAT_KEYS = {"max_budget_change_pct", "max_bid_increase_pct"}
-_INT_KEYS = {"max_entities_per_call", "max_applies_per_session"}
+_FLOAT_KEYS = {
+    "max_budget_change_pct",
+    "max_bid_increase_pct",
+    "overlap_warn_pct",
+    "exclusion_swallow_pct",
+    "max_reach_change_pct",
+}
+_INT_KEYS = {
+    "max_entities_per_call",
+    "max_applies_per_session",
+    "max_preview_formats",
+    "max_applies_per_day",
+    "max_audiences_per_ad_set",
+}
 
 
 class WritesDisabled(RuntimeError):
@@ -71,9 +106,25 @@ class Limits:
     max_projected_delta_per_day: Decimal
     max_applies_per_session: int
     max_projected_session_delta: Decimal
+    max_preview_formats: int = 5
+    max_applies_per_day: int = 40
+    max_projected_delta_per_day_total: Decimal = Decimal("1000.00")
+    max_cost_cap: Decimal = Decimal("50.00")
+    min_roas_floor: Decimal = Decimal("0.50")
+    max_audiences_per_ad_set: int = 10
+    overlap_warn_pct: float = 50.0
+    exclusion_swallow_pct: float = 80.0
+    max_reach_change_pct: float = 80.0
     allowed_account_ids: tuple[str, ...] = ()
     allowed_campaign_ids: tuple[str, ...] = ()
     allowed_currencies: tuple[str, ...] = ("CAD",)
+    #: The ONE currency the per-change, session and daily spend totals are
+    #: counted in. Empty means the first allowed currency.
+    cap_currency: str = ""
+    #: Configured conversions into the cap currency: (code, rate) pairs, where
+    #: one unit of ``code`` is ``rate`` units of the cap currency. Never
+    #: invented: a change in a currency with no rate here is refused.
+    currency_rates: tuple[tuple[str, Decimal], ...] = ()
 
     def describe(self) -> dict[str, object]:
         return {
@@ -85,10 +136,23 @@ class Limits:
             "max_projected_delta_per_day": str(self.max_projected_delta_per_day),
             "max_applies_per_session": self.max_applies_per_session,
             "max_projected_session_delta": str(self.max_projected_session_delta),
+            "max_preview_formats": self.max_preview_formats,
+            "max_applies_per_day": self.max_applies_per_day,
+            "max_cost_cap": str(self.max_cost_cap),
+            "min_roas_floor": str(self.min_roas_floor),
+            "max_audiences_per_ad_set": self.max_audiences_per_ad_set,
+            "overlap_warn_pct": self.overlap_warn_pct,
+            "exclusion_swallow_pct": self.exclusion_swallow_pct,
+            "max_reach_change_pct": self.max_reach_change_pct,
+            "max_projected_delta_per_day_total": str(
+                self.max_projected_delta_per_day_total
+            ),
             "allowed_account_ids": list(self.allowed_account_ids)
             or ["(only META_ADS_ACCOUNT_ID)"],
             "allowed_campaign_ids": list(self.allowed_campaign_ids) or ["(all)"],
             "allowed_currencies": list(self.allowed_currencies),
+            "cap_currency": cap_currency(self),
+            "currency_rates": {code: str(rate) for code, rate in self.currency_rates},
         }
 
 
@@ -135,6 +199,35 @@ def load_limits(path: Path | None = None) -> Limits:
         str(c).upper() for c in scope.get("allowed_currencies", ["CAD"])
     )
 
+    cap = str(scope.get("cap_currency", "") or "").strip().upper()
+    if cap and cap not in currencies:
+        raise GuardrailConfigError(
+            f"guardrails.toml: [scope] cap_currency {cap!r} is not one of "
+            f"allowed_currencies ({', '.join(currencies)})."
+        )
+    rates: list[tuple[str, Decimal]] = []
+    for code, raw in (scope.get("currency_rates") or {}).items():
+        try:
+            rate = Decimal(str(raw))
+        except InvalidOperation as exc:
+            raise GuardrailConfigError(
+                f"guardrails.toml: [scope.currency_rates] {code} = {raw!r} is not a number."
+            ) from exc
+        if not rate.is_finite() or rate <= 0:
+            raise GuardrailConfigError(
+                f"guardrails.toml: [scope.currency_rates] {code} = {raw!r} must be above 0."
+            )
+        if str(code).upper() not in currencies:
+            # A rate is how a currency's spend is COUNTED, not permission to
+            # spend in it: one for a currency outside the list is a typo or
+            # a list somebody forgot to widen, and either way it is refused.
+            raise GuardrailConfigError(
+                f"guardrails.toml: [scope.currency_rates] {code} is not one of "
+                f"allowed_currencies ({', '.join(currencies)}). Add it there too, "
+                f"or remove the rate."
+            )
+        rates.append((str(code).upper(), rate))
+
     # An env var can narrow the scope further but never widen it: a
     # machine-local override that could ADD accounts would defeat the committed
     # file.
@@ -150,6 +243,8 @@ def load_limits(path: Path | None = None) -> Limits:
         allowed_account_ids=accounts,
         allowed_campaign_ids=campaigns,
         allowed_currencies=currencies,
+        cap_currency=cap,
+        currency_rates=tuple(rates),
     )
 
 
@@ -173,8 +268,18 @@ class Check:
     name: str
     ok: bool
     detail: str
+    #: Deliberately not applied to this change (it still passes). Rendered as
+    #: SKIP so a human reading the preview sees the bound was considered and
+    #: why it does not apply, rather than an OK that suggests it was checked.
+    skipped: bool = False
+    #: A finding worth reading that does not block (an ad check's WARN).
+    warn: bool = False
 
     def render(self) -> str:
+        if self.skipped:
+            return f"SKIP {self.name} ({self.detail})"
+        if self.ok and self.warn:
+            return f"WARN {self.name}: {self.detail}"
         return f"{'OK  ' if self.ok else 'FAIL'} {self.name}: {self.detail}"
 
 
@@ -190,13 +295,17 @@ class SessionCounters:
     def limits(self) -> Limits:
         return self._limits
 
-    def would_exceed(self, projected_delta: Decimal) -> str | None:
-        """Why this apply would break the session budget, or None."""
-        if self.applies + 1 > self._limits.max_applies_per_session:
+    def would_exceed(self, projected_delta: Decimal, weight: int = 1) -> str | None:
+        """Why this apply would break the session budget, or None.
+
+        ``weight`` is what the apply costs: 1 for most, 3 for a creation.
+        """
+        if self.applies + weight > self._limits.max_applies_per_session:
             return (
                 f"session apply limit reached: {self.applies} of "
-                f"{self._limits.max_applies_per_session} already used. Restart "
-                "the server deliberately if more are genuinely needed."
+                f"{self._limits.max_applies_per_session} already used"
+                + (f" and this one costs {weight}" if weight > 1 else "")
+                + ". Restart the server deliberately if more are genuinely needed."
             )
         total = self.projected_delta + max(projected_delta, Decimal("0"))
         if total > self._limits.max_projected_session_delta:
@@ -207,8 +316,8 @@ class SessionCounters:
             )
         return None
 
-    def record(self, projected_delta: Decimal) -> None:
-        self.applies += 1
+    def record(self, projected_delta: Decimal, weight: int = 1) -> None:
+        self.applies += weight
         self.projected_delta += max(projected_delta, Decimal("0"))
 
     def snapshot(self) -> dict[str, object]:
@@ -224,6 +333,129 @@ class SessionCounters:
                     self._limits.max_projected_session_delta - self.projected_delta,
                 )
             ),
+        }
+
+
+def local_midnight_utc(now: dt.datetime | None = None) -> str:
+    """Today's LOCAL midnight, as the UTC ISO string the ledger stores.
+
+    "Today" is the operator's calendar day, not UTC's: in the evening in the
+    Americas the UTC date has already rolled over, and a cap counted in UTC
+    would reset in the middle of it. The ledger's ``at`` column is UTC ISO
+    (``logdb._now()``), so the boundary is computed locally and converted,
+    which keeps the query a plain indexed string comparison.
+
+    >>> local_midnight_utc(dt.datetime(2026, 11, 18, 21, 0, tzinfo=dt.timezone(dt.timedelta(hours=-5))))
+    '2026-11-18T05:00:00+00:00'
+    """
+    if now is None or now.tzinfo is None:
+        # The SYSTEM zone: midnight as a naive local time, then astimezone(),
+        # which asks the zone rules for the offset AT MIDNIGHT. Taking the
+        # offset of "now" instead is an hour off on a DST-change day.
+        local = now or dt.datetime.now()
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone()
+    else:
+        # A zone-aware ``now`` (a ZoneInfo) recomputes its offset for the
+        # replaced time on its own; a fixed offset is the caller's choice.
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(dt.timezone.utc).isoformat()
+
+
+class DailyUsage:
+    """Today's applies and projected spend, read back from the ledger.
+
+    No table of its own and no in-memory state: every question is answered by
+    the ``changes`` rows since local midnight, so two server processes -- or a
+    process restarted ten times today -- see the same numbers.
+
+    Counted the way SessionCounters counts: every ``apply_*`` and
+    ``revert_change`` row with ``ok = 1``. A batch counts once (its rows share
+    a batch_id and each carries the whole batch's delta and weight), a
+    creation costs its weight, and a reduction refunds nothing.
+    """
+
+    def __init__(self, limits: Limits, now: dt.datetime | None = None) -> None:
+        self._limits = limits
+        self._now = now
+
+    def usage(self) -> tuple[int, Decimal]:
+        from metaads_reporting import logdb
+
+        groups: dict[str, dict] = {}
+        for row in logdb.changes_since(local_midnight_utc(self._now)):
+            tool = row.get("tool") or ""
+            if not (tool.startswith("apply_") or tool == "revert_change"):
+                continue
+            inverse = row.get("inverse") if isinstance(row.get("inverse"), dict) else {}
+            groups.setdefault(inverse.get("batch_id") or row["entry_id"], row)
+        applies = 0
+        delta = Decimal("0")
+        for row in groups.values():
+            inverse = row.get("inverse") if isinstance(row.get("inverse"), dict) else {}
+            # weight 0 is explicit: a copy's follow-up renames are part of
+            # the create that already paid for them.
+            weight = inverse.get("weight")
+            applies += 1 if weight is None or weight == "" else int(weight)
+            try:
+                value = Decimal(str(row.get("projected_daily_spend_delta") or "0"))
+            except InvalidOperation:
+                value = Decimal("0")
+            delta += max(value, Decimal("0"))
+        return applies, delta
+
+    def would_exceed(self, projected_delta: Decimal, weight: int = 1) -> str | None:
+        applies, delta = self.usage()
+        if applies + weight > self._limits.max_applies_per_day:
+            return (
+                f"daily apply limit reached: {applies} of "
+                f"{self._limits.max_applies_per_day} already used today (local "
+                "time, across every server process)"
+                + (f" and this one costs {weight}" if weight > 1 else "")
+                + ". It resets at local midnight. Stop and tell the human; this "
+                "cap is set in guardrails.toml."
+            )
+        check = self.check(projected_delta, delta)
+        if not check.ok:
+            return (
+                f"daily spend total reached: this change {check.detail} "
+                f"(max_projected_delta_per_day_total = "
+                f"{self._limits.max_projected_delta_per_day_total}, local day, "
+                "across every server process). It resets at local midnight."
+            )
+        return None
+
+    def check(self, projected_delta: Decimal, used: Decimal | None = None) -> Check:
+        """The daily-total line for a preview: "uses X of today's remaining Y".
+
+        Both figures, always: "over the ceiling" alone does not tell a human
+        whether the change is too big or the day is already spent.
+        """
+        if used is None:
+            used = self.usage()[1]
+        remaining = max(
+            Decimal("0"), self._limits.max_projected_delta_per_day_total - used
+        )
+        wanted = max(projected_delta, Decimal("0"))
+        return Check(
+            "max_projected_delta_per_day_total",
+            wanted <= remaining,
+            f"uses {wanted:.2f} of today's remaining {remaining:.2f}",
+        )
+
+    def snapshot(self) -> dict[str, object]:
+        applies, delta = self.usage()
+        return {
+            "day_started_at_utc": local_midnight_utc(self._now),
+            "applies_used": applies,
+            "applies_remaining": max(0, self._limits.max_applies_per_day - applies),
+            "projected_delta": str(delta),
+            "projected_delta_remaining": str(
+                max(
+                    Decimal("0"),
+                    self._limits.max_projected_delta_per_day_total - delta,
+                )
+            ),
+            "note": "scripts/manage.py writes are not counted here",
         }
 
 
@@ -259,6 +491,49 @@ def check_currency(limits: Limits, currency: str | None) -> Check:
         "currency_allowed",
         ok,
         f"{currency or '(unknown)'} against {', '.join(limits.allowed_currencies)}",
+    )
+
+
+def cap_currency(limits: Limits) -> str:
+    """The currency every spend total and limit is counted in."""
+    if limits.cap_currency:
+        return limits.cap_currency.upper()
+    return (limits.allowed_currencies[0] if limits.allowed_currencies else "").upper()
+
+
+def to_cap_currency(limits: Limits, amount: Decimal, currency: str | None) -> Decimal | None:
+    """``amount`` in ``currency``, counted in the cap currency; None when no
+    configured rate converts it. No rate is ever invented."""
+    code = (currency or "").upper()
+    if code and code == cap_currency(limits):
+        return amount
+    rate = dict(limits.currency_rates).get(code)
+    if rate is None:
+        return None
+    # Directed, never half-even: an increase is rounded UP so it is never
+    # under-counted against the totals, and a cut is rounded down.
+    converted = amount * rate
+    return converted.quantize(Decimal("0.01"),
+                              rounding=ROUND_CEILING if converted >= 0 else ROUND_FLOOR)
+
+
+def check_cap_currency(limits: Limits, currency: str | None) -> Check:
+    """The totals and limits are in ONE currency: a change in another one is
+    refused unless guardrails.toml configures a rate for it."""
+    cap = cap_currency(limits)
+    code = (currency or "(unknown)").upper()
+    if code == cap:
+        return Check("cap_currency", True, f"{code}: the currency the totals are counted in")
+    rate = dict(limits.currency_rates).get(code)
+    if rate is not None:
+        return Check("cap_currency", True,
+                     f"{code} counted in {cap} at the configured rate {rate} ([scope.currency_rates])")
+    return Check(
+        "cap_currency", False,
+        f"this entity is in {code}, but the daily and session totals and the spend "
+        f"limits are counted in {cap}; mixing them would add {code} amounts to {cap} "
+        f"ones. No conversion is configured, and none is guessed: add a rate under "
+        f"[scope.currency_rates] in guardrails.toml, or make this change elsewhere",
     )
 
 

@@ -13,12 +13,13 @@ safe:
   :class:`AmbiguousMatch`, which carries the candidates so the caller can print
   them. Picking one for the user is how the wrong campaign gets paused.
 
-MATCHING HAPPENS IN PYTHON, NOT IN THE API, and that is deliberate. Meta's
-``filtering`` ``CONTAIN`` operator is not documented as case-insensitive and
-does not behave like Google's ``LIKE``, so a half-remembered capitalisation
-silently returns nothing -- which reads as "no such campaign" rather than "your
-shift key". Fetching the account's objects and matching here costs one page and
-is predictable.
+THE FINAL MATCH HAPPENS IN PYTHON, case-folded. Meta's ``filtering``
+``CONTAIN`` is used as a PRE-filter (:func:`edge_search`), because fetching
+one page and filtering it afterwards silently missed every match past the
+first page on an account with more objects than the limit. CONTAIN is not
+documented as case-insensitive, so when the pre-filtered request finds nothing
+the search falls back to walking the edge unfiltered (bounded) and matching
+here -- a half-remembered capitalisation must not read as "no such campaign".
 """
 
 from __future__ import annotations
@@ -48,6 +49,18 @@ class Candidate:
 
 class NotFound(MutationError):
     """Nothing matched the search."""
+
+
+def is_not_found(exc: BaseException) -> bool:
+    """Whether a Graph error means "no such object (that this token can see)".
+
+    Code 100 with subcode 33 is Meta's answer for both a missing object and a
+    missing permission on it; code 803 is "some of the aliases you requested do
+    not exist". Anything else -- a rate limit, an expired token -- is not.
+    """
+    code = getattr(exc, "code", None)
+    subcode = getattr(exc, "subcode", None)
+    return (code == 100 and subcode == 33) or code == 803
 
 
 class AmbiguousMatch(MutationError):
@@ -97,3 +110,51 @@ def match_by_name(
     if len(partial) > 1:
         raise AmbiguousMatch(entity, needle, [to_candidate(r) for r in partial])
     return partial[0]
+
+
+def edge_search(
+    client,
+    parent: str,
+    edge: str,
+    fields: tuple[str, ...],
+    *,
+    needle: str | None,
+    limit: int,
+    statuses: list[str],
+    max_pages: int = 10,
+) -> tuple[list[dict[str, Any]], bool]:
+    """(rows, truncated) for an edge, narrowed by name and effective_status.
+
+    Asks for ``limit + 1`` so ``truncated`` is a fact, not a guess: True means
+    there are more matches than were returned.
+    """
+    import json
+
+    base = {"effective_status": json.dumps(statuses)}
+
+    def fetch(extra: dict[str, Any], want: int) -> list[dict[str, Any]]:
+        return client.read.edge(
+            parent, edge, fields,
+            limit=min(max(want, 25), 500),
+            max_items=want,
+            max_pages=max_pages,
+            **base, **extra,
+        )
+
+    if not needle:
+        rows = fetch({}, limit + 1)
+        return rows[:limit], len(rows) > limit
+
+    target = needle.casefold()
+    filtered = fetch(
+        {"filtering": json.dumps([{"field": "name", "operator": "CONTAIN", "value": needle}])},
+        limit + 1,
+    )
+    rows = [r for r in filtered if target in (r.get("name") or "").casefold()]
+    if not rows:
+        # CONTAIN may be case-sensitive: walk unfiltered, bounded, and fold here.
+        walked = fetch({}, 200 * max_pages)
+        rows = [r for r in walked if target in (r.get("name") or "").casefold()]
+        if len(walked) >= 200 * max_pages:
+            return rows[:limit], True
+    return rows[:limit], len(rows) > limit

@@ -13,6 +13,7 @@ from metaads_reporting.graph import (
     READ_METHODS,
     WRITE_RATE_LIMIT_WINDOW_SECONDS,
     backoff_delay,
+    MAX_INLINE_WAIT_SECONDS,
     WRITE_METHODS,
     GraphAPIError,
     GraphError,
@@ -288,11 +289,60 @@ def test_a_read_still_retries_everything_transient(monkeypatch):
 
 
 def test_write_rate_limit_retries_are_bounded(monkeypatch):
+    """Retried while the wait fits inside a tool call, then handed back.
+
+    The first rate-limit wait (32-48s) fits under MAX_INLINE_WAIT_SECONDS; the
+    second (64s+) does not, so the error goes to the caller with retry_after
+    set instead of the transport sleeping past the MCP client's timeout.
+    """
     monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
     session = FakeSession([error_response(613, status=400) for _ in range(10)])
-    with pytest.raises(GraphAPIError):
+    with pytest.raises(GraphAPIError) as caught:
         transport(session).request("POST", "123", data={"status": "PAUSED"})
-    assert len(session.calls) == MAX_WRITE_RETRIES + 1
+    assert 2 <= len(session.calls) <= MAX_WRITE_RETRIES + 1
+    assert caught.value.retry_after > MAX_INLINE_WAIT_SECONDS
+
+
+def test_metas_own_estimate_is_honoured_and_a_long_one_fails_fast(monkeypatch):
+    import json as _json
+
+    slept = []
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: slept.append(a))
+    usage = {"1234567890": [{"type": "ads_management", "call_count": 100,
+                             "estimated_time_to_regain_access": 7}]}
+    limited = error_response(80004, status=400)
+    limited.headers = {"X-Business-Use-Case-Usage": _json.dumps(usage)}
+    session = FakeSession([limited, FakeResponse({"data": []})])
+    with pytest.raises(GraphAPIError) as caught:
+        transport(session).request("GET", "act_1/campaigns")
+    assert len(session.calls) == 1, "slept instead of answering"
+    assert caught.value.retry_after == 7 * 60
+    assert slept == []
+
+
+def test_a_short_estimate_is_waited_out(monkeypatch):
+    import json as _json
+
+    slept = []
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff",
+                        lambda attempt, error=None: slept.append(error.retry_after))
+    limited = error_response(17, status=400)
+    limited.headers = {"X-Ad-Account-Usage": _json.dumps({"acc_id_util_pct": 100,
+                                                          "reset_time_duration": 20})}
+    session = FakeSession([limited, FakeResponse({"data": []})])
+    transport(session).request("GET", "act_1/campaigns")
+    assert slept == [20.0]
+
+
+def test_reduce_the_amount_of_data_is_not_retried(monkeypatch):
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+    session = FakeSession([
+        error_response(1, status=500, message="Please reduce the amount of data you're asking for")
+        for _ in range(5)
+    ])
+    with pytest.raises(GraphAPIError):
+        transport(session).request("GET", "act_1/insights")
+    assert len(session.calls) == 1
 
 
 def test_a_permanent_write_error_is_not_retried(monkeypatch):
@@ -336,10 +386,20 @@ def test_is_rate_limit_distinguishes_refusal_from_ambiguity():
 
 def test_retries_are_bounded(monkeypatch):
     monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
-    session = FakeSession([error_response(4, status=400) for _ in range(10)])
+    session = FakeSession([error_response(2, status=400) for _ in range(10)])
     with pytest.raises(GraphAPIError):
         transport(session).get("me")
     assert len(session.calls) == 5  # 1 attempt + MAX_READ_RETRIES
+
+
+def test_a_rate_limited_read_fails_fast_instead_of_sleeping_for_minutes(monkeypatch):
+    """4 retries x 32s x n outlived every MCP client's tool timeout."""
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+    session = FakeSession([error_response(4, status=400) for _ in range(10)])
+    with pytest.raises(GraphAPIError) as caught:
+        transport(session).get("me")
+    assert len(session.calls) <= 2
+    assert caught.value.retry_after > MAX_INLINE_WAIT_SECONDS
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])

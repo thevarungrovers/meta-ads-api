@@ -121,6 +121,15 @@ EXCLUSIVE_BREAKDOWNS = (
     frozenset({"country", "region", "dma"}),
 )
 
+#: Breakdowns a report may ask for. Not every combination is valid -- Meta
+#: rules on the rest -- but a name outside this set is a typo, refused here.
+ALLOWED_BREAKDOWNS = frozenset({
+    "age", "gender", "country", "region", "dma",
+    "publisher_platform", "platform_position", "device_platform",
+    "impression_device", "hourly_stats_aggregated_by_advertiser_time_zone",
+    "hourly_stats_aggregated_by_audience_time_zone",
+})
+
 
 def validate_level(level: str) -> str:
     """Return a valid level, or raise.
@@ -163,6 +172,38 @@ def time_range(since: date | str, until: date | str) -> dict[str, str]:
     if start > end:
         raise InsightsError(f"since {start} is after until {end}.")
     return {"since": start, "until": end}
+
+
+#: N -> the date_preset Meta evaluates in the ACCOUNT's time zone for "the N
+#: days ending yesterday".
+DAY_PRESETS = {3: "last_3d", 7: "last_7d", 14: "last_14d", 28: "last_28d",
+               30: "last_30d", 90: "last_90d"}
+
+
+def window_for_days(days: int, timezone_name: str | None = None) -> dict[str, str]:
+    """The ``days`` days ending yesterday, in the ACCOUNT's time zone.
+
+    A date_preset where one exists (Meta evaluates it in the account's zone);
+    otherwise a range computed in ``timezone_name``, not this machine's zone --
+    an account in another zone would otherwise be asked for the wrong days.
+
+    >>> window_for_days(7)
+    {'date_preset': 'last_7d'}
+    >>> sorted(window_for_days(10, "UTC"))
+    ['since', 'until']
+    """
+    if days in DAY_PRESETS:
+        return {"date_preset": DAY_PRESETS[days]}
+    today = None
+    if timezone_name:
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            today = datetime.now(ZoneInfo(timezone_name)).date()
+        except Exception:  # noqa: BLE001 - an unknown zone falls back to local
+            today = None
+    return last_n_days(days, today=today)
 
 
 def last_n_days(days: int, *, today: date | None = None) -> dict[str, str]:
@@ -365,6 +406,15 @@ def _check_breakdowns(breakdowns: Sequence[str]) -> None:
     """
     if len(set(breakdowns)) != len(breakdowns):
         raise InsightsError(f"Duplicate breakdown in {list(breakdowns)}.")
+    unknown = sorted(set(breakdowns) - ALLOWED_BREAKDOWNS)
+    if unknown:
+        raise InsightsError(
+            f"Unknown breakdown {', '.join(unknown)}. Known: "
+            f"{', '.join(sorted(ALLOWED_BREAKDOWNS))}."
+        )
+    hourly = [b for b in breakdowns if b.startswith("hourly_stats")]
+    if hourly and len(breakdowns) > 1:
+        raise InsightsError("An hourly breakdown cannot be combined with another breakdown.")
     for group in EXCLUSIVE_BREAKDOWNS:
         clash = sorted(group.intersection(breakdowns))
         if len(clash) > 1:
@@ -406,8 +456,7 @@ def summarise(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
 
     from .fields import as_decimal
 
-    totals = {"spend": Decimal(0), "impressions": Decimal(0), "clicks": Decimal(0),
-              "reach": Decimal(0)}
+    totals = {"spend": Decimal(0), "impressions": Decimal(0), "clicks": Decimal(0)}
     rows = list(rows)
     for row in rows:
         for key in totals:
@@ -426,8 +475,8 @@ def summarise(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
         )
     if totals["clicks"]:
         out["cpc"] = str((totals["spend"] / totals["clicks"]).quantize(Decimal("0.0001")))
-    # Reach is DELIBERATELY not used to derive a frequency here: reach cannot be
-    # summed across rows -- the same person reached on two days is one person,
-    # and adding the rows counts them twice. The per-row value is the only one
-    # that means anything.
+    # Reach is DELIBERATELY not totalled, nor a frequency derived from it: reach
+    # cannot be summed across rows -- the same person reached on two days is one
+    # person, and adding the rows counts them twice. The per-row value is the
+    # only one that means anything.
     return out

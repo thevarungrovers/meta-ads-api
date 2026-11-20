@@ -277,6 +277,12 @@ def build_spec(
     if creative.shape == ASSET_FEED:
         return _build_asset_feed(creative, edits, mapping)
 
+    listed = sorted(label for label, value in edits.items() if isinstance(value, (list, tuple)))
+    if listed:
+        raise MutationError(
+            f"{', '.join(listed)}: this creative is in one language, so give a single "
+            "string. A list (one per locale) is only for a multi-locale creative."
+        )
     spec = creative.story_spec
     block = dict(spec.get(creative.shape) or {})
     for label, value in edits.items():
@@ -443,3 +449,177 @@ def social_proof(client: MutatingMetaAdsClient, creative: Creative) -> dict[str,
         ),
         "shares": (post.get("shares") or {}).get("count"),
     }
+
+
+# ---------------------------------------------------------------------------
+# A new multi-locale creative
+# ---------------------------------------------------------------------------
+
+#: Language -> Meta locale ids, as search_targeting(type="locale") returns
+#: them: French (France) 9 and French (Canada) 44; English (US) 6 and
+#: English (UK) 24. Any other language needs explicit ``locale_ids``.
+LANGUAGE_LOCALES: dict[str, tuple[int, ...]] = {"fr": (9, 44), "en": (6, 24)}
+
+#: Where a locale's vertical (story) image is shown instead of its feed image.
+STORY_PLACEMENTS: dict[str, Any] = {
+    "publisher_platforms": ["facebook", "instagram"],
+    "instagram_positions": ["story", "reels"],
+    "facebook_positions": ["story", "facebook_reels"],
+}
+
+#: Locale text field -> (asset_feed_spec list, the entry's key, rule label, label suffix).
+_LOCALE_TEXT = (
+    ("primary_text", "bodies", "text", "body_label", "body"),
+    ("headline", "titles", "text", "title_label", "title"),
+    ("description", "descriptions", "text", "description_label", "description"),
+    ("link", "link_urls", "website_url", "link_url_label", "url"),
+)
+
+
+#: A local file not uploaded yet stands in a feed's image entry as this, then
+#: its path; :func:`pending_paths` finds them and the apply swaps in the hash.
+#: It starts with the marker every preview check recognises as "no hash yet".
+PENDING_IMAGE = "<pending upload>"
+
+
+def pending_hash(path: str) -> str:
+    """The placeholder for a local file in an image entry's ``hash``."""
+    return f"{PENDING_IMAGE} {path}"
+
+
+def pending_paths(feed: dict[str, Any]) -> list[str]:
+    """The local files a feed still has to upload, each once, in order.
+
+    >>> pending_paths({"images": [{"hash": pending_hash("/a.png")}, {"hash": "h"},
+    ...                           {"hash": pending_hash("/a.png")}]})
+    ['/a.png']
+    """
+    found = (str(e.get("hash") or "") for e in feed.get("images") or [])
+    return list(dict.fromkeys(h[len(PENDING_IMAGE) + 1:] for h in found
+                              if h.startswith(PENDING_IMAGE + " ")))
+
+
+def fill_pending(feed: dict[str, Any], hashes: dict[str, str]) -> dict[str, Any]:
+    """The feed with each local file's placeholder replaced by its uploaded hash."""
+    images = [{**e, "hash": hashes.get(str(e.get("hash") or "")[len(PENDING_IMAGE) + 1:], e.get("hash"))}
+              if str(e.get("hash") or "").startswith(PENDING_IMAGE + " ") else e
+              for e in feed.get("images") or []]
+    return {**feed, "images": images} if images else feed
+
+
+def localized_feed(
+    locales: list[dict[str, Any]], *, call_to_action: str, default_language: str | None = None
+) -> dict[str, Any]:
+    """An ``asset_feed_spec`` that shows each viewer the copy in their language.
+
+    Built the way Ads Manager builds one: every text and media entry carries an
+    adlabel named after its language (``fr_body``, ``en_img``...), and one
+    ``asset_customization_rules`` entry per language points at those labels for
+    that language's locale ids. A locale may add a story image (hash or local
+    path): a vertical image Stories and Reels show instead of the feed image.
+    A local ``image_path`` goes in as a placeholder the apply uploads. The
+    ``default_language`` rule (the first locale unless named) is flagged
+    ``is_default``: it is what everyone else sees.
+
+    >>> feed = localized_feed([
+    ...     {"language": "fr", "primary_text": "Bonjour", "headline": "Titre",
+    ...      "link": "https://example.com/fr", "image_hash": "a"},
+    ...     {"language": "en", "primary_text": "Hello", "headline": "Title",
+    ...      "link": "https://example.com/en", "image_hash": "b"}], call_to_action="LEARN_MORE")
+    >>> [b["text"] for b in feed["bodies"]], feed["ad_formats"]
+    (['Bonjour', 'Hello'], ['SINGLE_IMAGE'])
+    >>> [(d["text"], d["adlabels"]) for d in feed["descriptions"]]
+    [('', [{'name': 'fr_description'}]), ('', [{'name': 'en_description'}])]
+    >>> [(r["is_default"], r["customization_spec"]["locales"]) for r in feed["asset_customization_rules"]]
+    [(True, [9, 44]), (False, [6, 24])]
+    """
+    if len(locales) < 2:
+        raise MutationError("A multi-locale creative needs at least two locales; "
+                            "for one language, leave locales out.")
+    languages = [str(loc.get("language") or "").strip().lower() for loc in locales]
+    if not all(languages) or len(set(languages)) != len(languages):
+        raise MutationError(f"Each locale needs its own language; got {languages}.")
+    default = (default_language or languages[0]).strip().lower()
+    if default not in languages:
+        raise MutationError(f"default_language {default!r} is not one of {languages}.")
+    for field, *_ in _LOCALE_TEXT:
+        present = [bool(loc.get(field)) for loc in locales]
+        if any(present) and not all(present):
+            raise MutationError(
+                f"{field} is given for some locales and not others; give it for every "
+                "locale or for none, or the rules point at copy that does not exist.")
+    if not any(loc.get("description") for loc in locales):
+        # An AD on a language feed needs a description per language ("Too Few
+        # News Feed Link Descriptions"), though the creative alone is accepted
+        # without. An empty one per language is what passes, as Ads Manager sends.
+        locales = [{**loc, "description": ""} for loc in locales]
+    if not all(loc.get("link") for loc in locales):
+        raise MutationError("Every locale needs a link.")
+    # Checked live (validate_only, 2026-11-20): Meta accepts the creative
+    # without them, then refuses every AD that uses it -- "Too Few Body Texts",
+    # "Too Few Headline Texts" -- and an empty text does not pass either.
+    missing = [f for f in ("primary_text", "headline") if not all(loc.get(f) for loc in locales)]
+    if missing:
+        raise MutationError(
+            f"Every locale needs {' and '.join(missing)}: Meta refuses an ad on a "
+            "multi-language creative without body and headline text in each language.")
+    kinds = set()
+    for lang, loc in zip(languages, locales):
+        given = [k for k in ("image_hash", "image_path", "video_id") if loc.get(k)]
+        if len(given) != 1:
+            raise MutationError(f"{lang}: give exactly one of image_hash, image_path or video_id.")
+        kinds.add("video" if given[0] == "video_id" else "image")
+        story = [k for k in ("story_image_hash", "story_image_path") if loc.get(k)]
+        if len(story) > 1:
+            raise MutationError(f"{lang}: give one of story_image_hash or story_image_path.")
+        if story and given[0] == "video_id":
+            raise MutationError(f"{lang}: a Stories image goes with an image ad, not a video.")
+    if len(kinds) != 1:
+        raise MutationError("Every locale must use the same kind of media: all images or "
+                            "all videos. Meta builds one ad format for every language.")
+    video = kinds == {"video"}
+
+    feed: dict[str, Any] = {
+        "ad_formats": ["SINGLE_VIDEO" if video else "SINGLE_IMAGE"],
+        "optimization_type": "LOCALIZED_PLACEMENTS",
+        "call_to_action_types": [call_to_action],
+    }
+    rules: list[dict[str, Any]] = []
+
+    def add(key: str, entry: dict[str, Any], label: str) -> dict[str, str]:
+        entry["adlabels"] = [{"name": label}]
+        feed.setdefault(key, []).append(entry)
+        return {"name": label}
+
+    for lang, loc in zip(languages, locales):
+        ids = loc.get("locale_ids") or LANGUAGE_LOCALES.get(lang)
+        if not ids:
+            raise MutationError(
+                f"{lang}: no built-in locale ids (only {', '.join(LANGUAGE_LOCALES)}); pass "
+                "locale_ids from search_targeting(type='locale').")
+        labels: dict[str, Any] = {}
+        for field, key, text_key, rule_key, suffix in _LOCALE_TEXT:
+            if loc.get(field) is not None and (loc[field] or field == "description"):
+                labels[rule_key] = add(key, {text_key: loc[field]}, f"{lang}_{suffix}")
+        if video:
+            entry = {"video_id": str(loc["video_id"])}
+            if loc.get("thumbnail_hash"):
+                entry["thumbnail_hash"] = loc["thumbnail_hash"]
+            elif loc.get("thumbnail_url"):
+                entry["thumbnail_url"] = loc["thumbnail_url"]
+            labels["video_label"] = add("videos", entry, f"{lang}_video")
+        else:
+            labels["image_label"] = add(
+                "images", {"hash": loc.get("image_hash") or pending_hash(loc["image_path"])},
+                f"{lang}_img")
+        spec = {"locales": [int(i) for i in ids]}
+        if loc.get("story_image_hash") or loc.get("story_image_path"):
+            story = add("images", {"hash": loc.get("story_image_hash")
+                                   or pending_hash(loc["story_image_path"])}, f"{lang}_story")
+            rules.append({**labels, "image_label": story, "is_default": False,
+                          "customization_spec": {**spec, **STORY_PLACEMENTS}})
+        # The default is the default language's own rule, flagged: Meta refuses
+        # an extra copy of it as "an unsupported targeting field".
+        rules.append({**labels, "is_default": lang == default, "customization_spec": spec})
+    feed["asset_customization_rules"] = rules
+    return feed
