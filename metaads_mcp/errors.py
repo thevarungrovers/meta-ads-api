@@ -32,9 +32,10 @@ mapper and it converts everything:
 from __future__ import annotations
 
 import functools
-import re
 
 from mcp.server.mcpserver.exceptions import ToolError
+
+from metaads_reporting.redaction import redact_text
 
 AUTH_EXPIRED = "AUTH_EXPIRED"
 PERMISSION = "PERMISSION"
@@ -50,10 +51,6 @@ INTERNAL = "INTERNAL"
 #: write limit on a campaign node is one call per 30 seconds.
 DEFAULT_RETRY_AFTER = 60
 
-_SECRET = re.compile(
-    r"(access_token|appsecret_proof|app_secret|client_secret)=[^&\s'\"]+",
-    re.IGNORECASE,
-)
 
 
 def redact(text: str) -> str:
@@ -62,7 +59,7 @@ def redact(text: str) -> str:
     >>> redact("GET /v23.0/me?access_token=EAAB123&fields=id")
     'GET /v23.0/me?access_token=<redacted>&fields=id'
     """
-    return _SECRET.sub(lambda m: f"{m.group(1)}=<redacted>", text or "")
+    return redact_text(text)
 
 
 def _graph_error(exc: BaseException):

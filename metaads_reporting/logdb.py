@@ -74,6 +74,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
+from .redaction import redact_text
+
 #: Resolved from the package, never from the working directory. The MCP server
 #: is spawned by its client with THAT process's cwd, so a relative path here
 #: would scatter one database per directory it happened to start in.
@@ -226,6 +228,11 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
+def _error_text(exc: BaseException) -> str:
+    """The error column: an exception's text with any credential redacted."""
+    return redact_text(f"{type(exc).__name__}: {exc}")
+
+
 def _dumps(value: Any) -> str | None:
     if value is None:
         return None
@@ -362,7 +369,7 @@ def record_tool_call(tool_name: str, args: dict[str, Any] | None = None) -> Iter
     try:
         yield
     except BaseException as exc:
-        _finish_tool_call(row_id, started, ok=False, error=f"{type(exc).__name__}: {exc}")
+        _finish_tool_call(row_id, started, ok=False, error=_error_text(exc))
         raise
     else:
         _finish_tool_call(row_id, started, ok=True, error=None)
@@ -435,7 +442,7 @@ def record_api_call(
         raise
     except BaseException as exc:
         _finish_api_call(
-            row_id, started, ok=False, error=f"{type(exc).__name__}: {exc}", slot=slot
+            row_id, started, ok=False, error=_error_text(exc), slot=slot
         )
         raise
     else:

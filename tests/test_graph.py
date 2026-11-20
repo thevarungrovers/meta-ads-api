@@ -68,6 +68,31 @@ def test_a_path_gets_the_version_a_full_url_does_not():
     )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attacker.example/c",
+        "http://graph.facebook.com/v23.0/me",
+        "https://graph.facebook.com@attacker.example/x",
+        "https://graph.facebook.com.attacker.example/x",
+        "HTTPS://attacker.example/x",
+    ],
+)
+def test_an_absolute_url_off_our_host_is_refused_before_anything_is_sent(url):
+    """The credentials go wherever the URL points."""
+    session = FakeSession([FakeResponse({"id": "1"})])
+    with pytest.raises(GraphError, match="Refusing to send credentials"):
+        transport(session).get(url)
+    assert session.calls == []
+
+
+def test_a_paging_cursor_off_our_host_is_not_followed():
+    session = FakeSession([page([{"id": "1"}], next_url="https://attacker.example/next")])
+    with pytest.raises(GraphError, match="Refusing to send credentials"):
+        list(transport(session).paged("act_1/campaigns"))
+    assert len(session.calls) == 1
+
+
 def test_a_read_puts_credentials_in_the_query():
     session = FakeSession([FakeResponse({"id": "1"})])
     transport(session).get("me")
@@ -129,6 +154,34 @@ def test_an_error_names_the_path_and_never_the_query_string():
     assert "/v23.0/act_1/campaigns" in message
     assert "TOK" not in message
     assert "access_token" not in message
+
+
+def test_a_connection_failure_never_carries_the_token(monkeypatch):
+    """requests puts the whole URL, query string and all, in its message."""
+    from metaads_reporting import logdb
+
+    monkeypatch.setattr("metaads_reporting.graph._sleep_backoff", lambda *a, **k: None)
+
+    class Dead:
+        def request(self, method, url, params=None, **kwargs):
+            query = "&".join(f"{k}={v}" for k, v in (params or {}).items())
+            raise requests.ConnectionError(f"Max retries exceeded with url: /v23.0/me?{query} (refused)")
+
+    with pytest.raises(GraphAPIError) as caught:
+        transport(Dead(), app_secret="SEKRIT").get("me", fields="id")
+    message = str(caught.value)
+    assert "ConnectionError" in message and "access_token=<redacted>" in message
+    assert "TOK" not in message and appsecret_proof("TOK", "SEKRIT") not in message
+    # Nothing to show a traceback either: the raw exception is not chained.
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+    stored = [dict(r) for r in logdb.connect().execute("SELECT error FROM api_calls")]
+    assert stored and all("TOK" not in (r["error"] or "") for r in stored)
+
+
+def test_the_token_under_inspection_is_redacted_too():
+    """debug_token takes the same token as input_token."""
+    assert _redact({"input_token": "TOK"}) == {"input_token": "<redacted>"}
 
 
 # --- error mapping ----------------------------------------------------------

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
+
 from metaads_mcp import ledger
 from tests.harness import build_tools
 from tests.test_mcp_creative_path import AD_ID, ADSET_ID, CAMPAIGN_ID, CREATIVE_ID, make_sim
@@ -74,3 +77,25 @@ def test_get_ad_previews_for_a_creative_and_named_formats(monkeypatch):
     out = tool["get_ad_previews"](creative_id=CREATIVE_ID, formats=["INSTAGRAM_STORY"])
     assert [p["ad_format"] for p in out["previews"]] == ["INSTAGRAM_STORY"]
     assert CREATIVE_ID in out["previews"][0]["iframe_url"]
+
+
+@pytest.mark.parametrize(
+    ("name", "arg"),
+    [
+        ("get_campaign", "campaign_id"),
+        ("get_ad_set", "ad_set_id"),
+        ("get_ad", "ad_id"),
+        ("get_ad_creative", "ad_id"),
+        ("get_audience", "audience_id"),
+        ("get_pixel_health", "pixel_id"),
+        ("get_report_run", "report_run_id"),
+    ],
+)
+@pytest.mark.parametrize("bad", ["https://attacker.example/x", "//attacker.example/x", "123?x=1"])
+def test_a_read_tool_refuses_an_id_that_is_a_url_and_sends_nothing(monkeypatch, name, arg, bad):
+    """An id from untrusted text must not steer the token to another host."""
+    tool, sim = tools(monkeypatch)
+    before = len(sim.calls)
+    with pytest.raises(ToolError, match="Refusing Graph path"):
+        tool[name](**{arg: bad})
+    assert not any("attacker" in call["url"] or "x=1" in call["url"] for call in sim.calls[before:])

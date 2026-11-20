@@ -34,11 +34,12 @@ import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import requests
 
 from . import logdb
+from .redaction import redact_params, redact_text
 
 #: Methods that cannot change anything. The entire read-only guarantee of this
 #: package reduces to: nothing outside ``write/`` passes anything else.
@@ -349,11 +350,7 @@ def _redact(params: dict[str, Any]) -> dict[str, Any]:
     The token is a bearer credential with a very long life and no second
     factor. It must not reach the log database, a traceback, or a tool result.
     """
-    hidden = {"access_token", "appsecret_proof", "app_secret", "client_secret"}
-    return {
-        key: ("<redacted>" if key in hidden else value)
-        for key, value in (params or {}).items()
-    }
+    return redact_params(params)
 
 
 class GraphTransport:
@@ -389,12 +386,25 @@ class GraphTransport:
     # -- plumbing ----------------------------------------------------------
 
     def url(self, path: str) -> str:
-        """Absolute URL for a Graph path. An absolute URL passes through.
+        """Absolute URL for a Graph path. An absolute URL on our host passes through.
 
         Paging cursors come back as fully-formed URLs, so this has to accept
         one; everything else is a path like ``act_123/campaigns``.
+
+        The credentials go to whatever this returns, so an absolute URL is
+        refused unless its scheme and host are exactly ``base_url``'s. An id of
+        ``https://attacker.example/x`` handed to a read tool would otherwise
+        send the token there.
         """
-        if path.startswith("http://") or path.startswith("https://"):
+        if path.lower().startswith(("http://", "https://")):
+            ours, theirs = urlsplit(self.base_url), urlsplit(path)
+            if (theirs.scheme.lower(), theirs.netloc.lower()) != (
+                ours.scheme.lower(), ours.netloc.lower()
+            ):
+                raise GraphError(
+                    f"Refusing to send credentials to {theirs.scheme}://{theirs.netloc}: "
+                    f"only {ours.scheme}://{ours.netloc} is a Graph API host."
+                )
             return path
         return f"{self.base_url}/{self.api_version}/{path.lstrip('/')}"
 
@@ -502,9 +512,11 @@ class GraphTransport:
                         timeout=self.timeout,
                     )
                 except requests.RequestException as exc:
+                    # requests puts the full URL in its message, and a read's
+                    # URL carries the token in its query string.
                     last_error = GraphAPIError(
                         f"{method} {_log_path(url)} could not be sent: "
-                        f"{type(exc).__name__}: {exc}",
+                        f"{type(exc).__name__}: {redact_text(str(exc))}",
                         path=_log_path(url),
                     )
                     # A TRANSPORT failure on a write is never retried, whatever
@@ -513,8 +525,10 @@ class GraphTransport:
                     # there is no way to tell from here, and a retry would make
                     # a second change. The ledger's intent-with-no-outcome row
                     # is the honest record of that.
+                    # `from None`: the original exception still holds the
+                    # unredacted URL, and a printed traceback would show it.
                     if method in WRITE_METHODS or attempt + 1 >= attempts:
-                        raise last_error from exc
+                        raise last_error from None
                     _sleep_backoff(attempt)
                     continue
 

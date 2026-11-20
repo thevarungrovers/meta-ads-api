@@ -269,3 +269,16 @@ def test_a_version_1_database_gains_the_two_new_columns(tmp_path):
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
     assert version == str(logdb.SCHEMA_VERSION) == "2"
+
+
+def test_a_recorded_error_never_carries_a_credential():
+    with pytest.raises(RuntimeError):
+        with logdb.record_tool_call("x"):
+            raise RuntimeError("GET /v23.0/me?access_token=EAAB123&input_token=EAAB123")
+    with pytest.raises(RuntimeError):
+        with logdb.record_api_call("GET", service="graph", path="/me", request={}):
+            raise RuntimeError("url: /me?fields=id&appsecret_proof=abc123")
+    errors = [r["error"] for r in rows("tool_calls") + rows("api_calls")]
+    assert len(errors) == 2
+    assert all("EAAB123" not in e and "abc123" not in e for e in errors)
+    assert all("<redacted>" in e for e in errors)
